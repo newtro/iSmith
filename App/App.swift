@@ -39,6 +39,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var bookmarksWindow: NSWindowController?
     private var commands: Commands?
     private var keyMonitor: Any?
+    /// Links handed over before the browser started (a launch to open a link).
+    private var pendingLinks: [URL] = []
 
     init(testing: Bool) {
         self.testing = testing
@@ -61,7 +63,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             commands?.handleTabSwitchKey(event) == true ? nil : event
         }
         browser.start()
+        browser.openIncoming(pendingLinks)
+        pendingLinks = []
+        browser.routing.offerDefaultBrowserIfNeeded()
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// Links and HTML files from other apps (iSmith as the default browser, `open -a`).
+    func application(_ application: NSApplication, open urls: [URL]) {
+        guard !testing else { return }
+        if let browser { browser.openIncoming(urls) } else { pendingLinks += urls }
+    }
+
+    /// "Open in Space ▸" for the frontmost tab.
+    func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
+        browser?.dockMenu()
+    }
+
+    /// Back from macOS's "change your default web browser?" question (or System Settings).
+    func applicationDidBecomeActive(_ notification: Notification) {
+        browser?.routing.refreshDefaultBrowser()
     }
 
     private func present(_ state: WindowState) {

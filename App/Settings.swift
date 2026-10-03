@@ -4,6 +4,8 @@ import SwiftUI
 
 /// The Settings window (⌘,): accounts and sign-ins, general choices, and what each website may do.
 struct SettingsView: View {
+    @EnvironmentObject private var browser: BrowserState
+
     var body: some View {
         TabView {
             AccountsPanel()
@@ -12,6 +14,8 @@ struct SettingsView: View {
                 .tabItem { Label("General", systemImage: "gearshape") }
             WebsiteSettings()
                 .tabItem { Label("Websites", systemImage: "globe") }
+            LinkSettings(routing: browser.routing, store: browser.routing.store)
+                .tabItem { Label("Links", systemImage: "arrow.triangle.branch") }
         }
         .padding(.top, 6)
     }

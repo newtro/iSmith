@@ -225,6 +225,7 @@ private struct SpaceView: View {
                 if showBookmarksBar, browser.data != nil {
                     BookmarksBar(window: window, spaceID: space.id)
                 }
+                RoutingBars(routing: browser.routing, window: window)
                 TabPage(window: window, tab: tab, color: space.color)
                     .id(tab.id)
             } else {

@@ -2,6 +2,7 @@ import AppKit
 import BrowserData
 import Combine
 import Network
+import Routing
 import SignInSync
 import SwiftUI
 import WebKit
@@ -56,6 +57,8 @@ final class BrowserState: NSObject, ObservableObject {
     /// Certificates the user chose to trust on a warning page, until the app quits.
     let certificateExceptions = CertificateExceptions()
     let contextReporter = ContextMenuReporter()
+    /// Link routing (P6): rules, the Default space, last-used spaces and learned rules.
+    let routing: LinkRouter
     private var hibernationTimer: Timer?
     private var networkMonitor: NWPathMonitor?
     /// A background tab (not Keep alive) is unloaded after this long off screen.
@@ -111,6 +114,7 @@ final class BrowserState: NSObject, ObservableObject {
         }
         self.data = data
         downloads = DownloadManager(store: data?.downloads)
+        routing = LinkRouter(store: RoutingStore(fileURL: paths.routingURL))
         let sites = data?.sites
         notifications = WebNotifications(poster: NoNotificationPoster(),
                                          decision: { origin in (try? sites?.decision(.notifications, origin: origin)).flatMap { $0 }.map { $0 == .allow } },
@@ -305,6 +309,7 @@ final class BrowserState: NSObject, ObservableObject {
     /// A tab came on screen: it loads (or reloads after a crash), and dialogs it was holding show.
     private func shown(_ tab: Tab, space spaceID: String) {
         tab.lastShown = Date()
+        if let url = tab.url { routing.store.noteUse(url, space: spaceID) }
         if tab.crashed, tab.crashTimes.count <= Self.maxAutomaticReloads { reloadAfterCrash(tab) }
         ensureLoaded(tab, space: spaceID)
         showPendingDialogs(of: tab)
@@ -401,6 +406,7 @@ final class BrowserState: NSObject, ObservableObject {
         }
         closedTabs[id] = nil
         try? data?.removeSpace(id)
+        routing.store.removeSpace(id)
         spaces.removeAll { $0.id == id }
         for window in windows where window.activeSpaceID == id {
             window.activeSpaceID = nil
@@ -457,7 +463,7 @@ final class BrowserState: NSObject, ObservableObject {
             applyKeepAliveIfNeeded(previous, space: spaceID)
         }
         let request = state == nil ? url.map { URLRequest(url: $0) } : nil
-        Task { await buildWebView(for: tab, space: spaceID, state: state, load: request) }
+        scheduleBuild(tab, space: spaceID, state: state, load: request)
         if focusAddress || (url == nil && state == nil) { window.focusAddress(of: tab.id) }
         scheduleRefresh()
         return tab
@@ -493,7 +499,18 @@ final class BrowserState: NSObject, ObservableObject {
         guard tab.webView == nil, !tab.isBuilding else { return }
         let state = tab.savedState
         let request = state == nil ? tab.url.map { URLRequest(url: $0) } : nil
-        Task { await buildWebView(for: tab, space: spaceID, state: state, load: request) }
+        scheduleBuild(tab, space: spaceID, state: state, load: request)
+    }
+
+    /// Starts making a tab's web view. The tab counts as building from now, not from when the
+    /// task runs, so showing it in the meantime (opening a tab in a space, then selecting the
+    /// space) doesn't make and load a second web view.
+    private func scheduleBuild(_ tab: Tab, space spaceID: String, state: Any?, load request: URLRequest?) {
+        tab.isBuilding = true
+        Task {
+            tab.isBuilding = false
+            await buildWebView(for: tab, space: spaceID, state: state, load: request)
+        }
     }
 
     /// Makes a new web view for a tab in a space's store, with the Keep alive policy the tab calls
@@ -523,10 +540,10 @@ final class BrowserState: NSObject, ObservableObject {
         #endif
         if let state { webView.interactionState = state }
         if let request {
-            webView.load(request)
+            Self.load(request, in: webView)
         } else if state != nil, webView.url == nil, let url = tab.url {
             // History WebKit couldn't read: the page loads from its URL alone.
-            webView.load(URLRequest(url: url))
+            Self.load(URLRequest(url: url), in: webView)
         }
     }
 
@@ -547,13 +564,17 @@ final class BrowserState: NSObject, ObservableObject {
     /// Loads what was typed in the address bar. A page that needs a different Keep alive policy
     /// (opening Outlook in an ordinary tab) gets a new web view first, keeping the tab's history.
     func navigate(_ tab: Tab, in tabs: SpaceTabs, to url: URL, typed: Bool = false) {
-        if typed { tab.typed = (url, Date()) }
+        if typed {
+            tab.typed = (url, Date())
+            // Somewhere else now: a later move to another space says nothing about the link it came from.
+            routing.forget(tab.id)
+        }
         tab.certificateProblem = nil
         tab.retryURL = nil
         let request = URLRequest(url: url)
         let wanted = KeepAlive.isOn(setting: tab.keepAliveSetting, url: url)
         if let webView = tab.webView, tab.appliedKeepAlive == wanted {
-            webView.load(request)
+            Self.load(request, in: webView)
         } else {
             let state: Any? = tab.webView?.interactionState ?? tab.savedState
             Task { await buildWebView(for: tab, space: tabs.spaceID, state: state, load: request) }
@@ -687,7 +708,10 @@ final class BrowserState: NSObject, ObservableObject {
         let sameSpace = source.space == target.space
         // A tab leaving its space closes its web view: the target space's store loads it again.
         let state = sameSpace ? nil : tab.history
-        if !sameSpace { tab.unload() }
+        if !sameSpace {
+            tab.unload()
+            tabMovedToSpace(tab, space: target.space, window: target.window)
+        }
         sourceTabs.take(id)
         if let next = sourceTabs.selected, source.window.activeSpaceID == source.space { ensureLoaded(next, space: source.space) }
         targetTabs.add(tab) { $0.insert(id, before: before, group: group) }
@@ -800,6 +824,7 @@ final class BrowserState: NSObject, ObservableObject {
             tab.typed = nil
         }
         try? data?.history.recordVisit(space: spaceID, url: url, title: title, typed: typed)
+        noteVisibleUse(of: url, tab: tab, space: spaceID)
     }
 
     /// Badges update on the next turn of the run loop; the session is saved a second later, so a
