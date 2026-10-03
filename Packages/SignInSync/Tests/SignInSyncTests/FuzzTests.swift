@@ -55,8 +55,23 @@ final class FuzzTests: XCTestCase {
         for id in spaceIDs { stores[id] = await fx.attach(id) }
         await quiet()
 
-        var steps = 0, quietRounds = 0
+        var steps = 0, quietRounds = 0, switches = 0
         for round in 0..<rounds {
+            // Now and then a space switches accounts between rounds: its data is wiped and it
+            // takes the other account's sign-in, which must then be the only one it holds.
+            if round > 0, rng.next() % 5 == 0 {
+                let (space, provider, other) = Self.switches[Int(rng.next() % UInt64(Self.switches.count))]
+                let def = fx.space(space)
+                var choices = AccountChoice.current(in: def)
+                let current = choices[provider] ?? .shared
+                choices[provider] = current == Self.choice(other) ? Self.choice(Self.switchBack[space]!) : Self.choice(other)
+                await fx.manager.updateSpace(space, name: def.name, color: def.color, home: def.home, choices: choices,
+                                             newNames: [:])?.value
+                switches += 1
+                await quiet()
+                try await assertIsolated("round \(round), after switching \(space)'s \(provider) to \(choices[provider]!)")
+                try await assertConverged("round \(round), after the switch")
+            }
             var isQuiet = rng.next() % 3 != 0
             // The model: each account's cookies as the newest change leaves them.
             var model = vaultState()
@@ -93,7 +108,24 @@ final class FuzzTests: XCTestCase {
         XCTAssertEqual(vaultState(), before, "the vault on disk is what the last run had")
         try await assertConverged("after relaunch")
         try await assertIsolated("after relaunch")
-        print("FUZZ done: \(rounds) rounds (\(quietRounds) quiet), \(steps) steps")
+        print("FUZZ done: \(rounds) rounds (\(quietRounds) quiet), \(steps) steps, \(switches) account switches")
+    }
+
+    /// Account switches the fuzz makes: space, provider, and the choice it flips to (and back from
+    /// to `switchBack`).
+    private static let switches: [(String, String, String)] = [
+        ("contoso-b", "google", "shared"),
+        ("personal", "microsoft", "shared"),
+        ("fabrikam", "microsoft", "ms-contoso"),
+    ]
+    private static let switchBack = ["contoso-b": "local", "personal": "local", "fabrikam": "ms-fabrikam"]
+
+    private static func choice(_ name: String) -> AccountChoice {
+        switch name {
+        case "shared": return .shared
+        case "local": return .local
+        default: return .existing(name)
+        }
     }
 
     // MARK: Steps
@@ -115,14 +147,20 @@ final class FuzzTests: XCTestCase {
             await store.httpCookieStore.setCookie(made)
             if shared { model[account, default: [:]][CookieRecord(made).key] = value }
         }
-        switch rng.next() % 10 {
-        case 0..<3:
+        switch rng.next() % 20 {
+        case 19 where shared:
+            // "Sign out everywhere" from Settings: the account's cookies leave the vault and
+            // every space using it.
+            await fx.manager.signOutEverywhere(account)
+            model[account] = [:]
+            return "sign out everywhere of \(account)"
+        case 0..<6:
             for spec in specs { await set(spec) }
             return "sign-in to \(provider) in \(space)"
-        case 3..<7:
+        case 6..<14:
             await set(specs[Int(rng.next() % UInt64(specs.count))])
             return "rotation of a \(provider) cookie in \(space)"
-        case 7..<9:
+        case 14..<18:
             for c in await store.httpCookieStore.allCookies() where specs.contains(where: { $0.name == c.name }) && ownedBy(provider, c) {
                 await store.httpCookieStore.deleteCookie(c)
                 if shared { model[account]?[CookieRecord(c).key] = nil }

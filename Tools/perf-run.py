@@ -2,18 +2,21 @@
 """P8 performance run: 40 tabs across 4 spaces in the Debug app ("iSmith Dev") on a scratch data
 folder, with local fixture pages. Memory is the RSS of the app plus every WebKit process
 (WebContent, Networking, GPU) macOS counts as the app's (its "responsible" process), summed from
-`ps` at each stage of App/PerfHarness.swift. Space-switch times come from the harness.
+`ps` at each stage of App/PerfHarness.swift, with the summed footprint alongside (see
+Tools/memory.py). Space-switch times come from the harness.
 
-Usage: make build && Tools/perf-run.py [scratch dir]
+Usage: make build && Tools/perf-run.py [--keep] [scratch dir]
+  --keep  leave the run's WebKit stores (in the Debug app's ~/Library/WebKit container) in place;
+          by default they're deleted afterwards. A scratch dir given again reuses its stores.
 
 Never touches the installed iSmith or its data: the Debug app has its own bundle id, and
 ISMITH_DATA_DIR points it at the scratch folder. The Brave import offer is suppressed (a fixture
 Brave root that doesn't exist, plus the first-run marker), so no macOS prompt appears.
 """
-import ctypes
 import json
 import os
-import random
+import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -21,28 +24,14 @@ import tempfile
 import time
 import uuid
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from memory import memory  # noqa: E402
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 APP = os.path.join(ROOT, "build/Build/Products/Debug/iSmith.app")
+DEBUG_STORES = os.path.expanduser("~/Library/WebKit/com.scottsmith.ismith.debug/WebsiteDataStore")
 SPACES = ["Contoso", "Fabrikam", "Personal", "Newtro Studios"]
 TABS_PER_SPACE = 10
-
-libc = ctypes.CDLL(None)
-responsible = libc.responsibility_get_pid_responsible_for_pid
-responsible.restype = ctypes.c_int
-responsible.argtypes = [ctypes.c_int]
-
-
-class RUsage(ctypes.Structure):
-    """rusage_info_v0: phys_footprint is what Activity Monitor shows as a process's Memory."""
-    _fields_ = [("uuid", ctypes.c_uint8 * 16), ("user_time", ctypes.c_uint64), ("system_time", ctypes.c_uint64),
-                ("pkg_idle_wkups", ctypes.c_uint64), ("interrupt_wkups", ctypes.c_uint64), ("pageins", ctypes.c_uint64),
-                ("wired_size", ctypes.c_uint64), ("resident_size", ctypes.c_uint64), ("phys_footprint", ctypes.c_uint64),
-                ("start", ctypes.c_uint64), ("exit", ctypes.c_uint64), ("pad", ctypes.c_uint64 * 64)]
-
-
-def footprint(pid):
-    usage = RUsage()
-    return usage.phys_footprint if libc.proc_pid_rusage(pid, 0, ctypes.byref(usage)) == 0 else 0
 
 
 def page(n):
@@ -71,32 +60,28 @@ def free_port():
     return port
 
 
-def memory(app_pid):
-    """(app RSS MB, WebKit RSS MB, total footprint MB, WebKit process counts) for the app and
-    its WebKit processes."""
-    out = subprocess.run(["ps", "-axo", "pid=,rss=,comm="], capture_output=True, text=True).stdout
-    app = 0
-    webkit = 0
-    foot = 0
-    kinds = {}
-    for line in out.splitlines():
-        parts = line.split(None, 2)
-        if len(parts) < 3:
-            continue
-        pid, rss, comm = int(parts[0]), int(parts[1]), parts[2]
-        if pid == app_pid:
-            app += rss
-            foot += footprint(pid)
-        elif "com.apple.WebKit." in comm and responsible(pid) == app_pid:
-            webkit += rss
-            foot += footprint(pid)
-            kind = comm.rsplit("com.apple.WebKit.", 1)[1]
-            kinds[kind] = kinds.get(kind, 0) + 1
-    return app / 1024, webkit / 1024, foot / 1048576, kinds
+def read_stage(path):
+    """(stage name, app pid), or None while the file is missing or half-written."""
+    try:
+        name, pid = open(path).read().split()
+        return name, int(pid)
+    except (OSError, ValueError):
+        return None
+
+
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
 
 
 def main():
-    scratch = sys.argv[1] if len(sys.argv) > 1 else tempfile.mkdtemp(prefix="ismith-perf-")
+    args = sys.argv[1:]
+    keep = "--keep" in args
+    args = [a for a in args if a != "--keep"]
+    scratch = args[0] if args else tempfile.mkdtemp(prefix="ismith-perf-")
     data = os.path.join(scratch, "data")
     site = os.path.join(scratch, "site")
     os.makedirs(data, exist_ok=True)
@@ -109,8 +94,7 @@ def main():
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     # Four spaces with ten tabs each; the first two tabs of Contoso and Fabrikam are kept
-    # alive (Outlook and Teams in real use).
-    # A rerun on the same folder reuses its spaces' WebKit stores rather than leaving more behind.
+    # alive (Outlook and Teams in real use). A rerun on the same folder reuses its spaces' stores.
     config_path = os.path.join(data, "config.json")
     stores = {}
     if os.path.exists(config_path):
@@ -127,34 +111,36 @@ def main():
             tabs.append({"id": str(uuid.uuid4()).upper(), "url": f"http://127.0.0.1:{port}/p{n}.html",
                          "title": f"Fixture {n}", "keepAlive": True if (i < 2 and j < 2) else None})
         records.append({"space": sid, "selected": tabs[0]["id"], "groups": [], "tabs": tabs})
-    with open(os.path.join(data, "config.json"), "w") as f:
+    with open(config_path, "w") as f:
         json.dump({"version": 2, "providers": [], "accounts": [], "shared": {}, "spaces": spaces}, f)
     with open(os.path.join(data, "session.json"), "w") as f:
         json.dump({"version": 2, "windows": [{"id": str(uuid.uuid4()).upper(), "frame": None,
                                               "activeSpace": spaces[0]["id"], "spaces": records}]}, f)
     open(os.path.join(data, "brave-import-offered"), "w").close()
     stage_file = os.path.join(scratch, "stage")
-    if os.path.exists(stage_file):
-        os.remove(stage_file)
+    for leftover in (stage_file, stage_file + ".json"):
+        if os.path.exists(leftover):
+            os.remove(leftover)
 
     subprocess.run(["open", "-n", "-a", APP, "--env", f"ISMITH_DATA_DIR={data}", "--env", f"ISMITH_PERF_STAGE_FILE={stage_file}",
                     "--env", f"ISMITH_BRAVE_ROOT={os.path.join(scratch, 'no-brave')}"], check=True)
+    app_pid = None
     seen = None
     samples = {}
     started = time.time()
     try:
         while time.time() - started < 900:
             time.sleep(1)
-            if not os.path.exists(stage_file):
+            stage = read_stage(stage_file)
+            if stage is None:
                 continue
-            name, pid = open(stage_file).read().split()
-            pid = int(pid)
+            name, app_pid = stage
             if name == "done":
                 break
             if name != seen:
                 seen = name
                 time.sleep(4)  # let processes that are going away go
-                taken = [memory(pid) for _ in range(3) if time.sleep(1) is None]
+                taken = [memory(app_pid) for _ in range(3) if time.sleep(1) is None]
                 app, webkit, foot, kinds = max(taken, key=lambda m: m[0] + m[1])
                 samples[name] = {"appMB": round(app), "webkitMB": round(webkit), "totalMB": round(app + webkit),
                                  "footprintMB": round(foot), "processes": kinds}
@@ -169,6 +155,21 @@ def main():
         print(json.dumps({"memory": samples, "harness": harness}, indent=2, sort_keys=True))
     finally:
         server.terminate()
+        # The app quits by itself after "done"; if the run failed, it's stopped (by pid: this
+        # run's own Debug process only).
+        if app_pid is not None:
+            for _ in range(30):
+                if not alive(app_pid):
+                    break
+                time.sleep(1)
+            if alive(app_pid):
+                os.kill(app_pid, signal.SIGTERM)
+                time.sleep(3)
+                if alive(app_pid):
+                    os.kill(app_pid, signal.SIGKILL)
+        if not keep and (app_pid is None or not alive(app_pid)):
+            for space in spaces:
+                shutil.rmtree(os.path.join(DEBUG_STORES, space["storeID"].lower()), ignore_errors=True)
 
 
 if __name__ == "__main__":

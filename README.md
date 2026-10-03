@@ -52,7 +52,8 @@ See [DESIGN.md](DESIGN.md) for the model and [BUILD_PLAN.md](BUILD_PLAN.md) for 
 - `Tools/update-blocking-snapshot.sh`: refreshes the filter lists bundled for first launch.
 - `Tools/perf-run.py`: the P8 performance run (after `make build`): 40 fixture tabs across four
   spaces in "iSmith Dev" on a scratch data folder, with the memory of the app and its WebKit
-  processes at each stage and the space-switch times.
+  processes at each stage and the space-switch times. `Tools/memory.py [pid]`: the memory of a
+  running iSmith (default: the installed one) and only its own WebKit processes; read-only.
 - `Packages/Passwords/`: the password store and autofill core (the app's UI is in `App/`): encrypted logins in
   SQLite, origin matching, the capture and fill script, and the `PasswordAutofill` controller.
   [INTEGRATION.md](Packages/Passwords/INTEGRATION.md) lists the app's hook points.
@@ -173,9 +174,11 @@ seed or runs longer.
   your Mac password to use the "Brave Safe Storage" key.
 - **Background tabs** are unloaded after 30 minutes off screen (not Keep alive tabs, and not
   pages you've edited), keeping their history; they reload when selected. Only the 15 most
-  recently shown background tabs stay loaded for longer than a minute, and when macOS is short
-  of memory every background tab that can be is unloaded at once. A page whose process crashed
-  shows Reload.
+  recently shown background tabs stay loaded for longer than a minute (sites allowed to notify
+  keep their 30 minutes). When macOS is short of memory, tabs not shown for 5 minutes are
+  unloaded, and at critical pressure every background tab that can be. A page whose process
+  crashed shows Reload. `Tools/memory.py` prints how much memory iSmith and its WebKit processes
+  use.
 
 ## Updates
 

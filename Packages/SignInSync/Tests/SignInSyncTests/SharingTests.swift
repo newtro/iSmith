@@ -96,6 +96,26 @@ final class SharingTests: XCTestCase {
         check(vault == "newer", "The vault keeps the newer SID")
     }
 
+    /// A change is dated when it happened, not by the page's next unrelated cookie: Contoso
+    /// changes SID, Fabrikam changes it 50 ms later, then Contoso sets a site cookie. The
+    /// newer SID still wins.
+    func testALaterSiteCookieDoesNotRedateAnOlderChange() async {
+        let (m, t, _, p) = await openSpaces()
+        await m.httpCookieStore.setCookie(cookie("SID", "v0", ".google.com", expires: hour))
+        await settle()
+
+        await m.httpCookieStore.setCookie(cookie("SID", "older", ".google.com", expires: hour))
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        await t.httpCookieStore.setCookie(cookie("SID", "newer", ".google.com", expires: hour))
+        try? await Task.sleep(nanoseconds: 30_000_000)
+        await m.httpCookieStore.setCookie(cookie("NID", "noise", ".google.com", expires: hour))
+        await m.httpCookieStore.setCookie(cookie("site", "noise", "example.com", expires: hour))
+        await settle()
+
+        let sids = [await valueOf(m, "SID"), await valueOf(t, "SID"), await valueOf(p, "SID")]
+        check(sids == ["newer", "newer", "newer"], "The newer SID wins despite Contoso' later site cookies: \(sids)")
+    }
+
     func testSignOutSpreadsAndLeavesTheVaultClean() async {
         let (m, t, b, p) = await openSpaces()
         await m.httpCookieStore.setCookie(cookie("SID", "v2", ".google.com", expires: hour))

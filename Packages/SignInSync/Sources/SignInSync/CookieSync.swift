@@ -40,13 +40,16 @@ public final class CookieSync: ObservableObject {
     /// Space id → cookie key → when the page in that space last changed (or deleted) the cookie.
     /// When spaces disagree about a cookie, the newest change wins.
     private var changedAt: [String: [String: Date]] = [:]
-    /// When each store last reported a change, and when the sync last read it: a change found by
-    /// a read is dated by the notification that announced it, or by the read itself if its
-    /// notification hasn't arrived yet.
+    /// The first change notification from each store since the sync last read it. A change found
+    /// by a read is dated by it (or by the read itself, if its notification hasn't arrived yet).
+    /// Reads follow notifications at once, at most ten times a second per store, so a change is
+    /// dated within about 0.1 s even when the page keeps setting other cookies.
     private var notifiedAt: [String: Date] = [:]
-    private var readAt: [String: Date] = [:]
+    /// When each store's last diff started, to space them out.
+    private var diffedAt: [String: Date] = [:]
     /// Spaces with a diff waiting to run.
     private var diffPending: Set<String> = []
+    static let diffSpacing: TimeInterval = 0.1
     /// Work queued or running, so tests can wait for the sync to go quiet.
     private var running = 0
     /// Space id → provider id → the provider cookies that space had right after its last sync.
@@ -113,6 +116,8 @@ public final class CookieSync: ObservableObject {
                 store.httpCookieStore.remove(observer)
             }
             self.pendingScan[spaceID]?.cancel()
+            self.pendingScan[spaceID] = nil
+            self.scanSince[spaceID] = nil
             self.stores[spaceID] = nil
             self.observers[spaceID] = nil
             self.baseline[spaceID] = nil
@@ -151,10 +156,11 @@ public final class CookieSync: ObservableObject {
     /// notifications for the sync's own writes can still arrive afterwards.
     var isIdle: Bool { running == 0 && pendingScan.isEmpty && diffPending.isEmpty }
 
-    /// A store reported a change: its tracked cookies are diffed against `seen` shortly (a burst
-    /// of changes is read once), and a scan is scheduled.
+    /// A store reported a change: its tracked cookies are diffed against `seen` (at once, or
+    /// `diffSpacing` after the last diff; changes meanwhile are read together), and a scan is
+    /// scheduled.
     private func storeChanged(_ spaceID: String) {
-        notifiedAt[spaceID] = Date()
+        if notifiedAt[spaceID] == nil { notifiedAt[spaceID] = Date() }
         scheduleDiff(spaceID)
         scheduleScan(spaceID)
     }
@@ -162,13 +168,16 @@ public final class CookieSync: ObservableObject {
     private func scheduleDiff(_ spaceID: String) {
         guard !diffPending.contains(spaceID) else { return }
         diffPending.insert(spaceID)
+        let wait = max(0, (diffedAt[spaceID] ?? .distantPast).addingTimeInterval(Self.diffSpacing).timeIntervalSinceNow)
         Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 100_000_000)
+            if wait > 0 { try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000)) }
             guard let self else { return }
             await self.enqueue {
                 self.diffPending.remove(spaceID)
                 guard let store = self.stores[spaceID] else { return }
-                self.observe(spaceID, await store.httpCookieStore.allCookies())
+                self.diffedAt[spaceID] = Date()
+                let notified = self.takeNotified(spaceID)
+                self.observe(spaceID, await store.httpCookieStore.allCookies(), notified: notified)
             }
         }
     }
@@ -209,7 +218,6 @@ public final class CookieSync: ObservableObject {
         // What the space holds now is the sync's doing (seeding), not a change by a page.
         forgetChanges(spaceID)
         seen[spaceID] = tracked(await store.httpCookieStore.allCookies())
-        readAt[spaceID] = Date()
         let observer = StoreObserver { [weak self] in self?.storeChanged(spaceID) }
         observers[space.id] = observer
         store.httpCookieStore.add(observer)
@@ -294,7 +302,6 @@ public final class CookieSync: ObservableObject {
             // The wipe and the new accounts' cookies are the sync's own writes.
             forgetChanges(spaceID)
             seen[spaceID] = tracked(await store.httpCookieStore.allCookies())
-            readAt[spaceID] = Date()
         }
         note("\(space.name): switched accounts; browsing data cleared")
     }
@@ -313,23 +320,25 @@ public final class CookieSync: ObservableObject {
         var newest: [String: (at: Date, record: CookieRecord?)] = [:]
 
         for space in members {
+            let notified = takeNotified(space.id)
             let all = await stores[space.id]!.httpCookieStore.allCookies()
-            observe(space.id, all)
+            observe(space.id, all, notified: notified)
             let current = keyed(records(in: all, for: provider))
             currents[space.id] = current
             let base = baseline[space.id]?[provider.id] ?? [:]
             let times = changedAt[space.id] ?? [:]
             var touched = false
-            func offer(_ key: String, _ record: CookieRecord?) {
+            // A change with no time (an adopted sign-in, a cookie that expired) loses to any
+            // change a page made.
+            func offer(_ key: String, _ record: CookieRecord?, at: Date) {
                 touched = true
-                // A change with no time (an adopted sign-in, a cookie that expired) loses to any
-                // change a page made.
-                let at = times[key] ?? .distantPast
                 if let other = newest[key], other.at >= at { return }
                 newest[key] = (at, record)
             }
-            for (key, record) in current where base[key] != record { offer(key, record) }
-            for key in base.keys where current[key] == nil { offer(key, nil) }
+            for (key, record) in current where base[key] != record { offer(key, record, at: times[key] ?? .distantPast) }
+            for (key, record) in base where current[key] == nil {
+                offer(key, nil, at: record.isExpired ? .distantPast : times[key] ?? .distantPast)
+            }
             if touched { changedIn.append(space.name) }
         }
         guard !changedIn.isEmpty else { return }
@@ -404,14 +413,18 @@ public final class CookieSync: ObservableObject {
 
     // MARK: - Per-cookie change times
 
+    /// The store's first change notification since its last read, cleared as a read starts (so a
+    /// notification arriving during the read counts for the next one).
+    private func takeNotified(_ spaceID: String) -> Date? {
+        defer { notifiedAt[spaceID] = nil }
+        return notifiedAt[spaceID]
+    }
+
     /// Diffs a store's tracked cookies against what the sync last saw there. Each cookie the page
-    /// changed or deleted gets the time of the notification that announced it, or now if that
-    /// hasn't arrived yet. A cookie that merely expired isn't a change.
-    private func observe(_ spaceID: String, _ cookies: [HTTPCookie]) {
-        let now = Date()
-        var at = now
-        if let notified = notifiedAt[spaceID], notified > (readAt[spaceID] ?? .distantPast) { at = notified }
-        readAt[spaceID] = now
+    /// changed or deleted gets `notified` (the first notification since the last read), or now
+    /// if no notification has arrived for it yet. A cookie that merely expired isn't a change.
+    private func observe(_ spaceID: String, _ cookies: [HTTPCookie], notified: Date?) {
+        let at = notified ?? Date()
         let current = tracked(cookies)
         let old = seen[spaceID] ?? [:]
         var times = changedAt[spaceID] ?? [:]
@@ -436,7 +449,7 @@ public final class CookieSync: ObservableObject {
         seen[spaceID] = nil
         changedAt[spaceID] = nil
         notifiedAt[spaceID] = nil
-        readAt[spaceID] = nil
+        diffedAt[spaceID] = nil
     }
 
     /// Every unexpired cookie any provider tracks, by key (providers never share a domain).

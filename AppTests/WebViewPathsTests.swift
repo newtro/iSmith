@@ -44,8 +44,6 @@ final class WebViewPathsTests: XCTestCase {
             config.minimumRulesPerSource = 1
             return try BlockingController(configuration: config)
         }
-        let lists = await wired.browser.shields.controller?.ruleLists()
-        XCTAssertEqual(lists?.count, 1, "the fixture list compiled")
     }
 
     override func tearDown() async throws {
@@ -89,7 +87,34 @@ final class WebViewPathsTests: XCTestCase {
         checked.append(name)
     }
 
+    /// At launch the filter lists may still be loading when restored tabs are built, and a
+    /// restored history can load without asking the navigation delegate. The web view gets the
+    /// lists before its first load anyway.
+    func testARestoredTabIsBlockedBeforeTheListsHaveLoaded() async throws {
+        XCTAssertNil(wired.browser.shields.controller?.loadedRuleLists, "the lists haven't loaded yet")
+        // A back/forward history from a plain web view.
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .nonPersistent()
+        let plain = WKWebView(frame: NSRect(x: 0, y: 0, width: 400, height: 300), configuration: configuration)
+        let waiter = NavigationWaiter()
+        plain.navigationDelegate = waiter
+        plain.load(URLRequest(url: url()))
+        await waiter.next()
+        let history = try XCTUnwrap(plain.interactionState as? Data)
+
+        let id = UUID()
+        let window = wired.browser.restoreWindow(WindowRecord(id: UUID(), frame: nil, activeSpace: wired.spaceID, spaces: [
+            SpaceRecord(space: wired.spaceID, selected: id, groups: [], tabs: [
+                TabRecord(id: id, url: url(), title: "Page", group: nil, keepAlive: nil, history: history),
+            ]),
+        ]))
+        let tab = try XCTUnwrap(window.spaces[wired.spaceID]?.tab(id))
+        try await verify("restored tab at launch", tab, space: wired.spaceID)
+    }
+
     func testEveryWayToMakeAWebViewIsFullyWired() async throws {
+        let lists = await wired.browser.shields.controller?.ruleLists()
+        XCTAssertEqual(lists?.count, 1, "the fixture list compiled")
         let browser = wired.browser
         let window = wired.window
         let tabs = wired.tabs

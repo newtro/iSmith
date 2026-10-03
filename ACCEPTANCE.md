@@ -22,20 +22,24 @@ For sign-in problems, also copy the last lines of Settings (⌘,) ▸ Accounts �
    - See: Settings ▸ Links says iSmith is the default. System Settings ▸ Desktop & Dock ▸ Default
      web browser shows iSmith.
    - Report if: the status still says it isn't the default, or Safari/Brave still opens links.
-2. In Settings ▸ Links, add rules (Add Rule…): `dev.azure.com/contoso-dev` → Contoso,
-   `*.fabrikam.com` (or the Fabrikam SharePoint host) → Fabrikam. Set the Default
-   space to Personal.
-3. From the Teams app and from Outlook (the desktop apps, or Outlook in another space), click:
+2. In Settings ▸ Links, add rules (Add Rule…): `dev.azure.com/contoso-dev` → Contoso, and
+   Fabrikam's SharePoint host (the part before the first `/` of a SharePoint link, such as
+   `<tenant>.sharepoint.com`) → Fabrikam. Set the Default space to Personal.
+3. In the Teams and Outlook **desktop apps** (or Slack, Mail), click. (Links clicked inside
+   iSmith stay in the space of the tab you clicked them in; only links from other apps are
+   routed.)
    - an Azure DevOps work item link → opens in **Contoso**, as a new tab, signed in;
    - a Fabrikam SharePoint link → opens in **Fabrikam**, signed in;
    - an Etsy link → opens in the space you last used Etsy in;
    - any other link (a news site) → opens in **Personal**.
    - Report if: a link lands in the wrong space, opens two tabs, opens a blank tab, or asks you
      to sign in.
-4. Click two links of the same kind that have no rule (say two `github.com/<org>/…` links) so
-   they land in Personal, and move each to Contoso (right-click the tab ▸ Move Tab to Space).
+4. From a desktop app, click two links of the same kind that have no rule (say two
+   `github.com/<org>/…` links) so they land in Personal, and move each to Contoso (right-click
+   the tab ▸ Move Tab to Space).
    - See: a bar "Always open … in Contoso?". Click **Always Open in Contoso**; the next such link
-     goes there directly.
+     from a desktop app goes there directly.
+   - Report if: no bar after the second move, or the next link still opens in Personal.
 
 ## 2. Outlook in Contoso and Fabrikam after a reboot
 
@@ -49,12 +53,13 @@ For sign-in problems, also copy the last lines of Settings (⌘,) ▸ Accounts �
 
 ## 3. A new space is already signed in
 
-1. Click "+" in the rail, name it "Test", leave every account on **Shared**, Create.
+1. Click "+" in the rail, name it "Test", leave every account on **Shared with all spaces**, and
+   click **Create Space**.
 2. In it, open gmail.com, outlook.office.com and github.com.
    - See: all three signed in. Gmail and Outlook may show their account picker once; pick the
      account and it's remembered for that space.
    - Report if: any of them asks for a password.
-3. Delete the Test space afterwards (right-click ▸ Delete).
+3. Delete the Test space afterwards (right-click it in the rail ▸ Delete Space…).
 
 ## 4. Etsy shop 1 in Personal, shop 2 in Newtro Studios
 
@@ -81,6 +86,7 @@ For sign-in problems, also copy the last lines of Settings (⌘,) ▸ Accounts �
    - Report if: no popover, the wrong login, or no save bar (name the site).
 3. In ⌥⌘P, click Show on one password.
    - See: Touch ID or your Mac password is asked first.
+   - Report if: the password shows without asking.
 
 ## 6. Ads blocked, work sites fine
 
@@ -100,11 +106,13 @@ For sign-in problems, also copy the last lines of Settings (⌘,) ▸ Accounts �
      colours (collapsed still collapsed), and Back still works in a tab you'd navigated in. Only
      the visible and Keep alive tabs load straight away; others load when you click them.
    - Report if: anything is missing or out of place.
-3. Leave it running for an hour with all 40 tabs. Activity Monitor ▸ Memory: search "iSmith" and
-   "WebKit". The total should stay well under 3 GB once you've left most tabs alone (background
-   tabs are unloaded after 30 minutes, and beyond the 15 most recent after a minute). Switching
-   spaces should feel instant.
-   - Report if: memory stays above 3 GB, or a space switch visibly lags.
+3. Leave it running for an hour with all 40 tabs, then in the repo run `Tools/memory.py`. It
+   sums iSmith and only its own WebKit processes (Activity Monitor lists those separately and
+   mixes in Mail's and Safari's). The total should stay under 3 GB once you've left most tabs
+   alone (background tabs are unloaded after 30 minutes, and beyond the 15 most recently shown
+   after a minute). Switching spaces should feel instant.
+   - Report if: the total stays above 3 GB (send the line it prints), or a space switch visibly
+     lags.
 
 ## 8. Everyday browser features and a Teams call
 

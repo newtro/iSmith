@@ -81,6 +81,8 @@ final class HardeningTests: XCTestCase {
         try await Task.sleep(nanoseconds: 300_000_000)
         XCTAssertEqual(attached.count, 1, "one web view, not two")
         XCTAssertTrue(tab.webView === attached.first)
+        try await wired.waitForLoad(tab, path: "/page.html")
+        XCTAssertEqual(tab.webView?.url?.query, "2", "the build asked for last wins")
     }
 
     /// ⌘⇧T in a space with no closed tab brings back a closed window only if that window closed

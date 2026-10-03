@@ -3,7 +3,7 @@ import AppKit
 import QuartzCore
 
 /// P8's performance run, in Debug builds only, started by `ISMITH_PERF_STAGE_FILE=<path>` on a
-/// scratch `ISMITH_DATA_DIR` whose session holds the tabs to measure (`Tools/perf-run.sh` sets
+/// scratch `ISMITH_DATA_DIR` whose session holds the tabs to measure (`Tools/perf-run.py` sets
 /// it up). It drives the browser the way a day of use does, writing each stage's name to the
 /// stage file and holding there while the script sums the memory of the app and its WebKit
 /// processes:
@@ -27,7 +27,7 @@ enum PerfHarness {
     private static func run(_ browser: BrowserState, stageFile: URL, hold: TimeInterval) async {
         var results: [String: Any] = [:]
         func stage(_ name: String) async {
-            try? Data("\(name) \(ProcessInfo.processInfo.processIdentifier)\n".utf8).write(to: stageFile)
+            try? Data("\(name) \(ProcessInfo.processInfo.processIdentifier)\n".utf8).write(to: stageFile, options: .atomic)
             NSLog("iSmith perf: stage \(name)")
             try? await Task.sleep(nanoseconds: UInt64(hold * 1_000_000_000))
         }
