@@ -1,0 +1,64 @@
+name: iSmith
+options:
+  bundleIdPrefix: com.scottsmith
+  deploymentTarget:
+    macOS: "14.0"
+packages:
+  SignInSync:
+    path: Packages/SignInSync
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    exactVersion: 2.10.0
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+    DEVELOPMENT_TEAM: 232A77467G
+    CODE_SIGN_STYLE: Automatic
+targets:
+  iSmith:
+    type: application
+    platform: macOS
+    sources: [App]
+    dependencies:
+      - package: SignInSync
+      - package: Sparkle
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: iSmith
+        CFBundleShortVersionString: "0.1"
+        CFBundleVersion: "1"
+        LSApplicationCategoryType: public.app-category.productivity
+        NSPrincipalClass: NSApplication
+        NSCameraUsageDescription: Websites you allow can use the camera, for example for Teams calls.
+        NSMicrophoneUsageDescription: Websites you allow can use the microphone, for example for Teams calls.
+        NSLocationUsageDescription: Websites you allow can use your location, for example to find nearby places.
+        SUFeedURL: https://raw.githubusercontent.com/newtro/iSmith-releases/main/appcast.xml
+        SUEnableAutomaticChecks: false
+        SUPublicEDKey: Ezl8lB6Z6JnAQ08oLRWy8uOWsNpPxzlNEV4d5+xFyEU=
+    entitlements:
+      path: App/iSmith.entitlements
+      properties:
+        com.apple.security.device.camera: true
+        com.apple.security.device.audio-input: true
+        com.apple.security.personal-information.location: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.scottsmith.ismith
+        PRODUCT_NAME: iSmith
+        ENABLE_HARDENED_RUNTIME: YES
+    scheme:
+      testTargets: [iSmithTests]
+  iSmithTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources: [AppTests]
+    dependencies:
+      - target: iSmith
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.scottsmith.ismith.tests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: $(BUILT_PRODUCTS_DIR)/iSmith.app/Contents/MacOS/iSmith
+        BUNDLE_LOADER: $(TEST_HOST)
