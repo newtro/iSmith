@@ -1,4 +1,5 @@
 import AppKit
+import BrowserData
 import Combine
 import SignInSync
 import SwiftUI
@@ -39,6 +40,19 @@ final class BrowserState: NSObject, ObservableObject {
     private var switching: [String: (token: UUID, task: Task<Void, Never>)] = [:]
     private var refreshScheduled = false
     private var saveTask: Task<Void, Never>?
+    /// History, bookmarks, site settings and downloads. nil if browser.sqlite couldn't be opened
+    /// (the browser still works, without them).
+    let data: BrowserDatabase?
+    let downloads: DownloadManager
+    let notifications: WebNotifications
+    /// Certificates the user chose to trust on a warning page, until the app quits.
+    let certificateExceptions = CertificateExceptions()
+    let contextReporter = ContextMenuReporter()
+    private var hibernationTimer: Timer?
+    /// A background tab (not Keep alive) is unloaded after this long off screen.
+    static let hibernateAfter: TimeInterval = 30 * 60
+    /// History older than this is removed at launch.
+    static let historyKept: TimeInterval = 365 * 24 * 3600
 
     /// Safari's user agent, so sites (Google sign-in in particular) treat the app as Safari
     /// rather than an embedded web view.
@@ -77,7 +91,36 @@ final class BrowserState: NSObject, ObservableObject {
         manager = SpaceManager(config: config, vault: vault, sync: sync)
         spaces = config.spaces.map(SpaceState.init)
         session = SessionStore(fileURL: paths.sessionURL)
+        var data: BrowserDatabase?
+        do {
+            data = try BrowserDatabase(fileURL: paths.browserDataURL)
+            if let aside = data?.movedAside { NSLog("iSmith: browser.sqlite couldn't be opened; kept a copy at \(aside.path)") }
+        } catch {
+            NSLog("iSmith: browser.sqlite couldn't be opened (\(error)); history and bookmarks are off")
+        }
+        self.data = data
+        downloads = DownloadManager(store: data?.downloads)
+        let sites = data?.sites
+        notifications = WebNotifications(poster: NoNotificationPoster(),
+                                         decision: { origin in (try? sites?.decision(.notifications, origin: origin)).flatMap { $0 }.map { $0 == .allow } },
+                                         saveDecision: { origin, allow in try? sites?.setDecision(allow ? .allow : .deny, for: .notifications, origin: origin) },
+                                         context: { _ in nil })
         super.init()
+        notifications.context = { [weak self] webView in
+            guard let self, let (_, tabs, tab) = self.owner(of: webView) else { return nil }
+            return (tab.id, self.space(tabs.spaceID)?.def.name ?? "")
+        }
+        notifications.ask = { [weak self] webView, host, _, answer in
+            guard let self, let (_, _, tab) = self.owner(of: webView) else { return answer(.dismissed) }
+            self.ask(SitePrompt(key: "notifications:\(host)", symbol: "bell", message: "\(host) wants to show notifications.",
+                                allowTitle: "Allow", handler: answer), in: tab)
+        }
+        downloads.choosePlace = { [weak self] name, webView in
+            await self?.chooseSaveLocation(name: name, webView: webView)
+        }
+        downloads.started = { [weak self] _ in
+            self?.currentWindow?.downloadsShown = true
+        }
         AppDelegate.flush = { [weak self, sync] in
             self?.quitting = true
             self?.saveSessionNow()
@@ -101,10 +144,37 @@ final class BrowserState: NSObject, ObservableObject {
 
     /// Restores the saved windows, or opens one on the first space.
     func start() {
+        let poster = SystemNotificationPoster()
+        poster.onClick = { [weak self] id in
+            guard let self, let tab = self.notifications.clicked(id) else { return }
+            self.focusTab(tab)
+        }
+        poster.onDismiss = { [weak self] id in self?.notifications.dismissed(id) }
+        notifications.poster = poster
         let saved = session.load().map { SessionStore.pruned($0, spaces: Set(config.spaces.map(\.id))) }
         for record in saved?.windows ?? [] { restoreWindow(record) }
         if windows.isEmpty { newWindow() }
         refresh()
+        hibernationTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.hibernateIdleTabs() }
+        }
+        if let history = data?.history {
+            let cutoff = Date().addingTimeInterval(-Self.historyKept)
+            Task.detached(priority: .background) { try? history.prune(olderThan: cutoff) }
+        }
+    }
+
+    /// Brings a tab to the front: its window, space and the tab itself (a notification click).
+    func focusTab(_ id: UUID) {
+        for window in windows {
+            for tabs in window.spaces.values where tabs.tab(id) != nil {
+                if window.activeSpaceID != tabs.spaceID, let space = space(tabs.spaceID) { select(space, in: window) }
+                selectTab(id, in: tabs)
+                NSApp.activate(ignoringOtherApps: true)
+                window.window?.makeKeyAndOrderFront(nil)
+                return
+            }
+        }
     }
 
     /// ⌘N. With no browser window open, the last closed one comes back instead, so its tabs
@@ -211,9 +281,17 @@ final class BrowserState: NSObject, ObservableObject {
             // last tab there was closed and the space is selected again).
             openTab(in: window, space: space.id, url: URL(string: space.def.home), focusAddress: space.def.home.isEmpty)
         } else if let tab = tabs.selected {
-            ensureLoaded(tab, space: space.id)
+            shown(tab, space: space.id)
         }
         scheduleRefresh()
+    }
+
+    /// A tab came on screen: it loads (or reloads after a crash), and dialogs it was holding show.
+    private func shown(_ tab: Tab, space spaceID: String) {
+        tab.lastShown = Date()
+        if tab.crashed, tab.crashTimes.count <= Self.maxAutomaticReloads { reloadAfterCrash(tab) }
+        ensureLoaded(tab, space: spaceID)
+        showPendingDialogs(of: tab)
     }
 
     func select(index: Int, in window: WindowState) {
@@ -306,6 +384,7 @@ final class BrowserState: NSObject, ObservableObject {
             window.removeSpace(id)
         }
         closedTabs[id] = nil
+        try? data?.removeSpace(id)
         spaces.removeAll { $0.id == id }
         for window in windows where window.activeSpaceID == id {
             window.activeSpaceID = nil
@@ -345,18 +424,22 @@ final class BrowserState: NSObject, ObservableObject {
     /// `state` is another web view's `interactionState` (a duplicated tab's history).
     @discardableResult
     func openTab(in window: WindowState, space spaceID: String, url: URL?, title: String? = nil,
-                 keepAlive: Bool? = nil, state: Any? = nil, focusAddress: Bool = false,
+                 keepAlive: Bool? = nil, state: Any? = nil, focusAddress: Bool = false, select: Bool = true,
                  place: ((inout TabLayout, UUID) -> Void)? = nil) -> Tab {
         let tabs = window.tabs(for: spaceID)
         hook(tabs)
         let previous = tabs.selected
         let tab = Tab(url: url, title: title, keepAlive: keepAlive)
         hook(tab)
+        let select = select || previous == nil
         tabs.add(tab) { layout in
             if let place { place(&layout, tab.id) } else { layout.insert(tab.id) }
-            layout.select(tab.id)
+            if select { layout.select(tab.id) }
         }
-        if let previous { applyKeepAliveIfNeeded(previous, space: spaceID) }
+        if select, let previous {
+            previous.lastShown = Date()
+            applyKeepAliveIfNeeded(previous, space: spaceID)
+        }
         let request = state == nil ? url.map { URLRequest(url: $0) } : nil
         Task { await buildWebView(for: tab, space: spaceID, state: state, load: request) }
         if focusAddress || (url == nil && state == nil) { window.focusAddress(of: tab.id) }
@@ -375,8 +458,11 @@ final class BrowserState: NSObject, ObservableObject {
         let previous = tabs.selected
         tabs.update { $0.select(id) }
         guard let tab = tabs.selected else { return }
-        if let previous, previous !== tab { applyKeepAliveIfNeeded(previous, space: tabs.spaceID) }
-        ensureLoaded(tab, space: tabs.spaceID)
+        if let previous, previous !== tab {
+            previous.lastShown = Date()
+            applyKeepAliveIfNeeded(previous, space: tabs.spaceID)
+        }
+        shown(tab, space: tabs.spaceID)
     }
 
     func selectNeighbor(forward: Bool, in window: WindowState) {
@@ -385,10 +471,13 @@ final class BrowserState: NSObject, ObservableObject {
         selectTab(next, in: tabs)
     }
 
-    /// Creates the tab's web view if it has none, then loads its page.
+    /// Creates the tab's web view if it has none, then loads its page: from its saved back/forward
+    /// history when it has one (a restored or hibernated tab), else from its URL.
     func ensureLoaded(_ tab: Tab, space spaceID: String) {
         guard tab.webView == nil, !tab.isBuilding else { return }
-        Task { await buildWebView(for: tab, space: spaceID, state: nil, load: tab.url.map { URLRequest(url: $0) }) }
+        let state = tab.savedState
+        let request = state == nil ? tab.url.map { URLRequest(url: $0) } : nil
+        Task { await buildWebView(for: tab, space: spaceID, state: state, load: request) }
     }
 
     /// Makes a new web view for a tab in a space's store, with the Keep alive policy the tab calls
@@ -417,7 +506,12 @@ final class BrowserState: NSObject, ObservableObject {
         NSLog("iSmith: web view for \(request?.url?.host ?? tab.url?.host ?? "empty tab") in \(spaceID), keep alive \(keepAlive)")
         #endif
         if let state { webView.interactionState = state }
-        if let request { webView.load(request) }
+        if let request {
+            webView.load(request)
+        } else if state != nil, webView.url == nil, let url = tab.url {
+            // History WebKit couldn't read: the page loads from its URL alone.
+            webView.load(URLRequest(url: url))
+        }
     }
 
     /// Each web view gets its own preferences object. WebKit shares a configuration's preferences
@@ -428,12 +522,17 @@ final class BrowserState: NSObject, ObservableObject {
         // Keep alive: never throttled or suspended in the background, so Teams calls ring and
         // mail counts update.
         preferences.inactiveSchedulingPolicy = keepAlive ? .none : .throttle
+        // Video players can go full screen (and picture in picture, which WebKit's controls offer).
+        preferences.isElementFullscreenEnabled = true
+        preferences.isFraudulentWebsiteWarningEnabled = true
         return preferences
     }
 
     /// Loads what was typed in the address bar. A page that needs a different Keep alive policy
     /// (opening Outlook in an ordinary tab) gets a new web view first, keeping the tab's history.
-    func navigate(_ tab: Tab, in tabs: SpaceTabs, to url: URL) {
+    func navigate(_ tab: Tab, in tabs: SpaceTabs, to url: URL, typed: Bool = false) {
+        if typed { tab.typed = (url, Date()) }
+        tab.certificateProblem = nil
         let request = URLRequest(url: url)
         let wanted = KeepAlive.isOn(setting: tab.keepAliveSetting, url: url)
         if let webView = tab.webView, tab.appliedKeepAlive == wanted {
@@ -467,7 +566,7 @@ final class BrowserState: NSObject, ObservableObject {
 
     /// A popup and the tab that opened it, while both are open: replacing either web view would
     /// cut the link between them (a sign-in popup posting its result back).
-    private func isLinked(_ tab: Tab) -> Bool {
+    func isLinked(_ tab: Tab) -> Bool {
         let open = windows.flatMap(\.allTabs)
         if let opener = tab.openerID, open.contains(where: { $0.id == opener && $0.webView != nil }) { return true }
         return open.contains { $0.openerID == tab.id && $0.webView != nil }
@@ -481,18 +580,19 @@ final class BrowserState: NSObject, ObservableObject {
         let ids = tabs.layout.ids
         var closed = ClosedTab(url: tab.url, title: tab.title, group: tabs.layout.groupID(of: id),
                                before: index.flatMap { ids.indices.contains($0 + 1) ? ids[$0 + 1] : nil },
-                               keepAlive: tab.keepAliveSetting, state: tab.webView?.interactionState)
+                               keepAlive: tab.keepAliveSetting, state: tab.history)
         if closed.url == nil, closed.state == nil { closed.title = "" } // an empty tab isn't worth reopening
         if !closed.title.isEmpty || closed.url != nil {
             closedTabs[tabs.spaceID, default: []].append(closed)
             if closedTabs[tabs.spaceID]!.count > Self.maxClosedTabs { closedTabs[tabs.spaceID]!.removeFirst() }
         }
+        if let webView = tab.webView { notifications.forget(webView) }
         tab.unload()
         tabs.take(id)
         if let returnTo {
             tabs.update { $0.select(returnTo) }
         }
-        if let next = tabs.selected { ensureLoaded(next, space: tabs.spaceID) }
+        if let next = tabs.selected { shown(next, space: tabs.spaceID) }
         scheduleRefresh()
     }
 
@@ -531,7 +631,7 @@ final class BrowserState: NSObject, ObservableObject {
     func duplicate(_ id: UUID, in tabs: SpaceTabs, window: WindowState) {
         guard let tab = tabs.tab(id) else { return }
         openTab(in: window, space: tabs.spaceID, url: tab.url, title: tab.title, keepAlive: tab.keepAliveSetting,
-                state: tab.webView?.interactionState) { layout, new in
+                state: tab.history) { layout, new in
             layout.insert(new, after: id)
         }
     }
@@ -569,7 +669,7 @@ final class BrowserState: NSObject, ObservableObject {
         hook(targetTabs)
         let sameSpace = source.space == target.space
         // A tab leaving its space closes its web view: the target space's store loads it again.
-        let state = sameSpace ? nil : tab.webView?.interactionState
+        let state = sameSpace ? nil : tab.history
         if !sameSpace { tab.unload() }
         sourceTabs.take(id)
         if let next = sourceTabs.selected, source.window.activeSpaceID == source.space { ensureLoaded(next, space: source.space) }
@@ -643,13 +743,32 @@ final class BrowserState: NSObject, ObservableObject {
     // MARK: - Badges and saving
 
     /// Hooks a space's tabs to the badges and the saved session.
-    private func hook(_ tabs: SpaceTabs) {
+    func hook(_ tabs: SpaceTabs) {
         tabs.changed = { [weak self] in self?.scheduleRefresh() }
         for tab in tabs.ordered { hook(tab) }
     }
 
-    private func hook(_ tab: Tab) {
+    func hook(_ tab: Tab) {
         tab.changed = { [weak self] in self?.scheduleRefresh() }
+        tab.retitled = { [weak self, weak tab] title in
+            guard let self, let tab, let url = tab.webView?.url, let spaceID = self.owner(of: tab)?.1.spaceID else { return }
+            try? self.data?.history.updateTitle(space: spaceID, url: url, title: title)
+        }
+        tab.movedInPage = { [weak self, weak tab] url in
+            guard let self, let tab, let spaceID = self.owner(of: tab)?.1.spaceID else { return }
+            self.recordVisit(url, title: tab.webView?.title, tab: tab, space: spaceID)
+        }
+    }
+
+    /// Adds a page to the space's history (http and https only).
+    func recordVisit(_ url: URL, title: String?, tab: Tab, space spaceID: String) {
+        guard ["http", "https"].contains(url.scheme?.lowercased() ?? "") else { return }
+        var typed = false
+        if let t = tab.typed, Date().timeIntervalSince(t.at) < 30 {
+            typed = true
+            tab.typed = nil
+        }
+        try? data?.history.recordVisit(space: spaceID, url: url, title: title, typed: typed)
     }
 
     /// Badges update on the next turn of the run loop; the session is saved a second later, so a
@@ -693,8 +812,12 @@ final class BrowserState: NSObject, ObservableObject {
 
     // MARK: - Web views
 
-    private func makeWebView(_ config: WKWebViewConfiguration) -> WKWebView {
-        let webView = WKWebView(frame: .zero, configuration: config)
+    func makeWebView(_ config: WKWebViewConfiguration) -> WKWebView {
+        configure(config.userContentController)
+        let webView = BrowserWebView(frame: .zero, configuration: config)
+        webView.contextItems = { [weak self] webView, element in
+            self?.contextItems(for: webView, element: element) ?? .init()
+        }
         webView.customUserAgent = Self.userAgent
         webView.uiDelegate = self
         webView.navigationDelegate = self
@@ -720,78 +843,5 @@ final class BrowserState: NSObject, ObservableObject {
             for tabs in window.spaces.values where tabs.tab(tab.id) === tab { return (window, tabs) }
         }
         return nil
-    }
-}
-
-extension BrowserState: WKUIDelegate {
-    /// Popups (OAuth windows, target=_blank) open as a tab next to their opener, in its group and
-    /// space. WebKit requires the returned view to use the configuration it passes, which carries
-    /// the opener's data store; it gets its own preferences so its Keep alive is its own.
-    func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
-                 for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
-        guard let (window, tabs, opener) = owner(of: webView) else { return nil }
-        let keepAlive = KeepAlive.isAutomatic(navigationAction.request.url)
-        configuration.preferences = Self.preferences(keepAlive: keepAlive)
-        let tab = Tab(url: navigationAction.request.url)
-        tab.openerID = opener.id
-        hook(tab)
-        let popup = makeWebView(configuration)
-        tab.attach(popup, keepAlive: keepAlive)
-        tabs.add(tab) { $0.insert(tab.id, after: opener.id) }
-        if window.activeSpaceID == tabs.spaceID { selectTab(tab.id, in: tabs) }
-        return popup
-    }
-
-    func webViewDidClose(_ webView: WKWebView) {
-        guard let (_, tabs, tab) = owner(of: webView) else { return }
-        closeTab(tab.id, in: tabs)
-    }
-
-    func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String,
-                 initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping () -> Void) {
-        let alert = NSAlert()
-        alert.messageText = frame.request.url?.host ?? "Alert"
-        alert.informativeText = message
-        alert.runModal()
-        completionHandler()
-    }
-
-    func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String,
-                 initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) {
-        let alert = NSAlert()
-        alert.messageText = frame.request.url?.host ?? "Confirm"
-        alert.informativeText = message
-        alert.addButton(withTitle: "OK")
-        alert.addButton(withTitle: "Cancel")
-        completionHandler(alert.runModal() == .alertFirstButtonReturn)
-    }
-}
-
-extension BrowserState: WKNavigationDelegate {
-    /// App deep links (msteams:, ms-outlook:) are dropped for now so pages stay in the browser;
-    /// P2 opens them in their apps after asking.
-    ///
-    /// A tab following a link or redirect to a Keep alive page (Outlook, Teams, Gmail) gets a new
-    /// web view with that policy, which loads the same request; WebKit reads the policy only when a
-    /// web view is created. Form posts can't be replayed safely, so they go ahead and the policy
-    /// follows once the tab is in the background.
-    func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
-                 decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-        let url = navigationAction.request.url
-        let scheme = url?.scheme?.lowercased() ?? "about"
-        guard ["http", "https", "about", "data", "blob"].contains(scheme) else { return decisionHandler(.cancel) }
-        if navigationAction.targetFrame?.isMainFrame == true,
-           navigationAction.navigationType != .backForward,
-           (navigationAction.request.httpMethod ?? "GET").uppercased() == "GET",
-           let (_, tabs, tab) = owner(of: webView),
-           tab.appliedKeepAlive == false, !tab.isBuilding, !isLinked(tab),
-           KeepAlive.isOn(setting: tab.keepAliveSetting, url: url) {
-            decisionHandler(.cancel)
-            let state = webView.interactionState
-            let request = navigationAction.request
-            Task { await buildWebView(for: tab, space: tabs.spaceID, state: state, load: request) }
-            return
-        }
-        decisionHandler(.allow)
     }
 }

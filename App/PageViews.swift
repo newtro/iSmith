@@ -1,0 +1,309 @@
+import AppKit
+import BrowserData
+import SecurityInterface
+import SwiftUI
+import WebKit
+
+/// A page's question (permission, app link) as a bar above the page.
+struct PromptBar: View {
+    @EnvironmentObject private var browser: BrowserState
+    @ObservedObject var tab: Tab
+
+    var body: some View {
+        if let prompt = tab.prompts.first {
+            HStack(spacing: 10) {
+                Image(systemName: prompt.symbol).foregroundStyle(.secondary)
+                Text(prompt.message).lineLimit(2).fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 8)
+                if let deny = prompt.denyTitle {
+                    Button(deny) { browser.answer(prompt, .deny, in: tab) }
+                        .keyboardShortcut(.cancelAction)
+                }
+                Button(prompt.allowTitle) { browser.answer(prompt, .allow, in: tab) }
+                    .buttonStyle(.borderedProminent)
+                if tab.prompts.count > 1 {
+                    Text("+\(tab.prompts.count - 1)").font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            .font(.system(size: 12.5))
+            .padding(.horizontal, 12).padding(.vertical, 7)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor)))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color(nsColor: .separatorColor)))
+            .padding(.horizontal, 8).padding(.bottom, 6)
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel("Site question")
+        }
+    }
+}
+
+/// Find in page: ⌘F shows it, Return and ⌘G find the next match, ⇧Return and ⌘⇧G the previous,
+/// Escape closes it.
+struct FindBar: View {
+    @EnvironmentObject private var browser: BrowserState
+    @ObservedObject var window: WindowState
+    @ObservedObject var tab: Tab
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+            TextField("Find on page", text: $tab.findText)
+                .textFieldStyle(.roundedBorder)
+                .frame(maxWidth: 280)
+                .focused($focused)
+                .onSubmit { browser.find(tab, backwards: NSEvent.modifierFlags.contains(.shift)) }
+                .onExitCommand { browser.hideFind(tab) }
+                .onChange(of: tab.findText) { _, _ in browser.find(tab) }
+            Button { browser.find(tab, backwards: true) } label: { Image(systemName: "chevron.up") }
+                .help("Previous  ⇧⌘G")
+            Button { browser.find(tab) } label: { Image(systemName: "chevron.down") }
+                .help("Next  ⌘G")
+            if tab.findResult == false {
+                Text("Not found").font(.caption).foregroundStyle(.red)
+            }
+            Spacer()
+            Button("Done") { browser.hideFind(tab) }
+        }
+        .buttonStyle(.borderless)
+        .padding(.horizontal, 12).padding(.bottom, 6)
+        .onAppear { focused = true }
+        .onReceive(window.findFocusRequests) { focused = true }
+    }
+}
+
+/// Shown over the page: the web content process died.
+struct CrashedView: View {
+    @EnvironmentObject private var browser: BrowserState
+    @ObservedObject var tab: Tab
+
+    var body: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "exclamationmark.triangle").font(.system(size: 34)).foregroundStyle(.secondary)
+            Text("This page stopped working").font(.title3)
+            Text(tab.url?.host ?? "").foregroundStyle(.secondary)
+            Button("Reload") { browser.reloadAfterCrash(tab) }
+                .keyboardShortcut(.defaultAction)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(nsColor: .textBackgroundColor))
+    }
+}
+
+/// Shown instead of the page when a load failed: a certificate warning (with "Visit This
+/// Website" under Details) or a site that couldn't be reached.
+struct PageProblemView: View {
+    @EnvironmentObject private var browser: BrowserState
+    @ObservedObject var tab: Tab
+    let problem: CertificateProblem
+    @State private var details = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Image(systemName: problem.isCertificate ? "lock.trianglebadge.exclamationmark" : "wifi.exclamationmark")
+                .font(.system(size: 38)).foregroundStyle(problem.isCertificate ? .red : .secondary)
+            Text(problem.isCertificate ? "This connection isn't private" : "iSmith can't open this page")
+                .font(.title2.weight(.semibold))
+            Text(problem.isCertificate
+                 ? "\(problem.url.host ?? "This site") may be pretending to be the site you want, to steal passwords or other information. \(problem.message)"
+                 : "\(problem.url.host ?? "The site") couldn't be reached. \(problem.message)")
+                .fixedSize(horizontal: false, vertical: true)
+                .foregroundStyle(.secondary)
+            HStack(spacing: 10) {
+                if problem.isCertificate {
+                    Button("Go Back") { goBack() }.keyboardShortcut(.defaultAction)
+                    Button(details ? "Hide Details" : "Show Details") { details.toggle() }
+                } else {
+                    Button("Try Again") {
+                        tab.certificateProblem = nil
+                        tab.webView?.load(URLRequest(url: problem.url))
+                    }
+                    .keyboardShortcut(.defaultAction)
+                }
+            }
+            if details, let trust = problem.trust {
+                VStack(alignment: .leading, spacing: 8) {
+                    Button("Show Certificate") { showCertificate(trust) }
+                    Button("Visit This Website Anyway") { browser.proceedDespiteCertificate(tab) }
+                        .foregroundStyle(.red)
+                    Text("Only for this run of iSmith, and only for this certificate.").font(.caption).foregroundStyle(.secondary)
+                }
+                .buttonStyle(.link)
+            }
+        }
+        .frame(maxWidth: 520)
+        .padding(32)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(nsColor: .textBackgroundColor))
+    }
+
+    private func goBack() {
+        tab.certificateProblem = nil
+        if let webView = tab.webView, webView.canGoBack { webView.goBack() }
+    }
+
+    private func showCertificate(_ trust: SecTrust) {
+        guard let window = tab.webView?.window ?? NSApp.keyWindow else { return }
+        SFCertificateTrustPanel().beginSheet(for: window, modalDelegate: nil, didEnd: nil, contextInfo: nil, trust: trust,
+                                             message: problem.url.host ?? "")
+    }
+}
+
+// MARK: - Bookmarks bar
+
+/// The bookmarks bar: the space's "Bookmarks Bar" folder; folders open as menus.
+struct BookmarksBar: View {
+    @EnvironmentObject private var browser: BrowserState
+    @ObservedObject var window: WindowState
+    let spaceID: String
+    @State private var items: [BookmarkTree] = []
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 2) {
+                if items.isEmpty {
+                    Text("Bookmarks you add to the bar appear here (⌘D)")
+                        .font(.caption).foregroundStyle(.tertiary).padding(.leading, 6)
+                }
+                ForEach(items, id: \.bookmark.id) { node in
+                    BookmarkBarItem(window: window, spaceID: spaceID, node: node)
+                }
+            }
+            .padding(.horizontal, 8)
+        }
+        .frame(height: 24)
+        .padding(.bottom, 4)
+        .onAppear(perform: reload)
+        .onChange(of: spaceID) { _, _ in reload() }
+        .onReceive(NotificationCenter.default.publisher(for: BookmarkStore.didChange)) { _ in reload() }
+    }
+
+    private func reload() {
+        let tree = (try? browser.data?.bookmarks.tree(space: spaceID)) ?? []
+        items = tree.first { $0.bookmark.root == .bar }?.children ?? []
+    }
+}
+
+private struct BookmarkBarItem: View {
+    @EnvironmentObject private var browser: BrowserState
+    @ObservedObject var window: WindowState
+    let spaceID: String
+    let node: BookmarkTree
+
+    var body: some View {
+        Group {
+            if node.bookmark.isFolder {
+                Menu {
+                    BookmarkMenuContent(nodes: node.children) { open($0, newTab: false) }
+                } label: {
+                    Label(node.bookmark.title, systemImage: "folder")
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+            } else {
+                Button { open(node.bookmark, newTab: NSEvent.modifierFlags.contains(.command)) } label: {
+                    Text(node.bookmark.title.isEmpty ? (node.bookmark.url ?? "") : node.bookmark.title)
+                        .lineLimit(1)
+                        .frame(maxWidth: 160)
+                }
+                .buttonStyle(.borderless)
+                .help(node.bookmark.url ?? "")
+                .contextMenu {
+                    Button("Open in New Tab") { open(node.bookmark, newTab: true) }
+                    Button("Copy Address") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(node.bookmark.url ?? "", forType: .string)
+                    }
+                    Divider()
+                    Button("Delete") { try? browser.data?.bookmarks.delete(node.bookmark.id) }
+                }
+            }
+        }
+        .font(.system(size: 12))
+        .padding(.horizontal, 6)
+    }
+
+    private func open(_ bookmark: Bookmark, newTab: Bool) {
+        browser.openBookmark(bookmark, in: window, newTab: newTab)
+    }
+}
+
+/// A folder's contents as menu items (the bar's folders).
+struct BookmarkMenuContent: View {
+    let nodes: [BookmarkTree]
+    let open: (Bookmark) -> Void
+
+    var body: some View {
+        if nodes.isEmpty {
+            Text("Empty")
+        }
+        ForEach(nodes, id: \.bookmark.id) { node in
+            if node.bookmark.isFolder {
+                Menu(node.bookmark.title) { BookmarkMenuContent(nodes: node.children, open: open) }
+            } else {
+                Button(node.bookmark.title.isEmpty ? (node.bookmark.url ?? "") : node.bookmark.title) { open(node.bookmark) }
+            }
+        }
+    }
+}
+
+/// ⌘D and the star: name the bookmark and pick its folder, or remove it.
+struct BookmarkEditor: View {
+    @EnvironmentObject private var browser: BrowserState
+    let spaceID: String
+    let bookmark: Bookmark
+    let done: () -> Void
+    @State private var title: String
+    @State private var folder: Int64
+    @State private var folders: [(id: Int64, name: String)] = []
+
+    init(spaceID: String, bookmark: Bookmark, done: @escaping () -> Void) {
+        self.spaceID = spaceID
+        self.bookmark = bookmark
+        self.done = done
+        _title = State(initialValue: bookmark.title)
+        _folder = State(initialValue: bookmark.parentID ?? 0)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Bookmark").font(.headline)
+            TextField("Name", text: $title).textFieldStyle(.roundedBorder)
+            Picker("Folder", selection: $folder) {
+                ForEach(folders, id: \.id) { Text($0.name).tag($0.id) }
+            }
+            HStack {
+                Button("Remove") {
+                    try? browser.data?.bookmarks.delete(bookmark.id)
+                    done()
+                }
+                Spacer()
+                Button("Done") { save() }.keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(14)
+        .frame(width: 300)
+        .onAppear { folders = BookmarkFolders.list(browser.data?.bookmarks, space: spaceID) }
+    }
+
+    private func save() {
+        let store = browser.data?.bookmarks
+        if title != bookmark.title { try? store?.update(bookmark.id, title: title, url: nil) }
+        if folder != bookmark.parentID, folder != 0 { try? store?.move(bookmark.id, to: folder, at: nil) }
+        done()
+    }
+}
+
+/// Every folder of a space, indented by depth, for pickers.
+enum BookmarkFolders {
+    static func list(_ store: BookmarkStore?, space: String) -> [(id: Int64, name: String)] {
+        var out: [(Int64, String)] = []
+        func walk(_ nodes: [BookmarkTree], depth: Int) {
+            for node in nodes where node.bookmark.isFolder {
+                out.append((node.bookmark.id, String(repeating: "    ", count: depth) + node.bookmark.title))
+                walk(node.children, depth: depth + 1)
+            }
+        }
+        walk((try? store?.tree(space: space)) ?? [], depth: 0)
+        return out.map { (id: $0.0, name: $0.1) }
+    }
+}

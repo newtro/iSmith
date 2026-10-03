@@ -6,6 +6,8 @@ options:
 packages:
   SignInSync:
     path: Packages/SignInSync
+  BrowserData:
+    path: Packages/BrowserData
   Sparkle:
     url: https://github.com/sparkle-project/Sparkle
     exactVersion: 2.10.0
@@ -22,6 +24,7 @@ targets:
     sources: [App]
     dependencies:
       - package: SignInSync
+      - package: BrowserData
       - package: Sparkle
     info:
       path: App/Info.plist

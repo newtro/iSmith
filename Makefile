@@ -19,8 +19,8 @@ build: project
 	$(XCODEBUILD) build
 
 # The package tests (SignInSync: sync, vault and config; BraveImport: Brave profiles, bookmarks
-# and passwords; Blocking: ad and tracker blocking; Passwords: store, matching, autofill), then
-# the app-hosted tests.
+# and passwords; Blocking: ad and tracker blocking; Passwords: store, matching, autofill;
+# BrowserData: history, bookmarks, site settings, downloads), then the app-hosted tests.
 test: test-package test-app
 
 test-package:
@@ -28,6 +28,7 @@ test-package:
 	cd Packages/BraveImport && swift test
 	cd Packages/Blocking && swift test
 	cd Packages/Passwords && swift test
+	cd Packages/BrowserData && swift test
 
 test-app: project
 	$(XCODEBUILD) test
@@ -58,4 +59,4 @@ $(PROJECT): project.yml App AppTests
 	@touch $(PROJECT)
 
 clean:
-	rm -rf $(DERIVED) $(PROJECT) Packages/SignInSync/.build Packages/BraveImport/.build Packages/Blocking/.build Packages/Passwords/.build
+	rm -rf $(DERIVED) $(PROJECT) Packages/SignInSync/.build Packages/BraveImport/.build Packages/Blocking/.build Packages/Passwords/.build Packages/BrowserData/.build

@@ -42,6 +42,8 @@ enum MainMenu {
         file.addItem(.separator())
         file.addItem(item("Close Tab", #selector(Commands.closeTab), "w", commands))
         file.addItem(item("Close Window", #selector(Commands.closeWindow), "W", commands))
+        file.addItem(.separator())
+        file.addItem(item("Print…", #selector(Commands.printPage), "p", commands))
 
         let edit = submenu(main, "Edit")
         edit.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
@@ -54,9 +56,28 @@ enum MainMenu {
             .keyEquivalentModifierMask = [.command, .option, .shift]
         edit.addItem(withTitle: "Delete", action: #selector(NSText.delete(_:)), keyEquivalent: "")
         edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        edit.addItem(.separator())
+        let find = NSMenuItem(title: "Find", action: nil, keyEquivalent: "")
+        find.submenu = NSMenu(title: "Find")
+        find.submenu?.addItem(item("Find…", #selector(Commands.find), "f", commands))
+        find.submenu?.addItem(item("Find Next", #selector(Commands.findNext), "g", commands))
+        find.submenu?.addItem(item("Find Previous", #selector(Commands.findPrevious), "G", commands))
+        edit.addItem(find)
 
         let view = submenu(main, "View")
         view.addItem(item("Reload Page", #selector(Commands.reload), "r", commands))
+        view.addItem(.separator())
+        view.addItem(item("Show Bookmarks Bar", #selector(Commands.toggleBookmarksBar), "B", commands))
+        view.addItem(item("Show Downloads", #selector(Commands.showDownloads), "l", commands, [.command, .option]))
+        view.addItem(.separator())
+        view.addItem(item("Actual Size", #selector(Commands.zoomReset), "0", commands))
+        view.addItem(item("Zoom In", #selector(Commands.zoomIn), "+", commands))
+        // ⌘= is the same key as ⌘+ without Shift.
+        let zoomInAlt = item("Zoom In", #selector(Commands.zoomIn), "=", commands)
+        zoomInAlt.isHidden = true
+        zoomInAlt.allowsKeyEquivalentWhenHidden = true
+        view.addItem(zoomInAlt)
+        view.addItem(item("Zoom Out", #selector(Commands.zoomOut), "-", commands))
         view.addItem(.separator())
         view.addItem(withTitle: "Enter Full Screen", action: #selector(NSWindow.toggleFullScreen(_:)), keyEquivalent: "f")
             .keyEquivalentModifierMask = [.command, .control]
@@ -64,6 +85,14 @@ enum MainMenu {
         let history = submenu(main, "History")
         history.addItem(item("Back", #selector(Commands.goBack), "[", commands))
         history.addItem(item("Forward", #selector(Commands.goForward), "]", commands))
+        history.addItem(.separator())
+        history.addItem(item("Show All History", #selector(Commands.showHistory), "y", commands))
+
+        let bookmarks = submenu(main, "Bookmarks")
+        bookmarks.addItem(item("Bookmark This Page…", #selector(Commands.bookmarkPage), "d", commands))
+        bookmarks.addItem(item("Show Bookmarks", #selector(Commands.showBookmarks), "b", commands, [.command, .option]))
+        commands.bookmarksMenu = BookmarksMenu(browser: commands.browser, fixedCount: bookmarks.items.count)
+        bookmarks.delegate = commands.bookmarksMenu
 
         let spaces = submenu(main, "Spaces")
         spaces.delegate = commands
@@ -112,8 +141,10 @@ enum MainMenu {
 /// The browser's menu commands and keyboard shortcuts.
 @MainActor
 final class Commands: NSObject, NSMenuDelegate, NSMenuItemValidation {
-    private let browser: BrowserState
+    let browser: BrowserState
     private weak var app: AppDelegate?
+    /// Fills the Bookmarks menu when it opens.
+    var bookmarksMenu: BookmarksMenu?
 
     init(browser: BrowserState, app: AppDelegate) {
         self.browser = browser
@@ -201,6 +232,52 @@ final class Commands: NSObject, NSMenuDelegate, NSMenuItemValidation {
 
     @objc func showSettings() { app?.showSettings() }
 
+    // MARK: P2: find, zoom, print, history, bookmarks, downloads
+
+    @objc func find() {
+        guard let window else { return }
+        browser.showFind(in: window)
+    }
+
+    @objc func findNext() {
+        guard let tab else { return }
+        if !tab.findShown, let window { return browser.showFind(in: window) }
+        browser.find(tab)
+    }
+
+    @objc func findPrevious() {
+        guard let tab else { return }
+        browser.find(tab, backwards: true)
+    }
+
+    @objc func zoomIn() { if let tab { browser.zoom(tab, by: 1) } }
+    @objc func zoomOut() { if let tab { browser.zoom(tab, by: -1) } }
+    @objc func zoomReset() { if let tab { browser.zoom(tab, by: 0) } }
+
+    @objc func printPage() {
+        guard let tab else { return }
+        browser.print(tab)
+    }
+
+    @objc func toggleBookmarksBar() {
+        let key = "showBookmarksBar"
+        let shown = UserDefaults.standard.object(forKey: key) as? Bool ?? true
+        UserDefaults.standard.set(!shown, forKey: key)
+    }
+
+    @objc func showDownloads() {
+        guard let window else { return }
+        window.window?.makeKeyAndOrderFront(nil)
+        window.downloadsShown.toggle()
+    }
+
+    @objc func showHistory() { app?.showHistory() }
+    @objc func showBookmarks() { app?.showBookmarks() }
+
+    @objc func bookmarkPage() {
+        window?.bookmarkRequests.send()
+    }
+
     /// ⌃Tab, ⌃⇧Tab, ⌘⇧] and ⌘⇧[ switch tabs even while a page or the address bar has focus.
     func handleTabSwitchKey(_ event: NSEvent) -> Bool {
         guard let key = event.window, key.attachedSheet == nil,
@@ -220,7 +297,14 @@ final class Commands: NSObject, NSMenuDelegate, NSMenuItemValidation {
         switch item.action {
         case #selector(goBack): return tab?.canGoBack == true
         case #selector(goForward): return tab?.canGoForward == true
-        case #selector(reload), #selector(moveTabToNewWindow): return tab != nil
+        case #selector(reload), #selector(moveTabToNewWindow), #selector(find): return tab != nil
+        case #selector(findNext), #selector(findPrevious): return tab?.findText.isEmpty == false
+        case #selector(zoomIn), #selector(zoomOut), #selector(zoomReset), #selector(printPage): return tab?.webView != nil
+        case #selector(bookmarkPage): return tab?.url != nil && browser.data != nil
+        case #selector(showHistory), #selector(showBookmarks): return browser.data != nil
+        case #selector(toggleBookmarksBar):
+            item.title = (UserDefaults.standard.object(forKey: "showBookmarksBar") as? Bool ?? true) ? "Hide Bookmarks Bar" : "Show Bookmarks Bar"
+            return true
         case #selector(nextTab), #selector(previousTab): return (tabs?.layout.count ?? 0) > 1
         case #selector(selectSpace(_:)): return browser.spaces.indices.contains(item.tag)
         case #selector(editSpace): return window?.activeSpaceID != nil

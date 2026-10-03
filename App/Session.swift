@@ -8,8 +8,9 @@ import SignInSync
 /// open in it. They're separate files because the session changes every time a page navigates,
 /// and config is rewritten rarely and carefully.
 ///
-/// P1 restores tabs, groups and each window's spaces from it. P2 extends the same records with
-/// each tab's back/forward history (`interactionState`) and crash-safe saving; fields added later
+/// Each tab also keeps its back/forward history: WebKit's `interactionState` (an opaque `Data`
+/// blob), base64 in the JSON. Crash safety: the file is written atomically at most a second after
+/// any change (a navigation counts), so a crash loses at most that second. Fields added later
 /// decode with defaults, so older files still load.
 struct SessionFile: Codable, Equatable {
     var version = 1
@@ -78,9 +79,16 @@ struct TabRecord: Codable, Equatable {
     var group: UUID?
     /// The tab's own Keep alive setting; nil follows the automatic rule for its page.
     var keepAlive: Bool?
+    /// The tab's back/forward history (`WKWebView.interactionState`). Dropped when larger than
+    /// `TabRecord.maxHistoryBytes`; the tab then reopens on its URL alone.
+    var history: Data?
 
-    init(id: UUID, url: URL?, title: String, group: UUID?, keepAlive: Bool?) {
+    /// WebKit's state for a long history with form data can be large; 40 tabs must still save fast.
+    static let maxHistoryBytes = 512 * 1024
+
+    init(id: UUID, url: URL?, title: String, group: UUID?, keepAlive: Bool?, history: Data? = nil) {
         (self.id, self.url, self.title, self.group, self.keepAlive) = (id, url, title, group, keepAlive)
+        self.history = history.flatMap { $0.count <= Self.maxHistoryBytes ? $0 : nil }
     }
 
     init(from decoder: Decoder) throws {
@@ -90,6 +98,8 @@ struct TabRecord: Codable, Equatable {
         title = try c.decodeIfPresent(String.self, forKey: .title) ?? ""
         group = try c.decodeIfPresent(UUID.self, forKey: .group)
         keepAlive = try c.decodeIfPresent(Bool.self, forKey: .keepAlive)
+        // A damaged history blob mustn't cost the tab: it reopens on its URL.
+        history = (try? c.decodeIfPresent(Data.self, forKey: .history)) ?? nil
     }
 }
 
