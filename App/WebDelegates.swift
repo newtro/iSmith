@@ -194,7 +194,7 @@ extension BrowserState: WKNavigationDelegate {
             decisionHandler(.cancel)
             let state = webView.interactionState
             let request = navigationAction.request
-            Task { await buildWebView(for: tab, space: tabs.spaceID, state: state, load: request) }
+            scheduleBuild(tab, space: tabs.spaceID, state: state, load: request)
             return
         }
         // Blocking follows the destination's site, applied once the navigation is allowed and

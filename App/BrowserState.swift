@@ -42,6 +42,8 @@ final class BrowserState: NSObject, ObservableObject {
     private(set) var quitting = false
     /// Recently closed windows, newest last, with every space's tabs.
     private var closedWindows: [WindowRecord] = []
+    /// When each of `closedWindows` closed.
+    private var windowClosedAt: [UUID: Date] = [:]
     /// Space id → its account switch in progress. Web views for that space wait for it, so a page
     /// can't load the old account's cookies and write them back after the wipe.
     private var switching: [String: (token: UUID, task: Task<Void, Never>)] = [:]
@@ -77,8 +79,18 @@ final class BrowserState: NSObject, ObservableObject {
     private var blockingObservers: [NSObjectProtocol] = []
     private var hibernationTimer: Timer?
     private var networkMonitor: NWPathMonitor?
+    private var memoryPressure: DispatchSourceMemoryPressure?
+    /// The memory pressure macOS last reported (see `hibernationIdleLimit`).
+    var pressure: DispatchSource.MemoryPressureEvent = .normal
     /// A background tab (not Keep alive) is unloaded after this long off screen.
     static let hibernateAfter: TimeInterval = 30 * 60
+    /// At most this many background tabs (not Keep alive) keep their pages loaded; past that the
+    /// least recently shown are unloaded once they've been in the background for
+    /// `loadedTabGrace`, so memory stays bounded (P8: 40 tabs under 3 GB).
+    static let maxLoadedBackgroundTabs = 15
+    static let loadedTabGrace: TimeInterval = 60
+    /// Under memory pressure (a warning), background tabs not shown for this long are unloaded.
+    static let pressureIdle: TimeInterval = 5 * 60
     /// History older than this is removed at launch.
     static let historyKept: TimeInterval = 365 * 24 * 3600
 
@@ -208,6 +220,8 @@ final class BrowserState: NSObject, ObservableObject {
         }
         poster.onDismiss = { [weak self] id in self?.notifications.dismissed(id) }
         notifications.poster = poster
+        // The filter lists start loading first, so restored pages get them before they load.
+        shields.startLoading()
         let saved = session.load().map { SessionStore.pruned($0, spaces: Set(config.spaces.map(\.id))) }
         for record in saved?.windows ?? [] { restoreWindow(record) }
         if windows.isEmpty, !links.contains(where: Self.opensIncoming) { newWindow() }
@@ -215,12 +229,13 @@ final class BrowserState: NSObject, ObservableObject {
         refresh()
         hibernationTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
-                self?.hibernateIdleTabs()
-                self?.retryFailedLoads(networkReturned: false)
+                guard let self else { return }
+                self.hibernateIdleTabs(idleFor: self.hibernationIdleLimit)
+                self.retryFailedLoads(networkReturned: false)
             }
         }
         networkMonitor = watchNetwork()
-        shields.startLoading()
+        memoryPressure = watchMemoryPressure()
         if let aside = passwords?.store.movedAside {
             let alert = NSAlert()
             alert.messageText = "Saved passwords couldn't be opened"
@@ -266,7 +281,7 @@ final class BrowserState: NSObject, ObservableObject {
     }
 
     @discardableResult
-    private func restoreWindow(_ record: WindowRecord) -> WindowState {
+    func restoreWindow(_ record: WindowRecord) -> WindowState {
         let window = WindowState(id: record.id)
         window.savedFrame = record.frame
         for spaceRecord in record.spaces {
@@ -296,7 +311,7 @@ final class BrowserState: NSObject, ObservableObject {
     private func reopenLastWindow() -> WindowState? {
         guard let record = lastClosedWindow else { return nil }
         lastClosedWindow = nil
-        if closedWindows.last?.id == record.id { closedWindows.removeLast() }
+        if closedWindows.last?.id == record.id { windowClosedAt[closedWindows.removeLast().id] = nil }
         guard let pruned = SessionStore.pruned(SessionFile(windows: [record]), spaces: Set(spaces.map(\.id))).windows.first,
               pruned.spaces.contains(where: { !$0.tabs.isEmpty }) else { return nil }
         let window = restoreWindow(pruned)
@@ -310,6 +325,7 @@ final class BrowserState: NSObject, ObservableObject {
     func reopenClosedWindow() -> WindowState? {
         let known = Set(spaces.map(\.id))
         while let record = closedWindows.popLast() {
+            windowClosedAt[record.id] = nil
             guard let pruned = SessionStore.pruned(SessionFile(windows: [record]), spaces: known).windows.first else { continue }
             let window = restoreWindow(pruned)
             scheduleRefresh()
@@ -329,7 +345,8 @@ final class BrowserState: NSObject, ObservableObject {
         let record = window.record(spaceOrder: spaces.map(\.id))
         if !record.spaces.isEmpty {
             closedWindows.append(record)
-            if closedWindows.count > Self.maxClosedWindows { closedWindows.removeFirst() }
+            windowClosedAt[record.id] = Date()
+            if closedWindows.count > Self.maxClosedWindows { windowClosedAt[closedWindows.removeFirst().id] = nil }
         }
         if windows.count == 1 { lastClosedWindow = record }
         windows.removeAll { $0 === window }
@@ -345,6 +362,8 @@ final class BrowserState: NSObject, ObservableObject {
     // MARK: - Spaces
 
     func select(_ space: SpaceState, in window: WindowState) {
+        // The tab that was on screen leaves it now (hibernation orders tabs by this).
+        if window.activeSpaceID != space.id { window.active?.selected?.lastShown = Date() }
         let tabs = window.tabs(for: space.id)
         hook(tabs)
         window.activeSpaceID = space.id
@@ -407,6 +426,14 @@ final class BrowserState: NSObject, ObservableObject {
             alert.addButton(withTitle: "Cancel")
             guard alert.runModal() == .alertFirstButtonReturn else { return }
         }
+        applySpaceUpdate(id, name: name, color: color, home: home, choices: choices, newNames: newNames)
+    }
+
+    /// `updateSpace` once confirmed: saves the edits and, if accounts changed, parks the space's
+    /// pages, switches its accounts and reloads them.
+    func applySpaceUpdate(_ id: String, name: String, color: Int, home: String,
+                          choices: [String: AccountChoice], newNames: [String: String]) {
+        guard let state = space(id) else { return }
         var urls: [(Tab, WKWebView, URL?)] = []
         let switching = manager.updateSpace(id, name: name, color: color, home: home, choices: choices, newNames: newNames,
                                             willSwitch: {
@@ -557,38 +584,49 @@ final class BrowserState: NSObject, ObservableObject {
 
     /// Starts making a tab's web view. The tab counts as building from now, not from when the
     /// task runs, so showing it in the meantime (opening a tab in a space, then selecting the
-    /// space) doesn't make and load a second web view.
-    private func scheduleBuild(_ tab: Tab, space spaceID: String, state: Any?, load request: URLRequest?) {
+    /// space) doesn't make and load a second web view. Its place in line (the build generation) is
+    /// taken now too, so a build scheduled later always wins.
+    func scheduleBuild(_ tab: Tab, space spaceID: String, state: Any?, load request: URLRequest?) {
+        tab.buildGeneration += 1
+        let generation = tab.buildGeneration
         tab.isBuilding = true
-        Task {
-            tab.isBuilding = false
-            await buildWebView(for: tab, space: spaceID, state: state, load: request)
-        }
+        Task { await buildWebView(for: tab, space: spaceID, state: state, load: request, generation: generation) }
     }
 
     /// Makes a new web view for a tab in a space's store, with the Keep alive policy the tab calls
     /// for, and shows it in the tab. `state` (a previous web view's `interactionState`) brings back
     /// its back/forward history; `load` is then loaded on top.
-    func buildWebView(for tab: Tab, space spaceID: String, state: Any?, load request: URLRequest?) async {
-        guard space(spaceID) != nil else { return }
+    /// A newer build for the same tab replaces an older one still waiting (a tab moved to another
+    /// space while its store opened): the older one gives up, and only the newest clears
+    /// `isBuilding`. `generation` is the one `scheduleBuild` took; a direct call takes the next.
+    func buildWebView(for tab: Tab, space spaceID: String, state: Any?, load request: URLRequest?,
+                      generation: Int? = nil) async {
+        let generation = generation ?? {
+            tab.buildGeneration += 1
+            return tab.buildGeneration
+        }()
+        defer { if tab.buildGeneration == generation { tab.isBuilding = false } }
+        guard tab.buildGeneration == generation, space(spaceID) != nil else { return }
         tab.isBuilding = true
-        defer { tab.isBuilding = false }
         // An account switch in this space finishes first, then seeding: a page must never load
         // signed out, or with the account being switched away from.
         await switching[spaceID]?.task.value
         guard let def = space(spaceID)?.def else { return }
         let store = await sync.attach(def)
-        // A switch that started while this was waiting for the store parked every page; this one
-        // was made after, so it waits too rather than load with the old account.
-        if let started = switching[spaceID] { await started.task.value }
-        guard owner(of: tab)?.1.spaceID == spaceID else { return } // closed or moved while opening
-        let keepAlive = KeepAlive.isOn(setting: tab.keepAliveSetting, url: request?.url ?? tab.url)
+        // Its own content controller (WKWebViewConfiguration makes a new one), so the shield for
+        // this tab never changes another's. The lists go on before the first load: a restored
+        // history can load without asking the navigation delegate, and at launch the lists may
+        // still be loading (this waits at most `blockingWait` for them).
         let configuration = WKWebViewConfiguration()
+        await applyBlocking(to: configuration.userContentController, host: (request?.url ?? tab.url)?.host)
+        // A switch that started while this was waiting parked every page; this one was made
+        // after, so it waits too rather than load with the old account.
+        if let started = switching[spaceID] { await started.task.value }
+        // Closed or moved while opening, or a newer build took over.
+        guard owner(of: tab)?.1.spaceID == spaceID, tab.buildGeneration == generation else { return }
+        let keepAlive = KeepAlive.isOn(setting: tab.keepAliveSetting, url: request?.url ?? tab.url)
         configuration.websiteDataStore = store
         configuration.preferences = Self.preferences(keepAlive: keepAlive)
-        // Its own content controller (WKWebViewConfiguration makes a new one), so the shield for
-        // this tab never changes another's.
-        prepareBlocking(configuration, host: (request?.url ?? tab.url)?.host)
         let webView = makeWebView(configuration)
         applyAgentControl(tab, to: webView)
         tab.attach(webView, keepAlive: keepAlive)
@@ -635,7 +673,7 @@ final class BrowserState: NSObject, ObservableObject {
             Self.load(request, in: webView)
         } else {
             let state: Any? = tab.webView?.interactionState ?? tab.savedState
-            Task { await buildWebView(for: tab, space: tabs.spaceID, state: state, load: request) }
+            scheduleBuild(tab, space: tabs.spaceID, state: state, load: request)
         }
     }
 
@@ -647,7 +685,7 @@ final class BrowserState: NSObject, ObservableObject {
         tab.keepAliveSetting = on == KeepAlive.isAutomatic(tab.url) ? nil : on
         if tab.webView != nil, tab.appliedKeepAlive != tab.keepAlive {
             let state = tab.webView?.interactionState
-            Task { await buildWebView(for: tab, space: tabs.spaceID, state: state, load: nil) }
+            scheduleBuild(tab, space: tabs.spaceID, state: state, load: nil)
         }
         scheduleRefresh()
     }
@@ -658,7 +696,7 @@ final class BrowserState: NSObject, ObservableObject {
     private func applyKeepAliveIfNeeded(_ tab: Tab, space spaceID: String) {
         guard tab.webView != nil, tab.keepAlive, tab.appliedKeepAlive == false, !tab.isBuilding, !isLinked(tab) else { return }
         let state = tab.webView?.interactionState
-        Task { await buildWebView(for: tab, space: spaceID, state: state, load: nil) }
+        scheduleBuild(tab, space: spaceID, state: state, load: nil)
     }
 
     /// A popup and the tab that opened it, while both are open: replacing either web view would
@@ -720,10 +758,21 @@ final class BrowserState: NSObject, ObservableObject {
 
     /// ⌘⇧T: reopens the space's most recently closed tab in this window, where it was, with its
     /// history.
-    /// With no closed tab in the space, the most recently closed window comes back instead.
+    /// With no closed tab in the space, the most recently closed window comes back instead, but
+    /// only if it closed after the last tab closed in any space (a tab just closed in another
+    /// space doesn't bring back an old window here).
     func reopenClosedTab(in window: WindowState) {
-        guard let spaceID = window.activeSpaceID, let closed = closedTabs[spaceID]?.popLast() else {
+        guard let spaceID = window.activeSpaceID else {
             reopenClosedWindow()
+            return
+        }
+        guard let closed = closedTabs[spaceID]?.popLast() else {
+            let lastTab = closedTabs.values.compactMap { $0.last?.closedAt }.max() ?? .distantPast
+            if let last = closedWindows.last, (windowClosedAt[last.id] ?? .distantPast) >= lastTab {
+                reopenClosedWindow()
+            } else {
+                NSSound.beep()
+            }
             return
         }
         openTab(in: window, space: spaceID, url: closed.url, title: closed.title, keepAlive: closed.keepAlive,

@@ -86,10 +86,14 @@ extension BrowserState {
 
     // MARK: - Hibernation
 
-    /// Unloads tabs that have been in the background for `hibernateAfter`, keeping their history:
-    /// never Keep alive tabs, a popup and its opener while both are open, a tab with a dialog or
-    /// question waiting, or one using the camera or microphone or playing media.
-    func hibernateIdleTabs(now: Date = Date()) {
+    /// Unloads tabs that have been in the background for `hibernateAfter` (`idleFor`), keeping
+    /// their history: never Keep alive tabs, a popup and its opener while both are open, a tab with
+    /// a dialog or question waiting, or one using the camera or microphone or playing media.
+    /// Beyond `maxLoadedBackgroundTabs` such tabs, the least recently shown are unloaded sooner,
+    /// once they've been in the background for `loadedTabGrace`, so visiting every tab of a big
+    /// session doesn't keep every page in memory for half an hour.
+    func hibernateIdleTabs(now: Date = Date(), idleFor limit: TimeInterval = BrowserState.hibernateAfter) {
+        var loaded: [Tab] = []
         for window in windows {
             for tabs in window.spaces.values {
                 for tab in tabs.ordered {
@@ -98,22 +102,77 @@ extension BrowserState {
                         tab.lastShown = now
                         continue
                     }
-                    guard now.timeIntervalSince(tab.lastShown) >= Self.hibernateAfter, canHibernate(tab),
-                          let webView = tab.webView else { continue }
-                    webView.requestMediaPlaybackState { [weak self, weak tab, weak webView] state in
-                        MainActor.assumeIsolated {
-                            guard let self, let tab, let webView, tab.webView === webView, state != .playing,
-                                  self.canHibernate(tab), self.owner(of: tab) != nil else { return }
-                            NSLog("iSmith: hibernating \(tab.url?.host ?? "a tab")")
-                            self.notifications.forget(webView)
-                            self.passwords?.forget(webView)
-                            tab.unload()
-                            self.scheduleRefresh()
-                        }
+                    guard tab.webView != nil, canHibernate(tab) else { continue }
+                    if now.timeIntervalSince(tab.lastShown) >= limit {
+                        hibernate(tab)
+                    } else if !mayNotify(tab) {
+                        // A site allowed to notify keeps its half hour, so its notifications
+                        // keep coming.
+                        loaded.append(tab)
                     }
                 }
             }
         }
+        let extra = loaded.sorted { $0.lastShown > $1.lastShown }.dropFirst(Self.maxLoadedBackgroundTabs)
+        for tab in extra where now.timeIntervalSince(tab.lastShown) >= Self.loadedTabGrace { hibernate(tab) }
+    }
+
+    /// Unloads a background tab unless it's playing media (asked of WebKit first).
+    private func hibernate(_ tab: Tab) {
+        guard let webView = tab.webView else { return }
+        webView.requestMediaPlaybackState { [weak self, weak tab, weak webView] state in
+            MainActor.assumeIsolated {
+                guard let self, let tab, let webView, tab.webView === webView, state != .playing,
+                      self.canHibernate(tab), self.owner(of: tab) != nil, !self.isVisible(tab) else { return }
+                NSLog("iSmith: hibernating \(tab.url?.host ?? "a tab")")
+                self.notifications.forget(webView)
+                self.passwords?.forget(webView)
+                self.passwordUI.webViewChanged(webView)
+                tab.unload()
+                self.scheduleRefresh()
+            }
+        }
+    }
+
+    /// Whether the tab's site is allowed to show notifications.
+    func mayNotify(_ tab: Tab) -> Bool {
+        guard let url = tab.webView?.url ?? tab.url, let origin = WebNotifications.originKey(url) else { return false }
+        return (try? data?.sites.decision(.notifications, origin: origin)) == .allow
+    }
+
+    /// Whether a tab is the one on screen in its window.
+    func isVisible(_ tab: Tab) -> Bool {
+        guard let (window, tabs) = owner(of: tab) else { return false }
+        return window.activeSpaceID == tabs.spaceID && tabs.layout.selected == tab.id
+    }
+
+    /// How long a background tab stays loaded at the current memory pressure: `hibernateAfter`
+    /// normally, `pressureIdle` while macOS warns of pressure, and not at all while it's critical.
+    /// The minute timer uses it, so a long warning keeps unloading tabs as they go idle.
+    var hibernationIdleLimit: TimeInterval {
+        if pressure.contains(.critical) { return 0 }
+        if pressure.contains(.warning) { return Self.pressureIdle }
+        return Self.hibernateAfter
+    }
+
+    /// macOS reports a new memory pressure level (it only reports changes).
+    func memoryPressureChanged(_ event: DispatchSource.MemoryPressureEvent, now: Date = Date()) {
+        pressure = event
+        guard event.contains(.warning) || event.contains(.critical) else { return }
+        NSLog("iSmith: memory pressure; unloading background tabs idle for \(Int(hibernationIdleLimit)) s")
+        hibernateIdleTabs(now: now, idleFor: hibernationIdleLimit)
+    }
+
+    func watchMemoryPressure() -> DispatchSourceMemoryPressure {
+        let source = DispatchSource.makeMemoryPressureSource(eventMask: [.normal, .warning, .critical], queue: .main)
+        source.setEventHandler { [weak self, weak source] in
+            MainActor.assumeIsolated {
+                guard let self, let event = source?.data else { return }
+                self.memoryPressureChanged(event)
+            }
+        }
+        source.activate()
+        return source
     }
 
     func canHibernate(_ tab: Tab) -> Bool {

@@ -993,6 +993,168 @@ Acceptance: installing from the DMG passes Gatekeeper; a test 1.0.1 release auto
 - Run the acceptance checklist on your real accounts. Fix whatever it finds, then dogfood for one
   week.
 
+#### P8 notes (2026-10-03)
+
+The engineering half is done; the acceptance run on Scott's accounts is next, following
+[ACCEPTANCE.md](ACCEPTANCE.md) (each of the 12 checks: what to do, what to see, what to report).
+
+- **Cookie sync, newest change wins per cookie.** The per-space `lastChange` time is gone. Each
+  store's change notifications are diffed on the sync queue against `seen`, the tracked cookies
+  as the sync last saw them in that store, and each cookie a page changed or deleted gets its
+  own time. A diff runs as soon as a store reports a change, at most ten times a second per
+  store (changes meanwhile are read together); a change is dated by the first notification
+  since the store was last read, or by the read itself if its notification hasn't arrived. While
+  the sync is idle, that dates a change to within about 0.1 s even on a page that keeps setting
+  other cookies. Diffs wait their turn on the sync's queue, so while it's busy (launch, an
+  account switch) a change can be dated as early as the first notification since the store's
+  last read, including the echo of the sync's own write; see the round 2 review below. Values
+  the sync writes (seeding, reconciles, sign-out everywhere, an account switch's wipe) update
+  `seen` without a time, so they never count as a page's change; a cookie that merely expired
+  isn't one either. A reconcile picks, per cookie, the newest change any space made since its
+  last sync. Before, a busy page in one space (any cookie on any site) made that whole space
+  "newest" and could undo a newer sign-in made in another space. Two tests show it:
+  `testNewestChangeWinsPerCookie` fails on the old code (the older SID won everywhere) and
+  passes now; `testALaterSiteCookieDoesNotRedateAnOlderChange` covers the case the review found
+  in this phase's first version, which dated changes by the latest notification after a 0.1 s
+  wait (a site cookie set 30 ms after a newer change elsewhere re-dated the older one).
+- **Fuzz test** (`FuzzTests`, seeded SplitMix64, `SIGNINSYNC_FUZZ_SEED` and
+  `SIGNINSYNC_FUZZ_ROUNDS` replay the same steps or run longer; WebKit's timing isn't seeded,
+  so a replay is close, not exact): the five fixture spaces (shared, separate and "Not shared"
+  Google, Microsoft and GitHub accounts), random sign-ins, rotations, sign-outs, "Sign out
+  everywhere" and untracked site cookies, in quiet rounds (2–3 steps inside the 0.4 s debounce)
+  and chaotic ones (2–6 steps up to 0.7 s apart), and between rounds an account switch now and
+  then (Contoso (second space)'s Google between "Not shared" and shared, Personal's Microsoft
+  likewise, Fabrikam's Microsoft between its own account and Contoso'). Every cookie value
+  names its account, so after every step no space may hold another account's tracked cookie and
+  site cookies stay where they were set; after every round and switch each space bound to an
+  account holds exactly the vault's cookies; after a quiet round the vault equals a model of the
+  newest change to each cookie; at the end a relaunch seeds every space from the saved vault and
+  the checks run again. Default run: 24 rounds, about a minute. Runs, all passing: before the
+  review's fixes, the default seed (24 rounds) and seeds 1–5 (40 rounds each): 224 rounds, 150
+  quiet, 689 steps, with no account switches or sign-out everywhere yet; after them, the default
+  seed (24 rounds) and seeds 1–3 (40 each): 144 rounds, 99 quiet, 435 steps, 28 account
+  switches. The switches happen between rounds once the sync is quiet, not while pages in other
+  spaces are writing. Chaotic rounds don't check
+  "newest wins": WebKit has no compare-and-set, so a page write landing between the sync's read
+  of a store and its write there loses to the sync's value (as before this phase).
+- **Every web view path is equipped the same** (`WebViewPathsTests`): new tab, popup, duplicate,
+  reopened closed tab, Keep alive rebuild, hibernated tab reloaded, restored tab, restored Keep
+  alive tab, tab moved to a new window, tab moved to another space, routed incoming link, a tab
+  opened during an account switch and a page parked by one. Each must load with its space's
+  data store, Safari's user agent (as the page sees it), the notification shim (the page's
+  `Notification` is iSmith's) and its bridge, password autofill, the context-menu reporter, and
+  the blocking lists (a fixture ad script blocked and `.ad-banner` hidden). All passed; no
+  path lacked anything. Reading the code turned up one latent gap: at launch the filter lists
+  started loading only after the windows were restored, and a new web view got them only if
+  they had already loaded, relying on the navigation delegate otherwise. The lists now start
+  loading first, and a new web view gets them before its first load (waiting at most
+  `blockingWait`, 1 s, as navigations do). `testARestoredTabIsBlockedBeforeTheListsHaveLoaded`
+  covers it; on macOS 27 it passes with the old code too, because WebKit does ask the delegate
+  before a restored history loads, so this guards other WebKit versions rather than fixing a
+  live bug.
+- **Performance** (`Tools/perf-run.py`, the Debug app on a scratch data folder, 40 local
+  fixture pages across 4 spaces, each with ~1,500 table rows, ~20 MB of JS objects and a drawn
+  canvas; 4 Keep alive tabs, as Outlook and Teams in two spaces). Memory is RSS from `ps` for the
+  app plus every WebKit process macOS counts as the app's (`responsibility_get_pid_responsible_
+  for_pid`), with the summed `phys_footprint` (Activity Monitor's "Memory") alongside. The stages
+  are driven by `App/PerfHarness.swift` (Debug only):
+
+  | Stage | WebContent | RSS app + WebKit | Footprint |
+  |---|---|---|---|
+  | Restored (visible + Keep alive load) | 4 | 121 + 531 = 652 MB | 420 MB |
+  | All 40 tabs visited (within 20 s) | 40 | 137 + 4,689 = 4,826 MB | 3,167 MB |
+  | A minute later: background tabs capped at 15 | 20 | 135 + 2,390 = 2,525 MB | 1,646 MB |
+  | Background tabs idle 30 min (hibernated) | 5 | 135 + 652 = 786 MB | 488 MB |
+
+  That's the final run, on the reviewed code. RSS counts pages shared between WebKit processes
+  once per process, so it overstates and varies from run to run (the run before it measured
+  3,423, 2,290 and 583 MB for the last three stages); the footprint (3,349, 1,707 and 497 MB
+  then) is steadier. On a first launch (a fresh data folder, so the filter lists are converted
+  in the app's process) the app itself stays at about 540 MB RSS for that run instead of about
+  120 MB, which puts the capped stage at 2,914 MB RSS (footprint 1,704 MB) in a check run after
+  the review. Space switch (select until laid out and drawn, plus one turn of the run
+  loop; 40 switches per stage): median 32–48 ms, 95th percentile 34–66 ms, max 76 ms across the
+  three loaded stages; earlier runs were similar (max 73 ms). All under 100 ms.
+
+  The first run had no cap: 40 visited tabs stayed at about 3.6 GB until the 30-minute
+  hibernation, over budget. Fixed: at most `maxLoadedBackgroundTabs` (15) background tabs keep
+  their pages loaded; past that the least recently shown are unloaded once they've been in the
+  background for `loadedTabGrace` (60 s), on the minute timer. Keep alive tabs, the tab on
+  screen, sites allowed to show notifications (they keep their 30 minutes), and tabs
+  hibernation already protects (edits, dialogs, media, camera, sign-in popups) are never
+  unloaded by it. When macOS warns of memory pressure, background tabs not shown for 5 minutes
+  are unloaded, and the minute timer keeps using 5 minutes until the pressure ends; at critical
+  pressure, every background tab that can be.
+  Fixture pages are lighter than Outlook or Teams (about 85 MB per WebContent process here);
+  with real pages the capped state is higher, which is what the pressure handler and check 7 of
+  the acceptance run are for (`Tools/memory.py` sums iSmith's own processes). The peak right
+  after visiting more than about 35 tabs within a minute is still over 3 GB until the next pass.
+- **Deferred items reviewed** (every "Deferred" list above). Fixed:
+  - P1: ⌘⇧T in a space with no closed tab reopened an old closed window even when a tab had just
+    been closed in another space. It now brings back a window only if that window closed after
+    the last tab closed anywhere; otherwise it beeps.
+  - P6: an older web view build could clear `isBuilding` while a newer one ran (and both made web
+    views). Builds now take a generation when they're scheduled (every rebuild goes through
+    `scheduleBuild`): an older one gives up, and only the newest clears `isBuilding`.
+
+  Left, with the reason:
+  - P1: Keep alive isn't removed from a live tab that leaves Outlook: by design; it applies on the
+    next load, which hibernation now provides.
+  - P1: real drags and keystrokes weren't driven by a smoke test: ACCEPTANCE.md checks 1 and 7.
+  - P2: downloads from a subframe or without a click aren't asked about: needs a new per-site
+    download question; rare, the blocking lists stop most sources, and files are quarantined.
+  - P2: the HTTP sign-in sheet also shows for a cross-origin subresource: WebKit doesn't say
+    which frame asked; his sites sign in with forms.
+  - P2: files left by a download a quit interrupted aren't quarantined: they're partial and
+    resuming isn't offered.
+  - P2: `hadRecentInput` trusts any real click in the last 3 s: needs a hostile page plus a
+    remembered "Open".
+  - P2: notification icons aren't shown: cosmetic; icons would have to be fetched through the
+    space's store.
+  - P2: geolocation before macOS 27: his Mac runs macOS 27.
+  - P3: a list that keeps failing to compile holds one navigation per retry, and a retried load
+    could overlap a refresh: both need WebKit to fail compiling the bundled lists.
+  - P3: Unicode allowlist entries vs punycode hosts: no field accepts typed domains; only the
+    shield adds entries, from WebKit's host.
+  - P3–P5: restoring a failed navigation's blocking setting without an apply ticket: first launch
+    only, and corrected on the next load (web views now get the lists before their first load).
+  - P3–P5: HTTP-auth logins from Brave import as form logins: needs the sign-in sheet to offer
+    saved logins; none of his everyday sites use HTTP auth (check 5 will show it if one does).
+  - P3–P5: the first-run screen reads Brave's folder at once: intended.
+  - P6: learned-rule placement by host and prefix, decoded `%3F` paths, very broad patterns,
+    a final "Not Now" on the first-run bar, a group of moved tabs counting as several moves: each
+    needs an unusual rule list or input, and Settings ▸ Links can fix any of them.
+  - P6: front-to-back window order untested, refusal codes and https unverified: covered by
+    ACCEPTANCE.md check 1 on the real default-browser question.
+- **Tests**: `make test` is green. SignInSync 31 (3 new: the two newest-wins tests and the
+  fuzz test). App-hosted 84 (5 new: `WebViewPathsTests` (2), and `HardeningTests` for the cap
+  and memory pressure, overlapping builds, and ⌘⇧T's window fallback).
+- **Review**: two adversarial rounds, neither with a critical or high finding. Round 1 fixed: the two mediums (a change could
+  be dated by a later, unrelated cookie change in the same store; a memory-pressure warning
+  unloaded every background tab, even one shown seconds ago), and the cheap lows (build
+  generations taken when scheduled; leaving a space now marks its tab as just shown; the cap
+  spares sites allowed to notify; detaching a space clears its pending scan; an expired cookie
+  never carries an old change time; ⌘⇧T with no space showing reopens a window as before;
+  the perf script stops the app and removes its WebKit stores afterwards and reads the stage
+  file safely; ACCEPTANCE.md's labels, where links must be clicked, and the memory check).
+  Round 2 fixed its cheap lows: a memory-pressure warning acted only once (macOS reports
+  changes, not levels), so the minute timer now uses the 5-minute limit while pressure lasts,
+  and the warning, critical and normal handling plus the notify exemption are tested; the perf
+  script finds its own app's pid right after launching it and removes stores only once that app
+  is gone; ACCEPTANCE.md's SharePoint host wording and which memory number to compare.
+  Deferred (low):
+  - While the sync's queue is busy (launch, an account switch), a change can be dated as early
+    as the first notification since its store was last read, which may be the echo of the
+    sync's own write; if another space changed the same cookie in between, the older value can
+    win. It needs two spaces changing the same sign-in cookie within that window (a few hundred
+    milliseconds at launch), and both values are then valid tokens of the same session. Fix if
+    seen: ignore notifications that arrive while the sync writes to that store.
+  - More cookie-store reads on the main actor (at most ten a second per busy store, each a few
+    milliseconds).
+  - The fuzz test's account switches run while the sync is quiet, not interleaved with page
+    writes in other spaces.
+  - The memory-pressure source itself isn't driven by a test (its handler is).
+
 ## Acceptance checklist (v1)
 
 1. iSmith is the default browser. Clicking links in Teams and Outlook opens them in the right space.
@@ -1036,7 +1198,7 @@ Acceptance: installing from the DMG passes Gatekeeper; a test 1.0.1 release auto
 | Memory with many spaces and tabs | Slow Mac | Tab hibernation, a performance budget in P8, one data store per space (not per tab). |
 | Holding passwords | A security bug exposes secrets | Encryption tied to the Keychain, secrets kept out of logs and agents, a dedicated review in P4, reveal only after authentication. |
 | WebKit's content-blocker rule limit | Lists don't fit | Split across several rule lists, and prioritize EasyPrivacy and core EasyList. |
-| Concurrent sign-ins to different accounts within about 2 seconds | The older session can win | Per-cookie conflict timing and a fuzz test in P8. |
+| Concurrent sign-ins to different accounts within about 2 seconds | The older session can win | Done in P8: newest change wins per cookie, checked by a fuzz test. |
 
 ## After v1
 
@@ -1055,5 +1217,5 @@ Acceptance: installing from the DMG passes Gatekeeper; a test 1.0.1 release auto
    is only the fallback.
 2. **MCP server**: Claude Code, Codex and agy drive tabs in a space, under the same modes.
 3. **Page index**: local text and embeddings per space, searched by you and by agents.
-4. Then setup sync across Macs (iCloud Drive), space templates, archiving, and per-cookie conflict
-   timing (if not already done in P8).
+4. Then setup sync across Macs (iCloud Drive), space templates and archiving. (Per-cookie
+   conflict timing was done in P8.)

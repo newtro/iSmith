@@ -73,6 +73,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         browser.routing.offerDefaultBrowserIfNeeded()
         NSApp.activate(ignoringOtherApps: true)
         offerBraveImportOnFirstRun(browser)
+        #if DEBUG
+        PerfHarness.runIfRequested(browser)
+        #endif
     }
 
     /// The first launch on a data folder offers the Brave import once, if Brave is installed.
