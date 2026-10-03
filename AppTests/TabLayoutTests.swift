@@ -89,7 +89,8 @@ final class TabLayoutTests: XCTestCase {
         // A drop that would split a group gathers the group back into one run.
         let h = l.createGroup(with: [ids[3], ids[4]], name: "H")!
         l.move(ids[0], before: ids[2], group: h)
-        XCTAssertEqual(names(l), "f[G] c[G] b[G] a[H] d[H] e[H]", "the tab joins its group's run")
+        XCTAssertEqual(names(l), "f[G] c[G] b[G] d[H] e[H] a[H]",
+                       "an anchor outside the group puts the tab at the group's end, and G stays whole")
         for group in l.groups {
             let positions = l.tabs(in: group.id).compactMap { l.index(of: $0) }
             XCTAssertEqual(positions, Array(positions.first!...positions.last!), "\(group.name) is one run")
@@ -151,6 +152,28 @@ final class TabLayoutTests: XCTestCase {
         only.insert(ids[2])
         only.select(ids[2])
         XCTAssertTrue(only.setCollapsed(all, true))
+    }
+
+    func testReopeningIntoAGroupWhoseNeighborMovedKeepsTheGroupInPlace() {
+        // [G: a b] c d; b is closed remembering "before c, in G"; then c is dragged to the front.
+        var l = layout(4)
+        let g = l.createGroup(with: [ids[0], ids[1]], name: "G")!
+        l.remove(ids[1])
+        l.move(ids[2], before: ids[0], group: nil)
+        XCTAssertEqual(names(l), "c a[G] d")
+        l.insert(ids[1], before: ids[2], group: g)
+        XCTAssertEqual(names(l), "c a[G] b[G] d", "the tab rejoins its group at the end; the group doesn't move")
+        l.insert(ids[4], before: ids[1], group: g)
+        XCTAssertEqual(names(l), "c a[G] e[G] b[G] d", "an anchor inside the group is used")
+    }
+
+    func testSelectingAGoneTabKeepsTheSelection() {
+        var l = layout(3)
+        l.select(ids[1])
+        l.select(UUID())
+        XCTAssertEqual(l.selected, ids[1])
+        l.select(nil)
+        XCTAssertNil(l.selected, "only an explicit nil clears it")
     }
 
     func testNeighborWraps() {

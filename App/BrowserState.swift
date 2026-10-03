@@ -29,6 +29,14 @@ final class BrowserState: NSObject, ObservableObject {
     /// The last window, kept after it closes so quitting that way (or the Dock reopening it)
     /// brings its tabs back.
     private var lastClosedWindow: WindowRecord?
+    /// Set when the app starts quitting: the session is saved as it is, and windows closing from
+    /// then on don't change it.
+    private(set) var quitting = false
+    /// Recently closed windows, newest last, with every space's tabs.
+    private var closedWindows: [WindowRecord] = []
+    /// Space id → its account switch in progress. Web views for that space wait for it, so a page
+    /// can't load the old account's cookies and write them back after the wipe.
+    private var switching: [String: Task<Void, Never>] = [:]
     private var refreshScheduled = false
     private var saveTask: Task<Void, Never>?
 
@@ -42,6 +50,7 @@ final class BrowserState: NSObject, ObservableObject {
     }()
 
     static let maxClosedTabs = 25
+    static let maxClosedWindows = 5
 
     init(paths: AppPaths = .standard, keyStore: KeyStore = KeychainKeyStore()) {
         var vault = Vault(fileURL: paths.vaultURL, keyStore: keyStore)
@@ -70,6 +79,7 @@ final class BrowserState: NSObject, ObservableObject {
         session = SessionStore(fileURL: paths.sessionURL)
         super.init()
         AppDelegate.flush = { [weak self, sync] in
+            self?.quitting = true
             self?.saveSessionNow()
             await sync.flush()
         }
@@ -94,17 +104,14 @@ final class BrowserState: NSObject, ObservableObject {
         let saved = session.load().map { SessionStore.pruned($0, spaces: Set(config.spaces.map(\.id))) }
         for record in saved?.windows ?? [] { restoreWindow(record) }
         if windows.isEmpty { newWindow() }
-        // Keep alive tabs load at once in every window, so mail counts update and calls ring.
-        for window in windows {
-            for tabs in window.spaces.values {
-                for tab in tabs.ordered where tab.keepAlive { ensureLoaded(tab, space: tabs.spaceID) }
-            }
-        }
         refresh()
     }
 
+    /// ⌘N. With no browser window open, the last closed one comes back instead, so its tabs
+    /// aren't replaced in the saved session by an empty window.
     @discardableResult
     func newWindow(space spaceID: String? = nil) -> WindowState {
+        if windows.isEmpty, spaceID == nil, let restored = reopenClosedWindow() { return restored }
         let id = spaceID ?? currentWindow?.activeSpaceID ?? spaces.first?.id
         let window = WindowState()
         windows.append(window)
@@ -116,7 +123,8 @@ final class BrowserState: NSObject, ObservableObject {
         return window
     }
 
-    private func restoreWindow(_ record: WindowRecord) {
+    @discardableResult
+    private func restoreWindow(_ record: WindowRecord) -> WindowState {
         let window = WindowState(id: record.id)
         window.savedFrame = record.frame
         for spaceRecord in record.spaces {
@@ -127,27 +135,48 @@ final class BrowserState: NSObject, ObservableObject {
         windows.append(window)
         presentWindow?(window)
         if let id = record.activeSpace ?? spaces.first?.id, let space = space(id) { select(space, in: window) }
+        // Keep alive tabs load at once, so mail counts update and calls ring.
+        for tabs in window.spaces.values {
+            for tab in tabs.ordered where tab.keepAlive { ensureLoaded(tab, space: tabs.spaceID) }
+        }
+        return window
     }
 
     /// The Dock was clicked with no browser window open: the last closed one comes back.
     func reopen() {
         guard windows.isEmpty else { return }
-        if let record = lastClosedWindow {
-            lastClosedWindow = nil
-            restoreWindow(SessionStore.pruned(SessionFile(windows: [record]), spaces: Set(spaces.map(\.id))).windows.first
-                          ?? WindowRecord(id: UUID(), frame: record.frame, activeSpace: nil, spaces: []))
-        }
-        if windows.isEmpty { newWindow() }
+        if reopenClosedWindow() == nil { newWindow() }
         scheduleRefresh()
     }
 
-    /// A window is closing: its tabs close with it. The last window's tabs are kept for the next
-    /// launch, as if the app had quit.
-    func windowWillClose(_ window: WindowState) {
-        guard windows.contains(where: { $0 === window }) else { return }
-        if windows.count == 1 {
-            lastClosedWindow = window.record(spaceOrder: spaces.map(\.id))
+    /// Brings back the most recently closed window with all its spaces' tabs (⌘⇧T when the
+    /// space has no closed tab, "Reopen Closed Window", ⌘N or the Dock with no window open).
+    @discardableResult
+    func reopenClosedWindow() -> WindowState? {
+        let known = Set(spaces.map(\.id))
+        while let record = closedWindows.popLast() {
+            guard let pruned = SessionStore.pruned(SessionFile(windows: [record]), spaces: known).windows.first else { continue }
+            let window = restoreWindow(pruned)
+            scheduleRefresh()
+            return window
         }
+        return nil
+    }
+
+    var canReopenClosedWindow: Bool { !closedWindows.isEmpty }
+
+    /// A window is closing: its tabs close with it, and the window is kept so it can be reopened
+    /// (with every space's tabs). The last window's tabs are also kept for the next launch, as if
+    /// the app had quit.
+    func windowWillClose(_ window: WindowState) {
+        // AppKit closes every window while quitting; the session saved at quit keeps them all.
+        guard !quitting, windows.contains(where: { $0 === window }) else { return }
+        let record = window.record(spaceOrder: spaces.map(\.id))
+        if !record.spaces.isEmpty {
+            closedWindows.append(record)
+            if closedWindows.count > Self.maxClosedWindows { closedWindows.removeFirst() }
+        }
+        if windows.count == 1 { lastClosedWindow = record }
         windows.removeAll { $0 === window }
         for tab in window.allTabs { tab.unload() }
         saveSessionNow()
@@ -213,22 +242,30 @@ final class BrowserState: NSObject, ObservableObject {
             alert.addButton(withTitle: "Cancel")
             guard alert.runModal() == .alertFirstButtonReturn else { return }
         }
-        var urls: [(WKWebView, URL?)] = []
+        var urls: [(Tab, WKWebView, URL?)] = []
         let switching = manager.updateSpace(id, name: name, color: color, home: home, choices: choices, newNames: newNames,
                                             willSwitch: {
             // Pages are parked on a blank page during the switch so a live app (Outlook refreshing
             // a token) can't write the old account back after the wipe.
-            urls = self.tabs(inSpace: id).compactMap { tab in tab.webView.map { ($0, $0.url) } }
-            for (webView, _) in urls { webView.load(URLRequest(url: URL(string: "about:blank")!)) }
+            urls = self.tabs(inSpace: id).compactMap { tab in tab.webView.map { (tab, $0, $0.url) } }
+            for (_, webView, _) in urls { webView.load(URLRequest(url: URL(string: "about:blank")!)) }
         }, committed: { [weak self, weak state] def in
             guard let state, self?.spaces.contains(where: { $0 === state }) == true else { return } // deleted meanwhile
             state.def = def
         })
         guard let switching else { return }
+        // Web views made for this space during the switch wait for it (see `buildWebView`).
+        self.switching[id] = switching
         let parked = urls
         Task {
             await switching.value
-            for (webView, url) in parked { if let url { webView.load(URLRequest(url: url)) } }
+            if self.switching[id] == switching { self.switching[id] = nil }
+            for (tab, webView, url) in parked {
+                // Only pages still showing in a tab of this space: one closed, moved or rebuilt
+                // meanwhile stays closed.
+                guard let url, tab.webView === webView, self.owner(of: tab)?.1.spaceID == id else { continue }
+                webView.load(URLRequest(url: url))
+            }
         }
     }
 
@@ -303,7 +340,7 @@ final class BrowserState: NSObject, ObservableObject {
         if let previous { applyKeepAliveIfNeeded(previous, space: spaceID) }
         let request = state == nil ? url.map { URLRequest(url: $0) } : nil
         Task { await buildWebView(for: tab, space: spaceID, state: state, load: request) }
-        if focusAddress || (url == nil && state == nil) { window.focusAddress.send() }
+        if focusAddress || (url == nil && state == nil) { window.focusAddress(of: tab.id) }
         scheduleRefresh()
         return tab
     }
@@ -339,11 +376,17 @@ final class BrowserState: NSObject, ObservableObject {
     /// for, and shows it in the tab. `state` (a previous web view's `interactionState`) brings back
     /// its back/forward history; `load` is then loaded on top.
     func buildWebView(for tab: Tab, space spaceID: String, state: Any?, load request: URLRequest?) async {
-        guard let def = space(spaceID)?.def else { return }
+        guard space(spaceID) != nil else { return }
         tab.isBuilding = true
         defer { tab.isBuilding = false }
-        // Seeding must finish before the first request, or the page loads signed out.
-        let store = await sync.attach(def)
+        var store: WKWebsiteDataStore
+        repeat {
+            // An account switch in this space finishes first, then seeding: a page must never
+            // load signed out, or with the account being switched away from.
+            await switching[spaceID]?.value
+            guard let def = space(spaceID)?.def else { return }
+            store = await sync.attach(def)
+        } while switching[spaceID] != nil
         guard owner(of: tab)?.1.spaceID == spaceID else { return } // closed or moved while opening
         let keepAlive = KeepAlive.isOn(setting: tab.keepAliveSetting, url: request?.url ?? tab.url)
         let configuration = WKWebViewConfiguration()
@@ -398,13 +441,23 @@ final class BrowserState: NSObject, ObservableObject {
     /// be replayed) gets a new web view once it's in the background. Losing Keep alive waits for
     /// the next time the tab loads, so a page isn't reloaded just to be throttled.
     private func applyKeepAliveIfNeeded(_ tab: Tab, space spaceID: String) {
-        guard tab.webView != nil, tab.keepAlive, tab.appliedKeepAlive == false, !tab.isBuilding, !tab.hasOpener else { return }
+        guard tab.webView != nil, tab.keepAlive, tab.appliedKeepAlive == false, !tab.isBuilding, !isLinked(tab) else { return }
         let state = tab.webView?.interactionState
         Task { await buildWebView(for: tab, space: spaceID, state: state, load: nil) }
     }
 
+    /// A popup and the tab that opened it, while both are open: replacing either web view would
+    /// cut the link between them (a sign-in popup posting its result back).
+    private func isLinked(_ tab: Tab) -> Bool {
+        let open = windows.flatMap(\.allTabs)
+        if let opener = tab.openerID, open.contains(where: { $0.id == opener && $0.webView != nil }) { return true }
+        return open.contains { $0.openerID == tab.id && $0.webView != nil }
+    }
+
     func closeTab(_ id: UUID, in tabs: SpaceTabs) {
         guard let tab = tabs.tab(id) else { return }
+        // A popup that was showing hands the selection back to the tab that opened it.
+        let returnTo = tabs.layout.selected == id ? tab.openerID.flatMap { tabs.layout.contains($0) ? $0 : nil } : nil
         let index = tabs.layout.index(of: id)
         let ids = tabs.layout.ids
         var closed = ClosedTab(url: tab.url, title: tab.title, group: tabs.layout.groupID(of: id),
@@ -417,6 +470,9 @@ final class BrowserState: NSObject, ObservableObject {
         }
         tab.unload()
         tabs.take(id)
+        if let returnTo {
+            tabs.update { $0.select(returnTo) }
+        }
         if let next = tabs.selected { ensureLoaded(next, space: tabs.spaceID) }
         scheduleRefresh()
     }
@@ -425,19 +481,26 @@ final class BrowserState: NSObject, ObservableObject {
         for id in ids { closeTab(id, in: tabs) }
     }
 
-    /// ⌘W: closes the selected tab, or the window when its space has no tabs.
+    /// ⌘W: closes the selected tab. In an empty space it closes the window, but only when none of
+    /// the window's other spaces has tabs, so a second ⌘W can't take a whole window's tabs with it.
     func closeSelectedTab(in window: WindowState) {
         if let tabs = window.active, let id = tabs.layout.selected {
             closeTab(id, in: tabs)
-        } else {
+        } else if window.allTabs.isEmpty {
             window.window?.performClose(nil)
+        } else {
+            NSSound.beep()
         }
     }
 
     /// ⌘⇧T: reopens the space's most recently closed tab in this window, where it was, with its
     /// history.
+    /// With no closed tab in the space, the most recently closed window comes back instead.
     func reopenClosedTab(in window: WindowState) {
-        guard let spaceID = window.activeSpaceID, let closed = closedTabs[spaceID]?.popLast() else { return }
+        guard let spaceID = window.activeSpaceID, let closed = closedTabs[spaceID]?.popLast() else {
+            reopenClosedWindow()
+            return
+        }
         openTab(in: window, space: spaceID, url: closed.url, title: closed.title, keepAlive: closed.keepAlive,
                 state: closed.state) { layout, id in
             let before = closed.before.flatMap { layout.contains($0) ? $0 : nil }
@@ -580,7 +643,9 @@ final class BrowserState: NSObject, ObservableObject {
                 self?.refresh()
             }
         }
-        saveTask?.cancel()
+        // A save already waiting covers this change too. It isn't pushed back, so a page that
+        // changes its title every second (Teams flashing a message) can't keep the session unsaved.
+        guard saveTask == nil else { return }
         saveTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 1_000_000_000)
             guard !Task.isCancelled else { return }
@@ -603,6 +668,7 @@ final class BrowserState: NSObject, ObservableObject {
 
     func saveSessionNow() {
         saveTask?.cancel()
+        saveTask = nil
         session.save(sessionSnapshot)
     }
 
@@ -648,7 +714,7 @@ extension BrowserState: WKUIDelegate {
         let keepAlive = KeepAlive.isAutomatic(navigationAction.request.url)
         configuration.preferences = Self.preferences(keepAlive: keepAlive)
         let tab = Tab(url: navigationAction.request.url)
-        tab.hasOpener = true
+        tab.openerID = opener.id
         hook(tab)
         let popup = makeWebView(configuration)
         tab.attach(popup, keepAlive: keepAlive)
@@ -699,7 +765,7 @@ extension BrowserState: WKNavigationDelegate {
            navigationAction.navigationType != .backForward,
            (navigationAction.request.httpMethod ?? "GET").uppercased() == "GET",
            let (_, tabs, tab) = owner(of: webView),
-           tab.appliedKeepAlive == false, !tab.isBuilding, !tab.hasOpener,
+           tab.appliedKeepAlive == false, !tab.isBuilding, !isLinked(tab),
            KeepAlive.isOn(setting: tab.keepAliveSetting, url: url) {
             decisionHandler(.cancel)
             let state = webView.interactionState

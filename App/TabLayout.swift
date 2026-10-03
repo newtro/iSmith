@@ -156,7 +156,9 @@ struct TabLayout: Equatable {
 
     /// Selects a tab; a collapsed group holding it expands.
     mutating func select(_ id: UUID?) {
-        guard let id, let i = index(of: id) else { selected = nil; return }
+        guard let id else { selected = nil; return }
+        // A tab that's gone (a click on a view the strip hasn't removed yet) changes nothing.
+        guard let i = index(of: id) else { return }
         selected = id
         if let g = slots[i].group, let gi = groups.firstIndex(where: { $0.id == g }) { groups[gi].collapsed = false }
     }
@@ -180,6 +182,14 @@ struct TabLayout: Equatable {
     }
 
     private func insertionIndex(before: UUID?, group: UUID?) -> Int {
+        // Into a group, the anchor must be inside the group's run or just after it; otherwise
+        // (the anchor has moved since, as for a reopened tab) the tab goes to the group's end
+        // rather than pulling the whole group to the anchor.
+        if let group, let first = slots.firstIndex(where: { $0.group == group }),
+           let last = slots.lastIndex(where: { $0.group == group }) {
+            if let before, let i = index(of: before), (first...(last + 1)).contains(i) { return i }
+            return last + 1
+        }
         if let before, let i = index(of: before) { return i }
         if let group, let last = slots.lastIndex(where: { $0.group == group }) { return last + 1 }
         return slots.count

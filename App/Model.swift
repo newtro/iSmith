@@ -24,9 +24,10 @@ final class Tab: ObservableObject, Identifiable {
     private(set) var appliedKeepAlive: Bool?
     /// A web view is being made for the tab (opening a space's store takes a moment).
     var isBuilding = false
-    /// Opened by a page (a popup). Its web view is never replaced automatically, since the page
-    /// that opened it may still talk to it (sign-in popups do).
-    var hasOpener = false
+    /// The tab whose page opened this one (a popup). Neither web view is replaced automatically
+    /// while both are open, since they may still talk to each other (sign-in popups do), and
+    /// closing the popup goes back to its opener.
+    var openerID: UUID?
     /// Called when the title or URL changes: badges and the saved session follow.
     var changed: (() -> Void)?
     private var observations: [NSKeyValueObservation] = []
@@ -174,8 +175,17 @@ final class WindowState: ObservableObject, Identifiable {
     @Published var activeSpaceID: String?
     @Published private(set) var spaces: [String: SpaceTabs] = [:]
     @Published var editing: EditorRequest?
-    /// Asks the toolbar to focus the address bar (⌘L, and a new empty tab).
-    let focusAddress = PassthroughSubject<Void, Never>()
+    /// Asks the toolbar to focus the address bar: nil for the current tab (⌘L), or a tab's id.
+    let focusRequests = PassthroughSubject<UUID?, Never>()
+    /// A new tab whose address bar takes focus once its toolbar is on screen. The toolbar for a
+    /// tab that was just created doesn't exist yet when the request is sent.
+    var pendingAddressFocus: UUID?
+
+    /// Focuses the address bar of `tab` (default: whichever tab is showing).
+    func focusAddress(of tab: UUID? = nil) {
+        pendingAddressFocus = tab
+        focusRequests.send(tab)
+    }
     weak var window: NSWindow?
     /// The frame to open at, from the saved session.
     var savedFrame: String?

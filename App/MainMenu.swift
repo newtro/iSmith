@@ -37,6 +37,7 @@ enum MainMenu {
         file.addItem(.separator())
         file.addItem(item("Open Location…", #selector(Commands.openLocation), "l", commands))
         file.addItem(item("Reopen Closed Tab", #selector(Commands.reopenClosedTab), "T", commands))
+        file.addItem(item("Reopen Closed Window", #selector(Commands.reopenClosedWindow), "", commands))
         file.addItem(.separator())
         file.addItem(item("Close Tab", #selector(Commands.closeTab), "w", commands))
         file.addItem(item("Close Window", #selector(Commands.closeWindow), "W", commands))
@@ -149,13 +150,15 @@ final class Commands: NSObject, NSMenuDelegate, NSMenuItemValidation {
     @objc func openLocation() {
         guard let window else { return }
         window.window?.makeKeyAndOrderFront(nil)
-        if window.active?.selected == nil { browser.newTab(in: window) } else { window.focusAddress.send() }
+        if window.active?.selected == nil { browser.newTab(in: window) } else { window.focusAddress() }
     }
 
     @objc func reopenClosedTab() {
-        guard let window else { return }
+        guard let window else { return browser.reopen() }
         browser.reopenClosedTab(in: window)
     }
+
+    @objc func reopenClosedWindow() { browser.reopenClosedWindow() }
 
     @objc func closeTab() {
         if let other = otherKeyWindow { return other.performClose(nil) }
@@ -220,6 +223,7 @@ final class Commands: NSObject, NSMenuDelegate, NSMenuItemValidation {
         case #selector(nextTab), #selector(previousTab): return (tabs?.layout.count ?? 0) > 1
         case #selector(selectSpace(_:)): return browser.spaces.indices.contains(item.tag)
         case #selector(editSpace): return window?.activeSpaceID != nil
+        case #selector(reopenClosedWindow): return browser.canReopenClosedWindow
         default: return true
         }
     }

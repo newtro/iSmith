@@ -308,6 +308,8 @@ private struct Toolbar: View {
         .onAppear {
             address = tab.url?.absoluteString ?? ""
             updateTitle(tab.title)
+            // A new tab asked for the address bar before this toolbar existed.
+            if window.pendingAddressFocus == tab.id { takeFocus() }
         }
         .onReceive(tab.$url) { url in
             if !addressFocused { address = url?.absoluteString ?? "" }
@@ -317,10 +319,17 @@ private struct Toolbar: View {
             // Leaving the field without going anywhere shows the page's address again.
             if !focused { address = tab.url?.absoluteString ?? "" }
         }
-        .onReceive(window.focusAddress) { _ in
-            // On the next turn, so a tab that was just created has its toolbar on screen.
-            DispatchQueue.main.async { addressFocused = true }
+        .onReceive(window.focusRequests) { id in
+            // Only for this tab; a request for a tab that was just created is picked up by its own
+            // toolbar's onAppear.
+            if id == nil || id == tab.id { takeFocus() }
         }
+    }
+
+    private func takeFocus() {
+        window.pendingAddressFocus = nil
+        // On the next turn, once the field is in the window.
+        DispatchQueue.main.async { addressFocused = true }
     }
 
     private func updateTitle(_ title: String) {

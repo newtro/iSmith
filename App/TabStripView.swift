@@ -44,6 +44,7 @@ final class TabStripView: NSView {
         plusButton.action = #selector(newTab)
         for view in [dot, nameLabel, scrollView, plusButton] { addSubview(view) }
         content.onChange = { [weak self] in self?.needsLayout = true }
+        registerForDraggedTypes([.ismithTab])
     }
 
     @available(*, unavailable)
@@ -85,6 +86,14 @@ final class TabStripView: NSView {
     @objc private func newTab() {
         browser.newTab(in: windowState)
     }
+
+    // The whole strip takes tab drops, not just the tabs: dropping right of the last tab (or on a
+    // space with no tabs yet) puts the tab at the end.
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation { content.draggingUpdated(sender) }
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation { content.draggingUpdated(sender) }
+    override func draggingExited(_ sender: NSDraggingInfo?) { content.draggingExited(sender) }
+    override func concludeDragOperation(_ sender: NSDraggingInfo?) { content.concludeDragOperation(sender) }
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool { content.performDragOperation(sender) }
 
     // The strip doubles as the title bar: drag empty space to move the window, double-click it for
     // a new tab.

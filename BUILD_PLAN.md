@@ -205,8 +205,13 @@ iSmith/
   groups → tabs with URL, title and Keep alive setting), not in config. Config is what a space
   is; the session is what's open in it and changes on every navigation. P1 restores it at launch,
   loading only each window's visible tab and the Keep alive tabs. P2 adds each tab's back/forward
-  history (`interactionState`) and crash safety to the same records. Closing the last window
-  keeps its tabs for the next launch, and the Dock brings that window back.
+  history (`interactionState`) and crash safety to the same records. It's saved at most a second
+  after a change (a page retitling itself every second can't postpone it) and at quit; AppKit
+  closes every window while quitting, so from then on closing windows doesn't change it.
+- **Closing windows**: a closed window (all its spaces' tabs) goes on a stack of five. "Reopen
+  Closed Window" in the File menu, ⌘⇧T when the space has no closed tab, and ⌘N or the Dock with
+  no window open bring it back. The last window's tabs are also kept for the next launch. ⌘W in an
+  empty space closes the window only if none of its other spaces has tabs.
 - **Rail order** is saved in config (`Config.moveSpace`, the only SignInSync change besides
   making `SecureFile` public for the session file).
 - **Keep alive**: `inactiveSchedulingPolicy` is read when a web view is created, so every web
@@ -221,8 +226,12 @@ iSmith/
     the background;
   - the context menu: at once.
   Losing Keep alive (navigating away from Outlook) isn't applied to a live tab, so a page isn't
-  reloaded just to be throttled; it applies the next time the tab loads. Tabs opened by a page
-  (sign-in popups) are never rebuilt automatically, since the opener may still talk to them.
+  reloaded just to be throttled; it applies the next time the tab loads. A popup and the tab that
+  opened it are never rebuilt automatically while both are open (a sign-in popup posts back to its
+  opener), and closing a popup that was showing goes back to its opener.
+- **Account switches**: a web view made for a space while its accounts are switching waits for
+  the switch, so it can't load the old account and write it back after the wipe; only pages still
+  showing in that space reload afterwards.
 - **Unread badges** come from leading "(N)" in titles (Outlook, Teams) and Gmail's
   "Inbox (N) - … - Gmail". A space's badge adds up its tabs in every window, counting identical
   titles once, and isn't shown for the space the window is on.
@@ -239,8 +248,9 @@ iSmith/
   Real mouse drags weren't driven by the test (the drop logic is unit-tested), and keyboard
   shortcuts were checked as menu items, not as keystrokes.
 - **Tests**: `make test` runs 27 SignInSync tests (one new: the rail order survives a relaunch)
-  and 28 app-hosted tests: `TabLayoutTests` (11: order, groups as one run, drops into and out of
-  groups, collapse moving the selection, repair of saved records), `SessionTests` (6: round trip,
+  and 30 app-hosted tests: `TabLayoutTests` (13: order, groups as one run, drops into and out of
+  groups, collapse moving the selection, repair of saved records, reopening into a group whose
+  neighbor moved, a stale selection), `SessionTests` (6: round trip,
   owner-only file, unreadable file kept aside, older records, pruning deleted spaces, rail order
   through the browser), `PageRulesTests` (6: badge parsing and totals, keep-alive hosts, a tab's
   own setting, the scheduling policy on its own preferences) and the 5 P0 app tests.
