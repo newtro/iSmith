@@ -344,12 +344,6 @@ private struct Toolbar: View {
             .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .textBackgroundColor)))
             .overlay(RoundedRectangle(cornerRadius: 8).stroke(addressFocused ? Color.accentColor.opacity(0.7) : Color(nsColor: .separatorColor)))
             DownloadsToolbarItem(downloads: browser.downloads, window: window)
-            Menu("Go") {
-                ForEach(QuickLink.all) { link in
-                    Button(link.name) { browser.navigate(tab, in: tabs, to: link.url) }
-                }
-            }
-            .fixedSize()
         }
         .buttonStyle(.borderless)
         .padding(.horizontal, 10)

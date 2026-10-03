@@ -102,23 +102,6 @@ enum Palette {
     }
 }
 
-struct QuickLink: Identifiable {
-    let name: String
-    let url: URL
-    var id: String { name }
-
-    static let all: [QuickLink] = [
-        ("Outlook", "https://outlook.office.com/mail/"),
-        ("Azure DevOps", "https://dev.azure.com/contoso-dev"),
-        ("Azure portal", "https://portal.azure.com"),
-        ("My Microsoft account", "https://myaccount.microsoft.com"),
-        ("Gmail", "https://mail.google.com/"),
-        ("Google account", "https://myaccount.google.com"),
-        ("GitHub", "https://github.com"),
-        ("Etsy shop", "https://www.etsy.com/your/shops/me/dashboard"),
-    ].map { QuickLink(name: $0.0, url: URL(string: $0.1)!) }
-}
-
 /// The search engine the address bar uses (Settings ▸ General).
 enum SearchEngine: String, CaseIterable, Identifiable {
     case google, duckDuckGo, bing, brave, kagi, ecosia
