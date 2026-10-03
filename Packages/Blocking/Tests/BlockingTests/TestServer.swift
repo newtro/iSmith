@@ -15,6 +15,9 @@ final class TestServer: @unchecked Sendable {
     private let lock = NSLock()
     private var _requests: [Request] = []
     private let routes: [String: (type: String, body: String)]
+    /// Paths that are never answered, for navigations that stay loading.
+    var hangingPaths: Set<String> = []
+    private var hanging: [NWConnection] = []
     private(set) var port: UInt16 = 0
 
     var requests: [Request] { lock.withLock { _requests } }
@@ -50,7 +53,10 @@ final class TestServer: @unchecked Sendable {
         port = listener.port?.rawValue ?? 0
     }
 
-    func stop() { listener.cancel() }
+    func stop() {
+        listener.cancel()
+        queue.sync { hanging.forEach { $0.cancel() } }
+    }
 
     func didRequest(host: String, path: String) -> Bool {
         requests.contains(Request(host: host, path: path))
@@ -84,6 +90,10 @@ final class TestServer: @unchecked Sendable {
         var host = hostHeader.map { String($0.dropFirst(5)).trimmingCharacters(in: .whitespaces) } ?? ""
         if let colon = host.lastIndex(of: ":"), !host.hasSuffix("]") { host = String(host[..<colon]) }
         lock.withLock { _requests.append(Request(host: host, path: path)) }
+        if hangingPaths.contains(path) {
+            hanging.append(connection)
+            return
+        }
 
         let route = routes[path] ?? routes[String(path.prefix { $0 != "?" })]
         let status = route == nil ? "404 Not Found" : "200 OK"

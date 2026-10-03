@@ -83,15 +83,14 @@ public final class BlockingController {
     private var refreshTask: (id: Int, forced: Bool, task: Task<RefreshResult, Never>)?
     private var refreshCount = 0
     private var automaticRefresh: Task<Void, Never>?
-    /// Every list handed to a content controller in this process, by identifier, so `apply` can
-    /// take off lists from before a refresh as well as current ones.
-    private var handedOut: [String: WKContentRuleList] = [:]
     /// The latest `apply` call per content controller, so an older call that finishes later
     /// doesn't undo a newer one.
     private let applyTickets = NSMapTable<WKUserContentController, NSNumber>.weakToStrongObjects()
     private var nextTicket = 0
-    /// The identifiers of the lists attached to each content controller, so applying the same
-    /// lists again changes nothing.
+    /// The lists attached to each content controller, so `apply` takes off exactly those (lists
+    /// from before a refresh included) and applying the same lists again changes nothing. Held
+    /// only as long as they're attached, so a replaced generation is released (and its removed
+    /// file freed) once every web view has re-applied or closed.
     private let attached = NSMapTable<WKUserContentController, NSArray>.weakToStrongObjects()
     private var loadError: String?
 
@@ -258,8 +257,8 @@ public final class BlockingController {
     public func refresh(force: Bool = false) async -> RefreshResult {
         if let running = refreshTask {
             let result = await running.task.value
-            // "Update now" during an automatic check that may not download: run it after.
-            if force && !running.forced { return await refresh(force: true) }
+            // "Update now" during an automatic check that found nothing due: run it after.
+            if force && !running.forced && result == .notDue { return await refresh(force: true) }
             return result
         }
         refreshCount += 1
@@ -282,9 +281,8 @@ public final class BlockingController {
         automaticRefresh = Task { [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(max(initialDelay, 0) * 1e9))
             while !Task.isCancelled {
-                // Holds the controller only while refreshing; ends once it's gone.
-                guard let controller = self else { return }
-                _ = await controller.refresh()
+                // Holds the controller only during the refresh, not the sleep; ends once it's gone.
+                guard await self?.refresh() != nil else { return }
                 try? await Task.sleep(nanoseconds: UInt64(max(interval, 1) * 1e9))
             }
         }
@@ -528,14 +526,11 @@ public final class BlockingController {
     private func attach(_ current: [WKContentRuleList], to controller: WKUserContentController, host: String?) {
         let blocked = host.map(isBlocked(host:)) ?? true
         let wanted = blocked ? current : []
-        let ids = wanted.map(\.identifier)
+        let previous = attached.object(forKey: controller) as? [WKContentRuleList] ?? []
         // Already attached: leave them, so the page is never briefly without its lists.
-        if let previous = attached.object(forKey: controller) as? [String], previous == ids { return }
-        for list in handedOut.values { controller.remove(list) }
-        for list in wanted {
-            handedOut[list.identifier] = list
-            controller.add(list)
-        }
-        attached.setObject(ids as NSArray, forKey: controller)
+        if previous.map(\.identifier) == wanted.map(\.identifier) { return }
+        for list in previous { controller.remove(list) }
+        for list in wanted { controller.add(list) }
+        attached.setObject(wanted as NSArray, forKey: controller)
     }
 }

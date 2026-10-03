@@ -24,18 +24,24 @@ below runs on the main actor.
 
 ## 2. One controller per app, at launch
 
-Create it where `BrowserState` is created (so the windowless XCTest host app, which never makes a
-`BrowserState`, never loads or downloads lists):
+Create it in `BrowserState.init(paths:keyStore:)`, so the windowless XCTest host app (which
+never makes a `BrowserState`) never loads or downloads lists. That init doesn't throw, so keep the
+controller optional and run without blocking if it can't be made:
 
 ```swift
-let blocking = try BlockingController(directory: paths.dataDir.appendingPathComponent("Blocking", isDirectory: true))
-Task { await blocking.ruleLists() }     // start loading before the first tab needs the lists
-blocking.startAutomaticRefresh()        // first check after 60 s, then hourly; downloads weekly
+blocking = try? BlockingController(directory: paths.dataDir.appendingPathComponent("Blocking", isDirectory: true))
+if let blocking {
+    Task { await blocking.ruleLists() }   // start loading before the first tab needs the lists
+    blocking.startAutomaticRefresh()      // first check after 60 s, then hourly; downloads weekly
+}
 ```
 
-- `paths.dataDir` is `AppPaths.standard.dataDir`: `~/Library/Application Support/iSmith`, or
-  `ISMITH_DATA_DIR` when that's set. `make run` and the Xcode scheme don't set it, so a plain
-  development run uses (and refreshes) the real lists, as it uses the real config and vault.
+- `paths.dataDir` is `~/Library/Application Support/iSmith`, or `ISMITH_DATA_DIR` when that's
+  set. `make run` and the Xcode scheme don't set it, so a plain development run uses (and
+  refreshes) the real lists, as it uses the real config and vault. Two copies running on one
+  folder (a debug build next to the installed app) each remove the other's compiled lists at
+  launch or after a refresh; the other recompiles once (about 5 s). Use `ISMITH_DATA_DIR` for a
+  second copy.
 - `init` throws only if WebKit can't open a store in that folder.
 - Normal launch: the lists come from the compiled store in under a millisecond. First launch,
   or the first launch after an OS update changes WebKit's compiled format: about 5 s in a debug
@@ -73,27 +79,36 @@ func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
              preferences: WKWebpagePreferences) async -> (WKNavigationActionPolicy, WKWebpagePreferences) {
     let policy: WKNavigationActionPolicy = /* the app's decision: app links, downloads … */
     if policy == .allow, action.targetFrame?.isMainFrame == true {
-        await blocking.apply(to: webView.configuration.userContentController, host: action.request.url?.host)
+        await blocking?.apply(to: webView.configuration.userContentController, host: action.request.url?.host)
     }
     return (policy, preferences)
 }
 
+// `committedHost` is new per-tab state (on P1's `Tab`, found with `owner(of:)`).
 func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
-    tab(for: webView).committedHost = webView.url?.host     // whatever per-tab state P1 has
+    owner(of: webView)?.1.committedHost = webView.url?.host
 }
 
 func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-    blocking.applyIfLoaded(to: webView.configuration.userContentController, host: tab(for: webView).committedHost)
+    // The page on screen is still the committed one: put its setting back. But not when a newer
+    // navigation replaced this one (clicking or typing while a page loads): that one has already
+    // applied its own setting, and the replaced one fails after it.
+    if !webView.isLoading, let tab = owner(of: webView)?.1 {
+        blocking?.applyIfLoaded(to: webView.configuration.userContentController, host: tab.committedHost)
+    }
 }
 ```
 
-- Do the same `applyIfLoaded(…committedHost)` where a main-frame navigation turns into a
-  download (`navigationAction:didBecome:` and `navigationResponse:didBecome:`) and where
-  `decidePolicyFor navigationResponse` cancels it.
+- A main-frame navigation whose response becomes a download, or that `decidePolicyFor
+  navigationResponse` cancels, never commits. When P2 adds downloads, check that it reaches
+  `didFailProvisionalNavigation`; if it doesn't, run the same restore from
+  `webView(_:navigationResponse:didBecome:)`. An action that becomes a download never got
+  `.allow`, so `apply` didn't run for it.
 - `decidePolicyFor` runs for typed URLs, link clicks, back/forward, reloads and server
   redirects, so the lists match the site being loaded. `WebViewTests` checks that a change made
   there applies to the navigation being decided, and that a cancelled or failed navigation leaves
-  the page on screen with its own setting (the test's `Navigator` is this recipe).
+  the page on screen with its own setting, including when a newer navigation replaced it (the
+  test's `Navigator` is this recipe).
 - Only main-frame navigations: an iframe from another site follows the top-level site's shield.
 - A host-less URL (`msteams:`, `about:blank`) counts as blocked. App links are cancelled before
   `apply`, so they never change the page's setting.

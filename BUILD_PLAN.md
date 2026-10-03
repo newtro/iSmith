@@ -316,6 +316,8 @@ tabs and P2's navigation delegate. `Packages/Blocking/INTEGRATION.md` gives the 
   and the lists in use change. Any failure removes the half-compiled lists and keeps the old
   ones. The lists a refresh replaces stay in the store, since open web views may still hold them,
   until the next refresh or launch, so the store holds at most two generations (about 104 MB).
+  The controller holds a list only while it's attached, so a removed generation's disk space is
+  freed once every web view has re-applied or closed.
 - **If nothing compiles** (neither the downloaded copies nor the snapshot), blocking is off and
   `status.lastError` says why. The load is tried again after 10 minutes, and a successful
   refresh also ends it.
@@ -328,8 +330,9 @@ tabs and P2's navigation delegate. `Packages/Blocking/INTEGRATION.md` gives the 
   `allowlist.json`. Blocking is toggled by attaching or removing the lists on that web view's
   content controller, which takes effect from the next load. The app applies a destination's
   setting only once its navigation is allowed, and restores the current page's setting if the
-  navigation fails before committing; INTEGRATION.md has the delegate code.
-- **Tests**: 34 tests in 5 suites (`swift test`, about 6 s), plus an opt-in live test
+  navigation fails before committing (unless a newer navigation replaced it); INTEGRATION.md
+  has the delegate code.
+- **Tests**: 35 tests in 5 suites (`swift test`, about 6 s), plus an opt-in live test
   (`BLOCKING_LIVE_TESTS=1`) that downloads, converts and compiles today's lists:
   - `RuleListBuilderTests`: conversion of a fixture list, comment handling, line classification,
     the split (200 rules at a limit of 50, with every exception in each list), a cosmetic
@@ -349,13 +352,23 @@ tabs and P2's navigation delegate. `Packages/Blocking/INTEGRATION.md` gives the 
     blocked (the server never sees the request) and `.ad-banner` is hidden on a blocked host; both
     load on an allowlisted host. Lists applied in `decidePolicyFor` take effect for that
     navigation, a cancelled or failed navigation leaves the page on screen with its own setting,
-    the shield toggle plus reload works in one web view, and refreshed lists replace the old ones
-    in an open web view.
+    a navigation replaced while loading doesn't undo the new one's setting, the shield toggle
+    plus reload works in one web view, and refreshed lists replace the old ones in an open web
+    view.
 - **License**: SafariConverterLib is GPL-3.0, and it's compiled into the app. EasyList and
   EasyPrivacy are GPL-3.0 or CC BY-SA 3.0. For a personal build this doesn't matter. Publishing
   binaries (P7's public releases repo) brings GPL obligations, such as offering the app's source.
   Decide before P7: accept that, or move conversion out of the app (convert on a server and
   download converted JSON).
+- **Review**: two adversarial rounds. Round 1 found one high (a cancelled or failed navigation
+  left the page on screen with the destination's setting) and three mediums (compiled lists
+  piling up during a long session, a failed load turning blocking off for the session, "Update
+  now" answering "not due"); round 2 found one high its fix introduced (a replaced navigation's
+  failure undoing the new one's setting) and one medium (replaced lists held until relaunch).
+  All are fixed and tested. Deferred, all hypothetical today: if the lists keep failing to
+  compile, each 10-minute retry holds one navigation for the compile; a retried load could
+  overlap a refresh; allowlist entries typed as Unicode domains don't match the punycode hosts
+  WebKit reports (only matters if a settings field accepts typed domains).
 - **Still to do for P3**: the shield button and wiring (after P1 and P2), then the acceptance
   sites.
 

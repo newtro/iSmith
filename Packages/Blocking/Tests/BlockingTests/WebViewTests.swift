@@ -178,6 +178,29 @@ final class WebViewTests: XCTestCase {
         XCTAssertTrue(probe, "still on the allowed site after a failed navigation")
     }
 
+    /// A navigation replaced while still loading fails after the new one has applied its
+    /// setting; that failure must not put the old page's setting back over the new one's.
+    func testReplacedNavigationKeepsTheNewDestinationsSetting() async throws {
+        server.hangingPaths = ["/slow.html"]
+        let blocking = try fixtureController()
+        try blocking.setAllowed(host: "localhost", true)
+        let navigator = Navigator()
+        navigator.blocking = blocking
+        let webView = makeWebView(navigator)
+        try await navigator.load(pageURL("localhost"), in: webView)
+
+        // Start a load that never finishes, on a blocked host…
+        let decided = navigator.decisions
+        webView.load(URLRequest(url: URL(string: "http://127.0.0.1:\(server.port)/slow.html")!))
+        try await waitUntil("the slow navigation") { navigator.decisions > decided && server.didRequest(host: "127.0.0.1", path: "/slow.html") }
+        // …then go to another blocked page before it commits.
+        let failures = navigator.provisionalFailures
+        try await navigator.load(pageURL("127.0.0.1"), in: webView)
+        XCTAssertGreaterThan(navigator.provisionalFailures, failures, "the slow navigation was cancelled")
+        let page = try await inspect(webView)
+        XCTAssertEqual(page, PageResult(adLoaded: false, newAdLoaded: true, bannerHidden: true))
+    }
+
     /// Loads the ad script again from the current page; true if it loaded.
     private var probes = 0
     private func probeAd(_ webView: WKWebView) async throws -> Bool {
@@ -206,7 +229,8 @@ final class Navigator: NSObject, WKNavigationDelegate {
     private(set) var decisions = 0
     private(set) var provisionalFailures = 0
     private var committedHost: String?
-    private var waiting: CheckedContinuation<Void, Error>?
+    /// The navigation a test is waiting for, so another navigation ending doesn't count.
+    private var waiting: (navigation: WKNavigation?, continuation: CheckedContinuation<Void, Error>)?
 
     func load(_ url: URL, in webView: WKWebView) async throws {
         try await wait { webView.load(URLRequest(url: url)) }
@@ -216,17 +240,17 @@ final class Navigator: NSObject, WKNavigationDelegate {
         try await wait { webView.reload() }
     }
 
-    private func wait(_ start: () -> Void) async throws {
+    private func wait(_ start: () -> WKNavigation?) async throws {
         try await withCheckedThrowingContinuation { continuation in
-            waiting = continuation
-            start()
+            waiting = (nil, continuation)
+            waiting?.navigation = start()
         }
     }
 
-    private func finish(_ error: Error?) {
-        guard let waiting else { return }
+    private func finish(_ navigation: WKNavigation?, _ error: Error?) {
+        guard let waiting, waiting.navigation == nil || waiting.navigation === navigation else { return }
         self.waiting = nil
-        if let error { waiting.resume(throwing: error) } else { waiting.resume() }
+        if let error { waiting.continuation.resume(throwing: error) } else { waiting.continuation.resume() }
     }
 
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
@@ -235,7 +259,7 @@ final class Navigator: NSObject, WKNavigationDelegate {
         if let path = navigationAction.request.url?.path, cancelledPaths.contains(path) {
             return (.cancel, preferences)
         }
-        if let blocking, navigationAction.targetFrame?.isMainFrame ?? true {
+        if let blocking, navigationAction.targetFrame?.isMainFrame == true {
             await blocking.apply(to: webView.configuration.userContentController, host: navigationAction.request.url?.host)
         }
         return (.allow, preferences)
@@ -245,13 +269,18 @@ final class Navigator: NSObject, WKNavigationDelegate {
         committedHost = webView.url?.host
     }
 
-    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { finish(nil) }
-    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { finish(error) }
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { finish(navigation, nil) }
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        finish(navigation, error)
+    }
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
         provisionalFailures += 1
-        // The page on screen is still the committed one: put its setting back.
-        blocking?.applyIfLoaded(to: webView.configuration.userContentController, host: committedHost)
-        finish(error)
+        // The page on screen is still the committed one: put its setting back, unless a newer
+        // navigation replaced this one and has already applied its own.
+        if !webView.isLoading {
+            blocking?.applyIfLoaded(to: webView.configuration.userContentController, host: committedHost)
+        }
+        finish(navigation, error)
     }
 }
 
