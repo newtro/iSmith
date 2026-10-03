@@ -119,4 +119,22 @@ final class RuleListBuilderTests: XCTestCase {
         XCTAssertEqual(lists[0].ruleCount, 0)
         XCTAssertEqual(try rules(lists[0].json).count, 1, "WebKit needs one rule; the converter adds a no-op")
     }
+
+    /// A cosmetic exception and a `$badfilter` in one source act on the other source's rules.
+    func testCosmeticExceptionsAndBadfilterWorkAcrossSources() throws {
+        let alpha = "##.cross-ad\n||cross.example^\n||kept.example^\n"
+        let beta = "example.org#@#.cross-ad\n||cross.example^$badfilter\n||beta.example^\n"
+        let lists = try RuleListBuilder.build(sources: [("alpha", alpha), ("beta", beta)])
+        let alphaRules = try rules(try XCTUnwrap(lists.first { $0.name == "alpha-1" }).json)
+        let blocked = actions(alphaRules, "block").map(urlFilter)
+        XCTAssertFalse(blocked.contains { $0.contains("cross") }, "badfilter from beta: \(blocked)")
+        XCTAssertTrue(blocked.contains { $0.contains("kept") })
+        let hiding = try XCTUnwrap(actions(alphaRules, "css-display-none").first {
+            ($0["action"] as? [String: Any])?["selector"] as? String == ".cross-ad"
+        })
+        let trigger = hiding["trigger"] as? [String: Any] ?? [:]
+        let unless = (trigger["unless-domain"] as? [String] ?? []) + (trigger["unless-top-url"] as? [String] ?? [])
+            + (trigger["unless-frame-url"] as? [String] ?? [])
+        XCTAssertTrue(unless.contains { $0.contains("example.org") || $0.contains("example\\.org") }, "\(trigger)")
+    }
 }

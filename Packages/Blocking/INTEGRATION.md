@@ -24,14 +24,18 @@ below runs on the main actor.
 
 ## 2. One controller per app, at launch
 
+Create it where `BrowserState` is created (so the windowless XCTest host app, which never makes a
+`BrowserState`, never loads or downloads lists):
+
 ```swift
-let blocking = try BlockingController(directory: dataDir.appendingPathComponent("Blocking", isDirectory: true))
+let blocking = try BlockingController(directory: paths.dataDir.appendingPathComponent("Blocking", isDirectory: true))
 Task { await blocking.ruleLists() }     // start loading before the first tab needs the lists
 blocking.startAutomaticRefresh()        // first check after 60 s, then hourly; downloads weekly
 ```
 
-- `dataDir` is the app's data folder (`~/Library/Application Support/iSmith`, or
-  `ISMITH_DATA_DIR` in development), so a development run never touches the real lists.
+- `paths.dataDir` is `AppPaths.standard.dataDir`: `~/Library/Application Support/iSmith`, or
+  `ISMITH_DATA_DIR` when that's set. `make run` and the Xcode scheme don't set it, so a plain
+  development run uses (and refreshes) the real lists, as it uses the real config and vault.
 - `init` throws only if WebKit can't open a store in that folder.
 - Normal launch: the lists come from the compiled store in under a millisecond. First launch,
   or the first launch after an OS update changes WebKit's compiled format: about 5 s in a debug
@@ -40,41 +44,64 @@ blocking.startAutomaticRefresh()        // first check after 60 s, then hourly; 
 ## 3. Each web view gets its own `WKUserContentController`
 
 The lists are attached to a web view's content controller, so two web views must never share
-one, or the shield for one site would change the other.
+one, or the shield for one site would change the other. Don't add or remove content-rule lists on
+these controllers outside `BlockingController`: it remembers what it attached.
 
 - New tab: give its `WKWebViewConfiguration` a new `WKUserContentController()`.
 - Popup (`webView(_:createWebViewWith:for:windowFeatures:)`): the configuration WebKit passes is
-  a copy whose `userContentController` is the **opener's**. Before creating the popup's web view,
-  set `configuration.userContentController = WKUserContentController()`, re-add the app's user
-  scripts, then apply blocking for the popup's URL:
-  `await blocking.apply(to: configuration.userContentController, host: navigationAction.request.url?.host)`.
-  (That delegate method is synchronous; use `blocking.applyIfLoaded(to:host:)` there. The lists
-  are loaded long before a page can open a popup.)
+  a copy whose `userContentController` is the **opener's** (checked: it's the same object).
+  Before `makeWebView(configuration)`, set `configuration.userContentController =
+  WKUserContentController()` and re-add the app's user scripts and script message handlers. Then
+  apply blocking with `blocking.applyIfLoaded(to: configuration.userContentController, host:)`
+  (that delegate method is synchronous; the lists are loaded long before a page can open a
+  popup). For `host`, use `navigationAction.request.url?.host`, or the opener's
+  `webView.url?.host` when that's nil (`window.open('')` or `about:blank`, which the opener then
+  writes into).
 - A hibernated tab that's recreated is a new web view: same as a new tab.
 
-## 4. Navigation delegate: apply before each main-frame load
+## 4. Navigation delegate: apply when a main-frame navigation is allowed
 
-In the tab's `WKNavigationDelegate`:
+The rule lists change what the web view loads from then on, including for the page still on
+screen. So apply the destination's setting only once the navigation is allowed, and put the
+current page's setting back if the navigation ends before committing. In `BrowserState`'s
+`WKNavigationDelegate`:
 
 ```swift
+// Replaces the decisionHandler version: WebKit calls only one of the two, so the app's own
+// policy (app links today) moves in here.
 func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
              preferences: WKWebpagePreferences) async -> (WKNavigationActionPolicy, WKWebpagePreferences) {
-    if action.targetFrame?.isMainFrame == true {
+    let policy: WKNavigationActionPolicy = /* the app's decision: app links, downloads … */
+    if policy == .allow, action.targetFrame?.isMainFrame == true {
         await blocking.apply(to: webView.configuration.userContentController, host: action.request.url?.host)
     }
-    // … the rest of the app's policy (app links, downloads) …
-    return (.allow, preferences)
+    return (policy, preferences)
+}
+
+func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+    tab(for: webView).committedHost = webView.url?.host     // whatever per-tab state P1 has
+}
+
+func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+    blocking.applyIfLoaded(to: webView.configuration.userContentController, host: tab(for: webView).committedHost)
 }
 ```
 
-- This runs for typed URLs, link clicks, back/forward, reloads and server redirects, so the
-  lists always match the site being loaded. `WebViewTests` checks that a change made here applies
-  to the navigation being decided.
+- Do the same `applyIfLoaded(…committedHost)` where a main-frame navigation turns into a
+  download (`navigationAction:didBecome:` and `navigationResponse:didBecome:`) and where
+  `decidePolicyFor navigationResponse` cancels it.
+- `decidePolicyFor` runs for typed URLs, link clicks, back/forward, reloads and server
+  redirects, so the lists match the site being loaded. `WebViewTests` checks that a change made
+  there applies to the navigation being decided, and that a cancelled or failed navigation leaves
+  the page on screen with its own setting (the test's `Navigator` is this recipe).
 - Only main-frame navigations: an iframe from another site follows the top-level site's shield.
+- A host-less URL (`msteams:`, `about:blank`) counts as blocked. App links are cancelled before
+  `apply`, so they never change the page's setting.
 - `apply` waits for the lists. On a normal launch that's instant. On a first launch it holds the
   first navigation for the few seconds the compile takes, so the first page is blocked too. To
   load without waiting instead, use `blocking.applyIfLoaded(to:host:)` here and rely on
   `listsDidChange` (below) to attach the lists once ready; pages loaded before then aren't blocked.
+- Applying the same lists again changes nothing, so calling this on every navigation is cheap.
 
 ## 5. The shield button
 
@@ -110,8 +137,9 @@ No reload: the new lists apply from the next load, and pages already open keep w
 
 Under the injected directory: `state.json` (lists in use, versions, refresh schedule),
 `allowlist.json`, `lists/` (the downloaded copies in use, about 3.6 MB) and `Store/` (WebKit's
-compiled lists, about 52 MB for both). After a refresh the previous compiled lists stay in
-`Store/` until the next launch removes them, because open web views may still hold them.
+compiled lists, about 52 MB for both). After a refresh, the lists it replaced stay in `Store/`
+(an open web view may still hold them) until the next refresh or launch removes them, so `Store/`
+holds at most two generations.
 
 ## Updating the bundled snapshot
 

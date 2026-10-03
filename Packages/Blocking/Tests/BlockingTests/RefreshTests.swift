@@ -171,4 +171,42 @@ final class RefreshTests: XCTestCase {
         controller.stopAutomaticRefresh()
         XCTAssertEqual(controller.status.listVersions, ["alpha": "2", "beta": "2"])
     }
+
+    /// A long session: each refresh removes the generation before the one it replaced, so the
+    /// store holds at most two.
+    func testRefreshRemovesOlderGenerations() async throws {
+        let (controller, store) = try harness.launch()
+        let v1: [String] = await controller.ruleLists().map(\.identifier)
+        harness.serve(version: 2)
+        let r2 = await controller.refresh()
+        XCTAssertEqual(r2, .updated)
+        let v2: [String] = await controller.ruleLists().map(\.identifier)
+        harness.serve(version: 3)
+        harness.clock.advance(days: 8)
+        let r3 = await controller.refresh()
+        XCTAssertEqual(r3, .updated)
+        let v3: [String] = await controller.ruleLists().map(\.identifier)
+        let remaining = Set(await store.identifiers())
+        XCTAssertEqual(remaining, Set(v2 + v3))
+        XCTAssertTrue(remaining.isDisjoint(with: v1))
+    }
+
+    /// "Update now" while an automatic check is still waiting for the lists to load: the forced
+    /// refresh runs after it instead of taking its "not due".
+    func testForcedRefreshDuringAnAutomaticOneStillDownloads() async throws {
+        harness.serve(version: 2)
+        let (first, _) = try harness.launch()
+        let r1 = await first.refresh()
+        XCTAssertEqual(r1, .updated)
+        let requests = harness.fetcher.requests
+
+        let (controller, _) = try harness.launch()
+        let automatic = Task { await controller.refresh() }
+        await Task.yield()
+        let forced = await controller.refresh(force: true)
+        let automaticResult = await automatic.value
+        XCTAssertEqual(automaticResult, .notDue)
+        XCTAssertEqual(forced, .unchanged)
+        XCTAssertEqual(harness.fetcher.requests, requests + 2)
+    }
 }

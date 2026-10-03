@@ -314,7 +314,11 @@ tabs and P2's navigation delegate. `Packages/Blocking/INTEGRATION.md` gives the 
   have at least 1,000 rule lines, or it's rejected (captive portals, truncated files). New lists
   compile under new identifiers. Only when all of them compile do the saved copies, the state
   and the lists in use change. Any failure removes the half-compiled lists and keeps the old
-  ones. Old compiled lists are removed at the next launch, since open web views may hold them.
+  ones. The lists a refresh replaces stay in the store, since open web views may still hold them,
+  until the next refresh or launch, so the store holds at most two generations (about 104 MB).
+- **If nothing compiles** (neither the downloaded copies nor the snapshot), blocking is off and
+  `status.lastError` says why. The load is tried again after 10 minutes, and a successful
+  refresh also ends it.
 - **Recompiling**: the state records a fingerprint (converter version, WebKit feature level,
   limit, sources). If it changes, or WebKit can't read a compiled list (as after an OS update),
   the lists are rebuilt from the downloaded copies in use, or from the snapshot if there are none.
@@ -322,25 +326,31 @@ tabs and P2's navigation delegate. `Packages/Blocking/INTEGRATION.md` gives the 
   list), as Brave's Shields work. Allowing `www.cnn.com` also covers `edition.cnn.com`.
   `azurewebsites.net` and `github.io` apps are each their own site. The allowlist is saved in
   `allowlist.json`. Blocking is toggled by attaching or removing the lists on that web view's
-  content controller, which takes effect from the next load.
-- **Tests**: 29 tests in 5 suites (`swift test`, about 6 s), plus an opt-in live test
+  content controller, which takes effect from the next load. The app applies a destination's
+  setting only once its navigation is allowed, and restores the current page's setting if the
+  navigation fails before committing; INTEGRATION.md has the delegate code.
+- **Tests**: 34 tests in 5 suites (`swift test`, about 6 s), plus an opt-in live test
   (`BLOCKING_LIVE_TESTS=1`) that downloads, converts and compiles today's lists:
   - `RuleListBuilderTests`: conversion of a fixture list, comment handling, line classification,
-    the split (200 rules at a limit of 50, with every exception in each list), split lists
-    compiling in WebKit, and the error when exceptions alone exceed the limit.
+    the split (200 rules at a limit of 50, with every exception in each list), a cosmetic
+    exception and a `$badfilter` acting on the other source's rules, split lists compiling in
+    WebKit, and the error when exceptions alone exceed the limit.
   - `StoreTests`: the real bundled snapshot compiled in the xctest process, then loaded from the
     store with no compile; recompiling after the store is corrupted, the fingerprint changes or
-    the state file is damaged; recompiling the downloaded copies (not the snapshot).
+    the state file is damaged; recompiling the downloaded copies (not the snapshot); a failed
+    load tried again after the retry interval.
   - `RefreshTests`: the weekly schedule, a successful swap (and a relaunch that loads it and
     removes the old lists), a failed download with its retry delay, a non-list download, a
-    truncated download, a compile failure partway through, concurrent refreshes, and automatic
+    truncated download, a compile failure partway through, concurrent refreshes, "Update now"
+    during an automatic check, older generations removed by later refreshes, and automatic
     refresh.
   - `AllowlistTests`: site names, persistence across launches, an unreadable file, a failed save.
   - `WebViewTests`: real loads from a local server under two host names. A fixture ad script is
     blocked (the server never sees the request) and `.ad-banner` is hidden on a blocked host; both
     load on an allowlisted host. Lists applied in `decidePolicyFor` take effect for that
-    navigation, the shield toggle plus reload works in one web view, and refreshed lists replace
-    the old ones in an open web view.
+    navigation, a cancelled or failed navigation leaves the page on screen with its own setting,
+    the shield toggle plus reload works in one web view, and refreshed lists replace the old ones
+    in an open web view.
 - **License**: SafariConverterLib is GPL-3.0, and it's compiled into the app. EasyList and
   EasyPrivacy are GPL-3.0 or CC BY-SA 3.0. For a personal build this doesn't matter. Publishing
   binaries (P7's public releases repo) brings GPL obligations, such as offering the app's source.

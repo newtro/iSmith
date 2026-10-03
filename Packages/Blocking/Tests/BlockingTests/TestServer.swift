@@ -85,7 +85,7 @@ final class TestServer: @unchecked Sendable {
         if let colon = host.lastIndex(of: ":"), !host.hasSuffix("]") { host = String(host[..<colon]) }
         lock.withLock { _requests.append(Request(host: host, path: path)) }
 
-        let route = routes[path]
+        let route = routes[path] ?? routes[String(path.prefix { $0 != "?" })]
         let status = route == nil ? "404 Not Found" : "200 OK"
         let body = Data((route?.body ?? "not found").utf8)
         let response = "HTTP/1.1 \(status)\r\nContent-Type: \(route?.type ?? "text/plain"); charset=utf-8\r\n"

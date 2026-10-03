@@ -66,7 +66,9 @@ public enum RuleListBuilder {
         }
         // The exceptions go into every list, so they have to leave room for blocking rules.
         let globalRules = convertedCount(globals, version: safariVersion)
-        guard globalRules < limit else {
+        // Leave at least a tenth of each list for blocking rules, or the split would make a list
+        // for every few lines, each converting all the exceptions again.
+        guard globalRules <= limit - limit / 10 else {
             throw BuildError.exceptionsExceedLimit(rules: globalRules, limit: limit)
         }
         var result: [ConvertedRuleList] = []

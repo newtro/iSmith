@@ -149,13 +149,63 @@ final class WebViewTests: XCTestCase {
         let page9 = try await inspect(webView)
         XCTAssertEqual(page9, PageResult(adLoaded: true, newAdLoaded: false, bannerHidden: false))
     }
+
+    /// A navigation that's cancelled (an app link, a download) or fails before committing must
+    /// leave the page on screen with its own setting, not the destination's.
+    func testCancelledOrFailedNavigationKeepsTheCurrentPagesSetting() async throws {
+        let blocking = try fixtureController()
+        try blocking.setAllowed(host: "localhost", true)
+        let navigator = Navigator()
+        navigator.blocking = blocking
+        let webView = makeWebView(navigator)
+        try await navigator.load(pageURL("localhost"), in: webView)
+        var probe = try await probeAd(webView)
+        XCTAssertTrue(probe, "allowed site")
+
+        // Cancelled by the app's policy: the lists for 127.0.0.1 were never attached.
+        let decided = navigator.decisions
+        _ = try await webView.evaluateJavaScript("location.href = 'http://127.0.0.1:\(server.port)/cancel.html'; 1")
+        try await waitUntil("the cancel decision") { navigator.decisions > decided }
+        probe = try await probeAd(webView)
+        XCTAssertTrue(probe, "still on the allowed site after a cancelled navigation")
+
+        // Allowed, so 127.0.0.1's lists were attached, but the load fails before committing.
+        let failed = navigator.provisionalFailures
+        _ = try await webView.evaluateJavaScript("location.href = 'http://127.0.0.1:1/page.html'; 1")
+        try await waitUntil("the failed navigation") { navigator.provisionalFailures > failed }
+        XCTAssertEqual(webView.url?.host, "localhost")
+        probe = try await probeAd(webView)
+        XCTAssertTrue(probe, "still on the allowed site after a failed navigation")
+    }
+
+    /// Loads the ad script again from the current page; true if it loaded.
+    private var probes = 0
+    private func probeAd(_ webView: WKWebView) async throws -> Bool {
+        probes += 1
+        let result = try await webView.callAsyncJavaScript("""
+            return await new Promise(resolve => {
+                const s = document.createElement('script');
+                s.src = '/ads/adbanner.js?probe=' + n;
+                s.onload = () => resolve(true);
+                s.onerror = () => resolve(false);
+                document.head.appendChild(s);
+            });
+            """, arguments: ["n": probes], contentWorld: .page)
+        return try XCTUnwrap(result as? Bool)
+    }
 }
 
-/// Waits for navigations, and optionally applies blocking as each main-frame navigation is
-/// decided, as the app's navigation delegate does.
+/// Waits for navigations and, when `blocking` is set, follows INTEGRATION.md's navigation
+/// delegate: decide the policy first, apply blocking only to a navigation that's allowed, and
+/// re-apply the committed page's setting when a navigation fails before committing.
 @MainActor
 final class Navigator: NSObject, WKNavigationDelegate {
     var blocking: BlockingController?
+    /// Paths the delegate cancels, standing in for app links and downloads.
+    var cancelledPaths: Set<String> = ["/cancel.html"]
+    private(set) var decisions = 0
+    private(set) var provisionalFailures = 0
+    private var committedHost: String?
     private var waiting: CheckedContinuation<Void, Error>?
 
     func load(_ url: URL, in webView: WKWebView) async throws {
@@ -181,15 +231,38 @@ final class Navigator: NSObject, WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
                  preferences: WKWebpagePreferences) async -> (WKNavigationActionPolicy, WKWebpagePreferences) {
+        defer { decisions += 1 }
+        if let path = navigationAction.request.url?.path, cancelledPaths.contains(path) {
+            return (.cancel, preferences)
+        }
         if let blocking, navigationAction.targetFrame?.isMainFrame ?? true {
             await blocking.apply(to: webView.configuration.userContentController, host: navigationAction.request.url?.host)
         }
         return (.allow, preferences)
     }
 
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        committedHost = webView.url?.host
+    }
+
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { finish(nil) }
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { finish(error) }
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        provisionalFailures += 1
+        // The page on screen is still the committed one: put its setting back.
+        blocking?.applyIfLoaded(to: webView.configuration.userContentController, host: committedHost)
         finish(error)
     }
 }
+
+/// Polls the main actor until `condition` holds, for up to 10 seconds.
+@MainActor
+func waitUntil(_ what: String, _ condition: () -> Bool) async throws {
+    let deadline = Date().addingTimeInterval(10)
+    while !condition() {
+        guard Date() < deadline else { throw TimedOut(what: what) }
+        try await Task.sleep(nanoseconds: 20_000_000)
+    }
+}
+
+struct TimedOut: Error { let what: String }

@@ -7,7 +7,7 @@ import WebKit
 /// - `ruleLists()` gives the compiled EasyList and EasyPrivacy lists. The first call of a launch
 ///   looks them up in the compiled store (well under a millisecond). If there's no store yet, or
 ///   WebKit can't read it after an OS update, they're converted and compiled again from the last
-///   downloaded copy or the bundled snapshot (about 7 s for both lists on an M4 Max).
+///   downloaded copy or the bundled snapshot (about 5 s for both lists on an M4 Max).
 /// - `refresh()` downloads the lists when a week has passed since the last check, and swaps in the
 ///   new compiled lists only once all of them compile. Until then, web views keep the old ones.
 /// - `apply(to:host:)` attaches the lists to a web view's content controller, or removes them when
@@ -32,6 +32,9 @@ public final class BlockingController {
         public var retryInterval: TimeInterval = 6 * 3600
         /// How often automatic refresh checks whether a refresh is due.
         public var checkInterval: TimeInterval = 3600
+        /// After the lists fail to load or compile from local files, how long `ruleLists()`
+        /// answers empty before trying again.
+        public var loadRetryInterval: TimeInterval = 600
         public var maxRulesPerList = RuleListBuilder.webKitRuleLimit
         /// A downloaded list with fewer rule lines than this is rejected (an error page, or a
         /// truncated download), and the current lists stay.
@@ -76,7 +79,9 @@ public final class BlockingController {
     private var state: State?
     private var lists: [WKContentRuleList]?
     private var loadTask: Task<[WKContentRuleList], Never>?
-    private var refreshTask: Task<RefreshResult, Never>?
+    private var loadFailedAt: Date?
+    private var refreshTask: (id: Int, forced: Bool, task: Task<RefreshResult, Never>)?
+    private var refreshCount = 0
     private var automaticRefresh: Task<Void, Never>?
     /// Every list handed to a content controller in this process, by identifier, so `apply` can
     /// take off lists from before a refresh as well as current ones.
@@ -85,6 +90,9 @@ public final class BlockingController {
     /// doesn't undo a newer one.
     private let applyTickets = NSMapTable<WKUserContentController, NSNumber>.weakToStrongObjects()
     private var nextTicket = 0
+    /// The identifiers of the lists attached to each content controller, so applying the same
+    /// lists again changes nothing.
+    private let attached = NSMapTable<WKUserContentController, NSArray>.weakToStrongObjects()
     private var loadError: String?
 
     private static let identifierPrefix = "ismith-blocking-"
@@ -108,17 +116,29 @@ public final class BlockingController {
 
     /// The compiled lists to attach. Loads (and if needed compiles) them on the first call; later
     /// calls return them at once. Empty only if neither the downloaded copy nor the bundled
-    /// snapshot compiles (see `status.lastError`); a later `refresh()` tries again.
+    /// snapshot compiles (see `status.lastError`). Then calls answer empty at once for
+    /// `loadRetryInterval` before the next try, and a successful `refresh()` also ends it.
     public func ruleLists() async -> [WKContentRuleList] {
         if let lists { return lists }
         if let loadTask { return await loadTask.value }
-        let task = Task { await self.load() }
+        if let failed = loadFailedAt, configuration.now().timeIntervalSince(failed) < configuration.loadRetryInterval {
+            return []
+        }
+        let task = Task {
+            let result = await self.load()
+            // Settled here, on the main actor, before any caller waiting on the load resumes.
+            self.loadTask = nil
+            guard !result.isEmpty else {
+                self.loadFailedAt = self.configuration.now()
+                return result
+            }
+            self.loadFailedAt = nil
+            self.lists = result
+            NotificationCenter.default.post(name: Self.listsDidChange, object: self)
+            return result
+        }
         loadTask = task
-        let result = await task.value
-        lists = result
-        loadTask = nil
-        NotificationCenter.default.post(name: Self.listsDidChange, object: self)
-        return result
+        return await task.value
     }
 
     /// The lists if they've loaded, without waiting.
@@ -222,8 +242,8 @@ public final class BlockingController {
     }
 
     /// Removes this controller's compiled lists other than `keep`: earlier generations and lists
-    /// left by a refresh that didn't finish. Only called while loading, before any list of this
-    /// launch is attached to a web view.
+    /// left by a refresh that didn't finish. Called while loading, before any list of this launch
+    /// is attached to a web view, and after a refresh, keeping the lists it replaced.
     private func removeLists(except keep: Set<String>) async {
         for id in await store.identifiers() where id.hasPrefix(Self.identifierPrefix) && !keep.contains(id) {
             try? await store.remove(identifier: id)
@@ -236,12 +256,22 @@ public final class BlockingController {
     /// once they all compile. Concurrent calls share one refresh.
     @discardableResult
     public func refresh(force: Bool = false) async -> RefreshResult {
-        if let refreshTask { return await refreshTask.value }
-        let task = Task { await self.performRefresh(force: force) }
-        refreshTask = task
-        let result = await task.value
-        refreshTask = nil
-        return result
+        if let running = refreshTask {
+            let result = await running.task.value
+            // "Update now" during an automatic check that may not download: run it after.
+            if force && !running.forced { return await refresh(force: true) }
+            return result
+        }
+        refreshCount += 1
+        let id = refreshCount
+        let task = Task {
+            let result = await self.performRefresh(force: force)
+            // Cleared here, on the main actor, before any caller waiting on it resumes.
+            if self.refreshTask?.id == id { self.refreshTask = nil }
+            return result
+        }
+        refreshTask = (id, force, task)
+        return await task.value
     }
 
     /// Checks hourly (`checkInterval`) whether a refresh is due, starting after `initialDelay`
@@ -252,7 +282,9 @@ public final class BlockingController {
         automaticRefresh = Task { [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(max(initialDelay, 0) * 1e9))
             while !Task.isCancelled {
-                _ = await self?.refresh()
+                // Holds the controller only while refreshing; ends once it's gone.
+                guard let controller = self else { return }
+                _ = await controller.refresh()
                 try? await Task.sleep(nanoseconds: UInt64(max(interval, 1) * 1e9))
             }
         }
@@ -277,36 +309,36 @@ public final class BlockingController {
         }
         do {
             let texts = try await fetchAll()
-            for source in texts {
-                let lines = RuleListBuilder.rules(in: source.text).count
-                guard Self.looksLikeFilterList(source.text), lines >= configuration.minimumRulesPerSource else {
-                    throw RefreshError.notAFilterList(source.name, lines)
-                }
-            }
             let digest = Self.digest(texts)
             if !current.isEmpty, let state, state.sourceDigest == digest {
                 recordAttempt(at: now, checked: true, error: nil)
                 return .unchanged
             }
             let built = try await buildAndCompile(texts)
-            // Save the texts before the state that points at their lists: if the app stops in
-            // between, the old lists still load and the next refresh compiles these again.
-            for source in texts {
-                try DiskFile.write(Data(source.text.utf8), to: downloadsDir.appendingPathComponent("\(source.name).txt"))
-            }
             let next = State(fingerprint: fingerprint, identifiers: built.identifiers, listNames: built.names,
                              ruleCounts: built.ruleCounts, origin: .downloaded, sourceDigest: digest,
                              listVersions: Self.versions(texts), lastChecked: now, lastAttempt: now, lastError: nil)
             do {
+                // Save the texts before the state that points at their lists: if the app stops in
+                // between, the old lists still load and the next refresh compiles these again.
+                for source in texts {
+                    try DiskFile.write(Data(source.text.utf8), to: downloadsDir.appendingPathComponent("\(source.name).txt"))
+                }
                 try writeState(next)
             } catch {
                 for id in built.identifiers { try? await store.remove(identifier: id) }
                 throw error
             }
+            let replaced = state?.identifiers ?? []
             state = next
             loadError = nil
+            loadFailedAt = nil
             lists = built.lists
             NotificationCenter.default.post(name: Self.listsDidChange, object: self)
+            // Observers have re-applied the new lists. Keep the ones just replaced, in case a web
+            // view still holds them, and remove older generations so a long session doesn't
+            // gather a compiled copy per week.
+            await removeLists(except: Set(built.identifiers + replaced))
             return .updated
         } catch {
             let message = "\(error)"
@@ -329,14 +361,20 @@ public final class BlockingController {
         }
     }
 
+    /// Downloads every source and checks each is a filter list (off the main thread).
     private func fetchAll() async throws -> [(name: String, text: String)] {
         let fetch = configuration.fetch
         let sources = configuration.sources
+        let minimum = configuration.minimumRulesPerSource
         return try await withThrowingTaskGroup(of: (Int, String).self) { group in
             for (index, source) in sources.enumerated() {
                 group.addTask {
-                    let data = try await fetch(source.url)
-                    return (index, String(decoding: data, as: UTF8.self))
+                    let text = String(decoding: try await fetch(source.url), as: UTF8.self)
+                    let lines = RuleListBuilder.rules(in: text).count
+                    guard Self.looksLikeFilterList(text), lines >= minimum else {
+                        throw RefreshError.notAFilterList(source.name, lines)
+                    }
+                    return (index, text)
                 }
             }
             var texts = [String](repeating: "", count: sources.count)
@@ -365,7 +403,7 @@ public final class BlockingController {
         state = next
     }
 
-    static func looksLikeFilterList(_ text: String) -> Bool {
+    nonisolated static func looksLikeFilterList(_ text: String) -> Bool {
         let firstLine = text.drop { $0 == "\u{FEFF}" || $0.isWhitespace }.prefix { $0 != "\n" && $0 != "\r" }
         return firstLine.hasPrefix("[Adblock")
     }
@@ -478,22 +516,26 @@ public final class BlockingController {
     }
 
     /// `apply(to:host:)` without waiting: returns false, and changes nothing, if the lists
-    /// haven't loaded yet.
+    /// haven't loaded yet. It doesn't cancel an `apply` still waiting for the lists, since that
+    /// one is for a navigation in progress.
     @discardableResult
     public func applyIfLoaded(to controller: WKUserContentController, host: String?) -> Bool {
         guard let lists else { return false }
-        nextTicket += 1
-        applyTickets.setObject(NSNumber(value: nextTicket), forKey: controller)
         attach(lists, to: controller, host: host)
         return true
     }
 
     private func attach(_ current: [WKContentRuleList], to controller: WKUserContentController, host: String?) {
+        let blocked = host.map(isBlocked(host:)) ?? true
+        let wanted = blocked ? current : []
+        let ids = wanted.map(\.identifier)
+        // Already attached: leave them, so the page is never briefly without its lists.
+        if let previous = attached.object(forKey: controller) as? [String], previous == ids { return }
         for list in handedOut.values { controller.remove(list) }
-        guard host.map(isBlocked(host:)) ?? true else { return }
-        for list in current {
+        for list in wanted {
             handedOut[list.identifier] = list
             controller.add(list)
         }
+        attached.setObject(ids as NSArray, forKey: controller)
     }
 }

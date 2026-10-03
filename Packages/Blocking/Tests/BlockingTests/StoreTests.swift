@@ -127,4 +127,31 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(x.map(\.identifier), y.map(\.identifier))
         XCTAssertEqual(store.compiles.count, 2)
     }
+
+    /// If nothing compiles from local files, blocking is off, but not for the whole session: the
+    /// load is tried again after `loadRetryInterval`.
+    func testFailedLoadIsRetriedLater() async throws {
+        let dir = try TempDir()
+        let missing = dir.url.appendingPathComponent("missing.txt")
+        var config = BlockingController.Configuration(
+            directory: dir.url.appendingPathComponent("Blocking"),
+            sources: [FilterSource(name: "only", url: URL(string: "https://lists.test/only.txt")!, bundled: missing)])
+        let clock = TestClock()
+        config.now = { clock.now }
+        config.fetch = { _ in throw URLError(.notConnectedToInternet) }
+        let controller = BlockingController(configuration: config, store: try SpyStore(directory: config.directory))
+
+        let none = await controller.ruleLists()
+        XCTAssertEqual(none.count, 0)
+        XCTAssertNotNil(controller.status.lastError)
+        XCTAssertNil(controller.loadedRuleLists)
+
+        try Fixtures.list(version: 1).write(to: missing, atomically: true, encoding: .utf8)
+        let stillNone = await controller.ruleLists()
+        XCTAssertEqual(stillNone.count, 0, "within the retry interval")
+        clock.now = clock.now.addingTimeInterval(config.loadRetryInterval + 1)
+        let lists = await controller.ruleLists()
+        XCTAssertEqual(lists.count, 1)
+        XCTAssertNil(controller.status.lastError)
+    }
 }
