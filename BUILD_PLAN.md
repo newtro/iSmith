@@ -321,6 +321,26 @@ revealed password needs your fingerprint or Mac password.
 Acceptance: every Brave bookmark and saved password appears in iSmith; the counts match Brave's
 (excluding "never save" entries).
 
+**Core built (2026-10-03)**: `Packages/BraveImport`, with no UI. The app still has to map
+bookmarks into a space, move passwords into the P4 store, and build the import screen.
+
+- `BraveProfiles.discover()` lists `Default` and `Profile N` folders that hold bookmarks or
+  passwords, named and ordered from `Local State`.
+- `BookmarksReader` turns `Bookmarks` into a neutral tree (folders, titles, URLs as stored,
+  dates, GUIDs), one folder per root.
+- `BravePasswordReader` byte-copies both login databases, with any `-journal` or `-wal`, into an
+  owner-only temp folder. It reads them with the system SQLite and deletes the copies before
+  decrypting anything. It decrypts `v10` values, skips "never save" rows, and merges a login
+  found in both stores into one. The Safe Storage password comes from an injected source, asked
+  for once per reader and only when something is encrypted. It throws `wrongKey` when nothing
+  decrypts.
+- **macOS 27 protects Brave's folder.** Another app's process sees the folder but can't read it.
+  This shell got "Operation not permitted", while Scott's terminal could read it. The package
+  reports that as `BraveAccessError.permissionDenied`, so the import screen has to explain the
+  macOS permission and offer a retry.
+- Checked read-only against Scott's Brave: 1 profile, 507 bookmarks in 79 folders, and only the
+  three standard roots. Passwords were not read; the fixtures cover them.
+
 ### P6. Default browser and link routing (M)
 
 - Register as an http/https handler, and declare the HTML document types so iSmith appears in
