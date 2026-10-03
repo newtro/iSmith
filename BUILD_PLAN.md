@@ -353,6 +353,179 @@ Acceptance:
 - Embeds that rely on third-party cookies work under WebKit's tracking prevention, or a per-site
   exception is added.
 
+#### P2 notes (2026-10-03)
+
+Built and tested on local fixtures. The acceptance run on Scott's real sites (Outlook, Teams with
+a call and a notification, Azure DevOps, the Azure portal, SharePoint and Loop, Gmail, Etsy,
+GitHub) is still to do; it needs his accounts.
+
+- **Dev isolation (done first)**: Debug builds are "iSmith Dev", bundle id
+  `com.scottsmith.ismith.debug`, with their own data folder (`~/Library/Application Support/iSmith
+  Dev`; `ISMITH_DATA_DIR` still overrides), WebKit stores, notification settings, drag types and
+  Keychain items (`<bundle id>.vault-key`, `.passwords-key`, from `AppIdentity`). Debug never
+  imports the spike or starts Sparkle. Release stays `com.scottsmith.ismith`. `make install`
+  builds Release and installs `/Applications/iSmith.app` (it refuses while iSmith runs). A side
+  effect: `xcodebuild test` now terminates only "iSmith Dev"; before, it would quit the installed
+  app, which shared the bundle id. When P4 wires in the Passwords package, it must be given
+  `AppIdentity.passwordsKeyService` and the app's data folder (its defaults are the Release ones).
+- **Session restore**: each tab's back/forward history is WebKit's `interactionState` (`Data`).
+  It can hold form posts (a sign-in's code or password), so session.json (version 2) stores it
+  sealed with AES-GCM under a key derived (HKDF-SHA256) from the vault key
+  (`Vault.derivedKey(purpose:)`); a history that won't open is dropped and the tab reopens on its
+  URL. Histories over 512 KB aren't kept. A tab's history is re-read only after it navigates.
+  The file is written off the main thread, a second after a navigation or a change to the tabs,
+  not for title-only changes (a flashing Teams title would rewrite it every second), and not
+  when nothing changed. A crash loses at most the last second of navigation (checked by killing
+  the app and relaunching: the restored tab went back and forward through its history). Restore
+  stays lazy: only each window's visible tab and Keep alive tabs load; the rest load from their
+  saved history when selected. Restoring a tab isn't recorded as a new visit.
+- **BrowserData** (`Packages/BrowserData`, GRDB 7.11.1 exact, one owner-only `browser.sqlite`):
+  history (one row per space and address without the fragment, visits, typed counts, frecency
+  suggestions, inline completion, search, delete, clear, prune at a year), bookmarks (a tree per
+  space with a bar and an "Other Bookmarks" root, dense positions, move and copy across spaces,
+  import of a neutral tree that's idempotent by external id), site settings (permissions per
+  origin, zoom per host, app-link answers per scheme; global, not per space) and the downloads
+  list. Stores post a `didChange` notification on the main queue. A damaged file is moved aside
+  and a new one starts; environment errors (locked, disk full) are thrown instead. 34 tests;
+  suggestions take about 11 ms with 50,000 pages.
+- **Brave import mapping (P5)**: `BookmarkImportNode` is the neutral input. Map Brave's bar root's
+  children into the space's `.bar` root, "Other bookmarks" into `.other`, and "Mobile bookmarks"
+  into a "Mobile Bookmarks" folder under `.other`. Brave GUIDs go in `externalID`, so a second
+  import adds only what's new.
+- **History** is recorded on each main-frame commit and on same-document address changes
+  (single-page apps), per space, for http and https only, without `user:password@`, and with
+  titles stripped of unread counts. Back/forward and reloads aren't new visits. ⌘Y opens a
+  History window (a space dropdown, defaulting to the current space, or All Spaces; search;
+  grouped by day; delete, clear last hour, today or all).
+- **Address bar**: an AppKit text field. Typing shows suggestions in a borderless child window
+  under the field (it has to draw over the web view): what Return does first (the inline
+  completion, an address or a search), then open tabs in the space ("Switch to Tab"), bookmarks,
+  history (this space first, other spaces labelled), then a search. Inline completion selects
+  the rest of a host or path from history. ↑/↓ move the highlight; the mouse only highlights,
+  and Return never opens the row under the pointer. Search engine: Google, DuckDuckGo, Bing,
+  Brave Search, Kagi or Ecosia (Settings ▸ General). `localhost`, `*.test`, `*.local` and
+  127.0.0.1 open over http.
+- **Bookmarks**: a bar under the toolbar (⌘⇧B toggles it; folders are menus), a Bookmarks menu
+  rebuilt when it opens, ⌘D (bookmarks the page on the bar and opens a small editor: name,
+  folder, remove; the star shows when the page is bookmarked), and ⌥⌘B a manager window
+  (space dropdown, search, folders, rename/edit, move to folder or space, copy to space, delete).
+  `javascript:` bookmarklets run on the page on screen.
+- **Downloads**: `WKDownload` for attachments, types WebKit can't show, `<a download>`, and the
+  context menu. Files go to ~/Downloads under a free name ("name (2).ext"; names are cleaned and
+  limited to 230 bytes). The panel opens when a download starts; the toolbar button shows a
+  progress ring and the Dock icon the number running. **Quarantine**: WebKit's networking
+  process writes the file, so neither the app nor `LSFileQuarantineEnabled` would quarantine it
+  (and that key would also quarantine every file the app writes, its own databases included).
+  Each finished (or partial) download gets `com.apple.quarantine` through
+  `URLResourceValues.quarantineProperties`: agent "iSmith", the app's bundle id, type web
+  download, and the source and page URLs. Checked on a real download: `0081;…` with the agent
+  and type in the quarantine database. Downloads started from the context menu send the page's
+  origin as Referer, never its path.
+- **Viewing**: find (⌘F, ⌘G, ⇧⌘G, a bar above the page), zoom per site (⌘+, ⌘−, ⌘0, shown in
+  the address bar, saved per host and applied to the site's other tabs), print (⌘P, the page
+  through the print panel), PDFs inline (WebKit's viewer), element fullscreen on, and picture in
+  picture: `document.pictureInPictureEnabled` and `document.fullscreenEnabled` are both true in
+  iSmith's web views, so video players offer both.
+- **Notifications**: WKWebView's own API always answers "denied" (P0). iSmith's shim: a page-world
+  script defines `Notification` (and `showNotification` on service-worker registrations, and
+  `navigator.permissions.query` for notifications). It talks over DOM events with a random name
+  per run to a bridge script in iSmith's own content world (`iSmith.app`), the only place the
+  native handler exists; the page world can't reach it. Permission is per origin, taken from the
+  sending frame's security origin, never from the page's message; only a top-level page can ask
+  (cross-origin iframes and sandboxed or `data:` frames get "denied"). Asking shows a bar on the
+  tab; allowing asks macOS once for notification permission for the app. Notifications go to
+  Notification Center with the site and space as subtitle; a tag replaces that site's earlier
+  notification in that space. Clicking one brings its window, space and tab forward and fires the
+  page's `click` event (after a relaunch the tab still comes forward).
+- **App links** (`msteams:`, `ms-word:`, `mailto:`, `zoommtg:`, …): a bar asks "<site> wants to
+  open Microsoft Teams" with "Open Microsoft Teams" or "Don't Open", remembered per scheme in site
+  settings (Settings ▸ Websites can change or forget it). A remembered "Open" applies only right
+  after a real click or key press in the page (or in the page that opened it moments ago, such as
+  Outlook's "Join" launcher). A page reaching for an app on its own (a restored launcher tab, a
+  scripted click, an ad) is asked "Open" or "Not Now", and that answer isn't remembered, so a
+  restored launcher can neither open Teams at startup nor get Teams blocked. No installed app:
+  a notice after a click. One question per scheme at a time; iSmith never hands a link to
+  itself.
+- **Prompts**: camera and microphone (`requestMediaCapturePermission`) and location (the macOS 27
+  delegate; older macOS keeps WebKit's default) ask with a bar on the tab and remember the answer
+  per origin; a saved camera-and-microphone answer covers each alone. In the smoke test
+  `getUserMedia` was refused before the delegate was asked, because a process started from a
+  shell takes the shell's camera permission; launched normally, macOS asks for "iSmith" once.
+  JavaScript alerts, confirms and prompts, file uploads, HTTP sign-in (Basic, Digest, NTLM; for
+  the session only) and client-certificate choice are sheets, queued per tab until the tab is on
+  screen; every WebKit completion handler is called exactly once, including when the tab closes,
+  hibernates or gets a new web view. Escape doesn't answer a site's bar.
+- **Certificate errors and failed loads**: a certificate problem replaces the page with a warning
+  (Go Back; Details ▸ Show Certificate, "Visit This Website Anyway" for that certificate and host
+  until the app quits). A page that can't be reached shows "can't open" with Try Again, and
+  retries itself when the network comes back. A tab in the background or kept alive keeps what it
+  shows and retries each minute and when the network returns (a newer navigation cancels that).
+- **Context menu**: WebKit's menu, with "Open Link in New Tab", "Open Link in Space ▸", WebKit's
+  "Copy Link", "Download Linked File", "Open Image in New Tab" and "Save Image As…" (a save panel)
+  in place of its new-window and download items. WebKit doesn't say which link a menu is for, so
+  a script in iSmith's world reports the element under a trusted `contextmenu` event; WebKit
+  delivers that before it asks for the menu. ⌘-click and middle-click open background tabs.
+- **Crashes and hibernation**: when a page's web content process dies, the tab shows "This page
+  stopped working" with Reload, and reloads by itself when next shown; a Keep alive tab in the
+  background reloads after 2 s, at most three times in five minutes. Every minute, a tab that has
+  been off screen for 30 minutes is unloaded (history kept) unless it's kept alive, a popup or
+  its opener while both are open, waiting on a dialog or question, using the camera or
+  microphone, playing media, or edited since it loaded (a trusted `input` event: typing, paste,
+  drop, dictation). This also applies the P1 deferred item: a tab that lost Keep alive gets its
+  new policy when it reloads.
+- **Storage access and third-party cookies** (checked on a local fixture, 127.0.0.1 framing
+  localhost): WebKit blocks third-party cookies in iframes outright, `hasStorageAccess()` is
+  false, and `requestStorageAccess()` is rejected without a prompt for a site not yet visited as
+  a first party. There's no public API to answer the Storage Access prompt, pre-grant access or
+  add a per-site cookie exception. WebKit's built-in quirks for Microsoft sign-in show its own
+  "Allow related websites to share cookies?" prompt (seen in P1); iSmith doesn't intercept it,
+  so it never blocks a sign-in, and clicking Allow is remembered per space's store. Whether
+  Teams, SharePoint and Loop embeds work under this is part of the acceptance run. If they
+  don't, the options are WebKit SPI per space (`_setResourceLoadStatisticsEnabled:` or the
+  third-party-cookie blocking mode on the space's store) or "Open in Safari" for that site.
+- **Settings window**: Accounts (as before), General (search engine, bookmarks bar, downloads
+  folder) and Websites (permissions, app links and zoom levels, each changeable or removable).
+- **Smoke test** (scratch `ISMITH_DATA_DIR`, a local fixture site, driven only through the Debug
+  app's own pid: accessibility actions and key events posted to that pid; screenshots of its own
+  windows with `screencapture -l`): restore of two tabs and their history, the notification bar
+  (denied, and the page saw "denied"), a JavaScript alert sheet, the app-link bar for `msteams:`
+  and the no-app notice, a download with the panel and quarantine, an inline PDF, find, zoom kept
+  per site across a relaunch, address-bar suggestions with inline completion and arrow keys,
+  ⌘D and the bar, the History and Bookmarks windows, Settings ▸ Websites, the link context menu,
+  a kill and relaunch (history intact), and the third-party cookie check above.
+- **Tests**: `make test` is green: SignInSync 28 (one new: derived keys), BraveImport 37, Blocking
+  36 (one live test skipped), Passwords 42, BrowserData 34, and 49 app-hosted tests. New app
+  tests (`BrowserBasicsTests`, 18): a back/forward history through a real web view, the sealed
+  session file and a new web view; unloading keeps history; the key is needed; oversized or
+  damaged history dropped; a fixture page's `Notification` reaching the app with site, space and
+  tag, and its click event; `requestPermission` asking once and the handler absent from the page
+  world; a denied site; app-link decisions and plans and their storage; quarantine on a file and
+  on a real `WKDownload` from a local server (saved under a free name, tracked, listed);
+  download names; permission decisions per site and combined; prompts asked once per tab and
+  dismissed on unload; history titles; address input and search engines; the context-menu
+  rewrite.
+- **Review**: two adversarial rounds. Round 1: one high (a remembered app-link "Open" let any
+  page or iframe launch apps without a click, and a restored launcher reopen Teams at every
+  launch) and seven real-use mediums (hibernation losing unsaved text; Escape answering site
+  bars; the session rewritten every second on the main thread; sign-in form posts in
+  session.json in the clear; Return opening the hovered suggestion; failed loads covering the
+  page and never retrying; the full page URL sent as Referer), plus lows. Round 2: two highs in
+  the round-1 fix (a scripted `a.click()` still counted as a click; `window.open()` with no URL
+  was treated as an app link) and three real-use mediums (a "Don't Open" given to a restored
+  launcher blocking Teams links for good; hibernation counting key presses instead of edits;
+  an old retry overriding a newer navigation). All are fixed, and round 2's cheap lows too
+  (title flashes writing the file, a failed write not retried, one Keychain read for the history
+  key, Save As on volumes without a Trash, long fake extensions).
+- **Deferred** (hypothetical or low today):
+  - Downloads from a subframe or without a click aren't asked about (Safari asks per site).
+  - The HTTP sign-in sheet also appears for a cross-origin subresource's challenge.
+  - Files left by a download that a quit interrupted aren't quarantined (finished and failed ones
+    are).
+  - `hadRecentInput` trusts any real click in the page in the last 3 s, so a page could launch a
+    remembered app right after an unrelated click on it.
+  - Notification icons aren't shown (Notification Center gets the title, body, site and space).
+  - Geolocation on macOS before 27 uses WebKit's default (no per-site prompt).
+
 ### P3. Ad and tracker blocking (M)
 
 - Convert EasyList and EasyPrivacy to WebKit content-blocking JSON, using AdGuard's

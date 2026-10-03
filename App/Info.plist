@@ -5,7 +5,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>iSmith</string>
+	<string>$(ISMITH_DISPLAY_NAME)</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -13,7 +13,7 @@
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>$(PRODUCT_NAME)</string>
+	<string>$(ISMITH_DISPLAY_NAME)</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
@@ -46,7 +46,7 @@
 			<key>UTTypeDescription</key>
 			<string>iSmith tab</string>
 			<key>UTTypeIdentifier</key>
-			<string>com.scottsmith.ismith.tab</string>
+			<string>$(PRODUCT_BUNDLE_IDENTIFIER).tab</string>
 		</dict>
 		<dict>
 			<key>UTTypeConformsTo</key>
@@ -56,7 +56,7 @@
 			<key>UTTypeDescription</key>
 			<string>iSmith space</string>
 			<key>UTTypeIdentifier</key>
-			<string>com.scottsmith.ismith.space</string>
+			<string>$(PRODUCT_BUNDLE_IDENTIFIER).space</string>
 		</dict>
 	</array>
 </dict>

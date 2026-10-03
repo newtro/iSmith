@@ -35,6 +35,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private(set) var updater: SPUStandardUpdaterController?
     private var controllers: [UUID: BrowserWindowController] = [:]
     private var settings: NSWindowController?
+    private var historyWindow: NSWindowController?
+    private var bookmarksWindow: NSWindowController?
     private var commands: Commands?
     private var keyMonitor: Any?
 
@@ -44,7 +46,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         guard !testing else { return }
+        #if !DEBUG
+        // "iSmith Dev" never updates itself from the release feed.
         updater = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
+        #endif
         let browser = BrowserState()
         self.browser = browser
         browser.presentWindow = { [weak self] state in self?.present(state) }
@@ -73,12 +78,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func showSettings() {
         guard let browser else { return }
         if settings == nil {
-            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 440, height: 640),
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 640),
                                   styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: false)
-            window.title = "Accounts and Sign-ins"
+            window.title = "Settings"
             window.isReleasedWhenClosed = false
             window.isRestorable = false
-            window.contentView = NSHostingView(rootView: AccountsPanel()
+            window.contentView = NSHostingView(rootView: SettingsView()
                 .environmentObject(browser)
                 .environmentObject(browser.vault)
                 .environmentObject(browser.sync)
@@ -89,6 +94,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         settings?.showWindow(nil)
         settings?.window?.makeKeyAndOrderFront(nil)
+    }
+
+    /// ⌘Y: the history window, on the current window's space.
+    func showHistory() {
+        guard let browser else { return }
+        if historyWindow == nil {
+            historyWindow = Self.libraryWindow(title: "History", size: NSSize(width: 760, height: 560),
+                                               view: HistoryView(space: browser.currentWindow?.activeSpaceID).environmentObject(browser))
+        }
+        historyWindow?.showWindow(nil)
+        historyWindow?.window?.makeKeyAndOrderFront(nil)
+    }
+
+    /// ⌥⌘B: the bookmarks manager, on the current window's space.
+    func showBookmarks() {
+        guard let browser, let space = browser.currentWindow?.activeSpaceID ?? browser.spaces.first?.id else { return }
+        if bookmarksWindow == nil {
+            bookmarksWindow = Self.libraryWindow(title: "Bookmarks", size: NSSize(width: 720, height: 560),
+                                                 view: BookmarksManager(space: space).environmentObject(browser))
+        }
+        bookmarksWindow?.showWindow(nil)
+        bookmarksWindow?.window?.makeKeyAndOrderFront(nil)
+    }
+
+    private static func libraryWindow<V: View>(title: String, size: NSSize, view: V) -> NSWindowController {
+        let window = NSWindow(contentRect: NSRect(origin: .zero, size: size),
+                              styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: false)
+        window.title = title
+        window.isReleasedWhenClosed = false
+        window.isRestorable = false
+        window.contentView = NSHostingView(rootView: view)
+        window.center()
+        return NSWindowController(window: window)
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { !testing }

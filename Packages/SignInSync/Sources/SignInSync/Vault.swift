@@ -110,6 +110,13 @@ public final class Vault: ObservableObject {
     }
 
     /// Whether the account's saved cookies include a signed-in session at a built-in provider.
+    /// A key for another use (sealing the app's session file), derived from the vault key with
+    /// HKDF-SHA256, so the vault key itself is never used for anything else. nil without a key.
+    public func derivedKey(purpose: String) -> SymmetricKey? {
+        guard let key else { return nil }
+        return HKDF<SHA256>.deriveKey(inputKeyMaterial: key, info: Data(purpose.utf8), outputByteCount: 32)
+    }
+
     public func hasSession(_ accountID: String) -> Bool {
         guard let records = records(for: accountID) else { return false }
         return records.contains { Self.sessionNames.contains($0.name) }

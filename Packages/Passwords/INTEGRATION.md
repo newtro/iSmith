@@ -13,7 +13,8 @@ func openPasswords(dataDir: URL?) -> PasswordAutofill? {
     let store: PasswordStore
     do {
         store = try PasswordStore(fileURL: PasswordStore.defaultFileURL(dataDirectory: dataDir),
-                                  keyStore: PasswordStore.keychainKeyStore())
+                                  keyStore: KeychainKeyStore(service: AppIdentity.passwordsKeyService,
+                                                            account: "passwords", label: "iSmith passwords key"))
     } catch {
         // `.keychainUnavailable`: same handling as the vault ("Try Again", or run without
         // passwords). Nothing on disk was touched. Other errors: the folder couldn't be written.
@@ -32,7 +33,10 @@ func openPasswords(dataDir: URL?) -> PasswordAutofill? {
 - The file is `~/Library/Application Support/iSmith/passwords.sqlite` (0600, folder 0700). With
   `ISMITH_DATA_DIR`, pass that folder as `dataDirectory`.
 - The key is a 256-bit AES key in the file-based login Keychain, service
-  `com.scottsmith.ismith.passwords-key`, account `passwords`, separate from the vault key.
+  `com.scottsmith.ismith.passwords-key`, account `passwords`, separate from the vault key. The
+  app passes `AppIdentity.passwordsKeyService` rather than the package default, so the Debug
+  build ("iSmith Dev") uses `com.scottsmith.ismith.debug.passwords-key` and never reads the
+  installed app's key.
 - Add `Packages/Passwords` to `project.yml` under `packages:` and as a dependency of the
   `iSmith` target. It depends on `SignInSync` (for `KeyStore`) and GRDB 7.11.1 (exact).
 

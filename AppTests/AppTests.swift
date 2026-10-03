@@ -62,6 +62,22 @@ final class AppTests: XCTestCase {
         XCTAssertNil(AddressInput.url(for: "   "))
     }
 
+    /// The tests run inside the Debug app, "iSmith Dev": it must never use the installed app's
+    /// bundle id, Keychain items or data folder.
+    func testDebugBuildIsIsolatedFromTheInstalledApp() {
+        XCTAssertEqual(AppIdentity.bundleID, "com.scottsmith.ismith.debug")
+        XCTAssertEqual(AppIdentity.displayName, "iSmith Dev")
+        XCTAssertEqual(AppIdentity.vaultKeyService, "com.scottsmith.ismith.debug.vault-key")
+        XCTAssertEqual(AppIdentity.passwordsKeyService, "com.scottsmith.ismith.debug.passwords-key")
+        XCTAssertNotEqual(AppIdentity.vaultKeyStore().service, KeychainKeyStore.vaultService)
+        XCTAssertEqual(AppIdentity.dataFolderName, "iSmith Dev")
+        XCTAssertFalse(AppIdentity.importsSpike)
+        if ProcessInfo.processInfo.environment["ISMITH_DATA_DIR"] == nil {
+            XCTAssertEqual(AppPaths.standard.dataDir.lastPathComponent, "iSmith Dev")
+            XCTAssertNil(AppPaths.standard.spikeDir)
+        }
+    }
+
     func testUserAgentIsSafari() {
         XCTAssertTrue(BrowserState.userAgent.hasSuffix("Safari/605.1.15"))
         XCTAssertTrue(BrowserState.userAgent.contains("Version/"))

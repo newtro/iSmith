@@ -1,4 +1,6 @@
 import AppKit
+import BrowserData
+import Combine
 import SignInSync
 import SwiftUI
 import UniformTypeIdentifiers
@@ -210,6 +212,7 @@ private struct SpaceView: View {
     @ObservedObject var window: WindowState
     @ObservedObject var space: SpaceState
     @ObservedObject var tabs: SpaceTabs
+    @AppStorage("showBookmarksBar") private var showBookmarksBar = true
 
     var body: some View {
         VStack(spacing: 0) {
@@ -219,7 +222,11 @@ private struct SpaceView: View {
             if let tab = tabs.selected {
                 Toolbar(window: window, space: space, tabs: tabs, tab: tab)
                     .id(tab.id)
-                WebArea(tab: tab, color: space.color)
+                if showBookmarksBar, browser.data != nil {
+                    BookmarksBar(window: window, spaceID: space.id)
+                }
+                TabPage(window: window, tab: tab, color: space.color)
+                    .id(tab.id)
             } else {
                 VStack(spacing: 10) {
                     Text("No tabs in \(space.def.name)").foregroundStyle(.secondary)
@@ -233,19 +240,42 @@ private struct SpaceView: View {
     }
 }
 
+/// The page with what can sit above or over it: the site's questions, the find bar, a crash or a
+/// failed load.
+private struct TabPage: View {
+    @ObservedObject var window: WindowState
+    @ObservedObject var tab: Tab
+    let color: Color
+
+    var body: some View {
+        VStack(spacing: 0) {
+            PromptBar(tab: tab)
+            if tab.findShown { FindBar(window: window, tab: tab) }
+            WebArea(tab: tab, color: color)
+        }
+    }
+}
+
 private struct WebArea: View {
     @ObservedObject var tab: Tab
     let color: Color
 
     var body: some View {
-        WebContainer(webView: tab.webView)
-            .overlay {
-                if tab.webView == nil { ProgressView().controlSize(.small) }
+        ZStack {
+            WebContainer(webView: tab.certificateProblem == nil && !tab.crashed ? tab.webView : nil)
+            if tab.webView == nil, tab.certificateProblem == nil {
+                ProgressView().controlSize(.small)
             }
-            .background(Color(nsColor: .textBackgroundColor))
-            .clipShape(RoundedRectangle(cornerRadius: 8))
-            .overlay(RoundedRectangle(cornerRadius: 8).stroke(color.opacity(0.5), lineWidth: 1))
-            .padding([.horizontal, .bottom], 8)
+            if let problem = tab.certificateProblem {
+                PageProblemView(tab: tab, problem: problem)
+            } else if tab.crashed {
+                CrashedView(tab: tab)
+            }
+        }
+        .background(Color(nsColor: .textBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(color.opacity(0.5), lineWidth: 1))
+        .padding([.horizontal, .bottom], 8)
     }
 }
 
@@ -256,8 +286,14 @@ private struct Toolbar: View {
     @ObservedObject var space: SpaceState
     @ObservedObject var tabs: SpaceTabs
     @ObservedObject var tab: Tab
+    @StateObject private var popup = SuggestionPopup()
+    @StateObject private var bridge = AddressBridge()
     @State private var address = ""
-    @FocusState private var addressFocused: Bool
+    @State private var addressFocused = false
+    @State private var editingBookmark: Bookmark?
+    @State private var bookmarked = false
+    /// Bumped on each keystroke; an older suggestion answer is dropped.
+    @State private var generation = 0
 
     var body: some View {
         HStack(spacing: 8) {
@@ -270,15 +306,14 @@ private struct Toolbar: View {
             Button { browser.reload(tab, in: tabs) } label: { Image(systemName: "arrow.clockwise") }
                 .help("Reload  ⌘R")
             HStack(spacing: 6) {
-                TextField("Search or enter address", text: $address)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 12, design: .monospaced))
-                    .focused($addressFocused)
-                    .onSubmit(go)
-                    .onExitCommand {
-                        address = tab.url?.absoluteString ?? ""
-                        addressFocused = false
-                    }
+                AddressField(text: $address, placeholder: "Search \(SearchEngine.current.name) or enter address",
+                             edited: edited, focusChanged: focusChanged, commit: go, cancel: cancel, move: move,
+                             bridge: bridge)
+                if tab.zoom != 1 {
+                    Button("\(Int((tab.zoom * 100).rounded()))%") { browser.zoom(tab, by: 0) }
+                        .font(.caption.monospacedDigit())
+                        .help("Reset zoom  ⌘0")
+                }
                 // Only exceptions are shown; everything else uses the shared sign-ins.
                 ForEach(exceptions, id: \.self) { label in
                     HStack(spacing: 5) {
@@ -290,11 +325,22 @@ private struct Toolbar: View {
                     .overlay(Capsule().stroke(space.color.opacity(0.45)))
                     .fixedSize()
                 }
+                if browser.data != nil, tab.url != nil {
+                    Button { editingBookmark = browser.bookmarkForCurrentPage(in: window) } label: {
+                        Image(systemName: bookmarked ? "star.fill" : "star")
+                            .foregroundStyle(bookmarked ? Color.accentColor : Color.secondary)
+                    }
+                    .help("Bookmark this page  ⌘D")
+                    .popover(item: $editingBookmark, arrowEdge: .bottom) { bookmark in
+                        BookmarkEditor(spaceID: space.id, bookmark: bookmark) { editingBookmark = nil }
+                    }
+                }
             }
             .padding(.horizontal, 10)
             .frame(height: 28)
             .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .textBackgroundColor)))
             .overlay(RoundedRectangle(cornerRadius: 8).stroke(addressFocused ? Color.accentColor.opacity(0.7) : Color(nsColor: .separatorColor)))
+            DownloadsToolbarItem(downloads: browser.downloads, window: window)
             Menu("Go") {
                 ForEach(QuickLink.all) { link in
                     Button(link.name) { browser.navigate(tab, in: tabs, to: link.url) }
@@ -308,32 +354,102 @@ private struct Toolbar: View {
         .onAppear {
             address = tab.url?.absoluteString ?? ""
             updateTitle(tab.title)
+            updateBookmarked()
+            popup.picked = { pick($0) }
             // A new tab asked for the address bar before this toolbar existed.
             if window.pendingAddressFocus == tab.id { takeFocus() }
         }
+        .onDisappear { popup.hide() }
         .onReceive(tab.$url) { url in
             if !addressFocused { address = url?.absoluteString ?? "" }
+            updateBookmarked(url)
         }
         .onReceive(tab.$title, perform: updateTitle)
-        .onChange(of: addressFocused) { _, focused in
-            // Leaving the field without going anywhere shows the page's address again.
-            if !focused { address = tab.url?.absoluteString ?? "" }
-        }
+        .onReceive(NotificationCenter.default.publisher(for: BookmarkStore.didChange)) { _ in updateBookmarked() }
         .onReceive(window.focusRequests) { id in
             // Only for this tab; a request for a tab that was just created is picked up by its own
             // toolbar's onAppear.
             if id == nil || id == tab.id { takeFocus() }
         }
+        .onReceive(window.bookmarkRequests) { editingBookmark = browser.bookmarkForCurrentPage(in: window) }
     }
 
     private func takeFocus() {
         window.pendingAddressFocus = nil
-        // On the next turn, once the field is in the window.
-        DispatchQueue.main.async { addressFocused = true }
+        bridge.focus.send()
+    }
+
+    private func focusChanged(_ focused: Bool) {
+        addressFocused = focused
+        if !focused {
+            // Leaving the field without going anywhere shows the page's address again.
+            popup.hide()
+            address = tab.url?.absoluteString ?? ""
+        }
+    }
+
+    private func edited(_ typed: String, deleting: Bool) {
+        generation += 1
+        let mine = generation
+        Task {
+            let result = await AddressSuggestions.compute(for: typed, space: space.id, browser: browser)
+            guard mine == generation, addressFocused else { return }
+            if let view = bridge.field { popup.show(result.items, below: view) }
+            if !deleting, let completion = result.completion { bridge.completions.send((typed, completion)) }
+        }
+    }
+
+    private func move(_ step: Int) -> Bool {
+        guard popup.isShown else { return false }
+        bridge.displays.send(popup.move(step)?.fieldText ?? bridge.typed)
+        return true
+    }
+
+    private func pick(_ item: Suggestion) {
+        popup.hide()
+        if case let .openTab(id) = item.kind {
+            address = tab.url?.absoluteString ?? ""
+            browser.focusTab(id)
+            return
+        }
+        open(item.url, typed: item.kind == .address || item.kind == .search, newTab: false)
+    }
+
+    private func go(newTab: Bool) {
+        if let index = popup.selected, popup.items.indices.contains(index) {
+            let item = popup.items[index]
+            popup.hide()
+            if case .openTab = item.kind { return pick(item) }
+            return open(item.url, typed: false, newTab: newTab)
+        }
+        popup.hide()
+        guard let url = AddressInput.url(for: address) else { return }
+        open(url, typed: true, newTab: newTab)
+    }
+
+    private func open(_ url: URL, typed: Bool, newTab: Bool) {
+        if newTab {
+            browser.openTab(in: window, space: space.id, url: url)
+            address = tab.url?.absoluteString ?? ""
+        } else {
+            browser.navigate(tab, in: tabs, to: url, typed: typed)
+            address = url.absoluteString
+        }
+        if let webView = tab.webView { webView.window?.makeFirstResponder(webView) }
+    }
+
+    private func cancel() {
+        if popup.isShown { return popup.hide() }
+        address = tab.url?.absoluteString ?? ""
+        if let webView = tab.webView { webView.window?.makeFirstResponder(webView) } else { window.window?.makeFirstResponder(nil) }
     }
 
     private func updateTitle(_ title: String) {
         window.window?.title = "\(space.def.name) — \(title)"
+    }
+
+    private func updateBookmarked(_ url: URL? = nil) {
+        bookmarked = browser.isBookmarked(url ?? tab.url, space: space.id)
     }
 
     private var exceptions: [String] {
@@ -345,13 +461,17 @@ private struct Toolbar: View {
             }
         }
     }
+}
 
-    private func go() {
-        guard let url = AddressInput.url(for: address) else { return }
-        browser.navigate(tab, in: tabs, to: url)
-        address = url.absoluteString
-        addressFocused = false
-        if let webView = tab.webView { webView.window?.makeFirstResponder(webView) }
+/// Shows the downloads button once there's a download (or the panel is open).
+private struct DownloadsToolbarItem: View {
+    @ObservedObject var downloads: DownloadManager
+    @ObservedObject var window: WindowState
+
+    var body: some View {
+        if !downloads.items.isEmpty || window.downloadsShown {
+            DownloadsButton(downloads: downloads, shown: $window.downloadsShown)
+        }
     }
 }
 

@@ -28,15 +28,68 @@ final class Tab: ObservableObject, Identifiable {
     /// while both are open, since they may still talk to each other (sign-in popups do), and
     /// closing the popup goes back to its opener.
     var openerID: UUID?
-    /// Called when the title or URL changes: badges and the saved session follow.
+    /// Called when the URL changes: badges and the saved session follow.
     var changed: (() -> Void)?
+    /// Called when only the title changes (saved a little later).
+    var titleChanged: (() -> Void)?
+    /// The title history last got for this page.
+    var lastHistoryTitle: String?
+    /// The live web view's history, read again only after it navigates.
+    private var cachedHistory: Data?
+    private var historyStale = true
+    /// The back/forward history while the tab has no web view (restored from the session, or
+    /// hibernated). The next web view starts from it.
+    var savedState: Data?
+    /// The page's web content process died; the tab shows a reload state (see `crash`).
+    @Published var crashed = false
+    /// Recent crashes, so a page that keeps crashing isn't reloaded forever.
+    var crashTimes: [Date] = []
+    /// Questions from the page shown as a bar over it (permissions, app links), oldest first.
+    @Published var prompts: [SitePrompt] = []
+    /// JavaScript alerts, confirms and prompts and sign-in sheets waiting for the tab to be shown.
+    var pendingDialogs: [PendingDialog] = []
+    /// One of the tab's dialogs is on screen.
+    var showingDialog = false
+    /// How the main frame's current navigation started (history skips back/forward and reloads).
+    var lastNavigationType: WKNavigationType?
+    /// What was last typed in the address bar and when, so the visit counts as typed in history.
+    var typed: (url: URL, at: Date)?
+    /// Called when the page changes its title (history keeps titles), and when it changes its
+    /// address without loading (a single-page app moving on, which history records too).
+    var retitled: ((String) -> Void)?
+    var movedInPage: ((URL) -> Void)?
+    /// A certificate problem stopped the last navigation; the tab shows a warning page.
+    @Published var certificateProblem: CertificateProblem?
+    /// Find in page (⌘F).
+    @Published var findShown = false
+    @Published var findText = ""
+    @Published var findResult: Bool?
+    /// The page zoom (⌘+ / ⌘−), remembered per site.
+    @Published var zoom: CGFloat = 1
+    /// When the tab was last on screen, for hibernation.
+    var lastShown = Date()
+    let createdAt = Date()
+    /// A load that failed in the background (no network): tried again later.
+    var retryURL: URL?
     private var observations: [NSKeyValueObservation] = []
 
-    init(id: UUID = UUID(), url: URL?, title: String? = nil, keepAlive: Bool? = nil) {
+    init(id: UUID = UUID(), url: URL?, title: String? = nil, keepAlive: Bool? = nil, history: Data? = nil) {
         self.id = id
         self.url = url
         self.title = title.flatMap { $0.isEmpty ? nil : $0 } ?? url?.host ?? "New tab"
         keepAliveSetting = keepAlive
+        savedState = history
+    }
+
+    /// The tab's back/forward history: the live web view's, or the one saved for it. The live
+    /// one is read again only after a navigation, not on every save.
+    var history: Data? {
+        guard let webView else { return savedState }
+        if historyStale || cachedHistory == nil {
+            cachedHistory = webView.interactionState as? Data
+            historyStale = false
+        }
+        return cachedHistory ?? savedState
     }
 
     /// Whether the tab is kept alive: its own setting, or the automatic rule for its page.
@@ -49,23 +102,43 @@ final class Tab: ObservableObject, Identifiable {
         old.map(Self.close)
         self.webView = webView
         appliedKeepAlive = keepAlive
+        cachedHistory = nil
+        historyStale = true
+        savedState = nil
+        crashed = false
+        certificateProblem = nil
         observations = [
             webView.observe(\.title, options: [.initial]) { [weak self] wv, _ in
                 MainActor.assumeIsolated {
                     guard let self, self.webView === wv else { return }
-                    if let t = wv.title, !t.isEmpty { self.title = t } else if let host = wv.url?.host { self.title = host }
-                    self.changed?()
+                    if let t = wv.title, !t.isEmpty {
+                        self.title = t
+                        self.retitled?(t)
+                    } else if let host = wv.url?.host {
+                        self.title = host
+                    }
+                    self.titleChanged?()
                 }
             },
             webView.observe(\.url, options: [.initial]) { [weak self] wv, _ in
                 MainActor.assumeIsolated {
                     guard let self, self.webView === wv, let url = wv.url else { return }
+                    let moved = self.url != url && !wv.isLoading
                     self.url = url
+                    self.historyStale = true
+                    if moved { self.movedInPage?(url) }
                     self.changed?()
                 }
             },
             webView.observe(\.isLoading, options: [.initial]) { [weak self] wv, _ in
-                MainActor.assumeIsolated { if let self, self.webView === wv { self.isLoading = wv.isLoading } }
+                MainActor.assumeIsolated {
+                    guard let self, self.webView === wv else { return }
+                    self.isLoading = wv.isLoading
+                    if !wv.isLoading {
+                        self.historyStale = true
+                        self.changed?()
+                    }
+                }
             },
             webView.observe(\.canGoBack, options: [.initial]) { [weak self] wv, _ in
                 MainActor.assumeIsolated { if let self, self.webView === wv { self.canGoBack = wv.canGoBack } }
@@ -76,14 +149,23 @@ final class Tab: ObservableObject, Identifiable {
         ]
     }
 
-    /// Closes the web view; the tab keeps its title and URL and loads again when shown.
+    /// Closes the web view; the tab keeps its title, URL and history and loads again when shown.
     func unload() {
+        historyStale = true
+        if let state = history { savedState = state }
         detachWebView().map(Self.close)
     }
 
     private func detachWebView() -> WKWebView? {
         observations.forEach { $0.invalidate() }
         observations = []
+        // What the old page was waiting on is answered "no": WebKit needs every handler called.
+        let dialogs = pendingDialogs
+        pendingDialogs = []
+        dialogs.forEach { $0.cancel() }
+        let questions = prompts
+        prompts = []
+        questions.forEach { $0.answer(.dismissed) }
         let old = webView
         webView = nil
         appliedKeepAlive = nil
@@ -100,7 +182,7 @@ final class Tab: ObservableObject, Identifiable {
 
     /// The tab as saved in session.json.
     func record(group: UUID?) -> TabRecord {
-        TabRecord(id: id, url: url, title: title, group: group, keepAlive: keepAliveSetting)
+        TabRecord(id: id, url: url, title: title, group: group, keepAlive: keepAliveSetting, history: history)
     }
 }
 
@@ -162,7 +244,7 @@ final class SpaceTabs: ObservableObject {
         state.layout = record.layout
         for id in state.layout.ids {
             guard let r = byID[id] else { continue }
-            state.tabs[id] = Tab(id: id, url: r.url, title: r.title, keepAlive: r.keepAlive)
+            state.tabs[id] = Tab(id: id, url: r.url, title: r.title, keepAlive: r.keepAlive, history: r.history)
         }
         return state
     }
@@ -180,6 +262,12 @@ final class WindowState: ObservableObject, Identifiable {
     /// A new tab whose address bar takes focus once its toolbar is on screen. The toolbar for a
     /// tab that was just created doesn't exist yet when the request is sent.
     var pendingAddressFocus: UUID?
+    /// The downloads panel is open.
+    @Published var downloadsShown = false
+    /// Asks the find bar to take focus (⌘F).
+    let findFocusRequests = PassthroughSubject<Void, Never>()
+    /// Asks the toolbar to bookmark the page and show its editor (⌘D).
+    let bookmarkRequests = PassthroughSubject<Void, Never>()
 
     /// Focuses the address bar of `tab` (default: whichever tab is showing).
     func focusAddress(of tab: UUID? = nil) {
@@ -257,9 +345,10 @@ struct ClosedTab {
 
 extension UTType {
     /// A tab being dragged within iSmith (declared in Info.plist).
-    static let ismithTab = UTType(exportedAs: "com.scottsmith.ismith.tab")
+    /// Named after the bundle id, so the Debug and installed apps never take each other's drags.
+    static let ismithTab = UTType(exportedAs: AppIdentity.bundleID + ".tab")
     /// A space being dragged in the rail.
-    static let ismithSpace = UTType(exportedAs: "com.scottsmith.ismith.space")
+    static let ismithSpace = UTType(exportedAs: AppIdentity.bundleID + ".space")
 }
 
 extension NSPasteboard.PasteboardType {
