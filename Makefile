@@ -45,7 +45,8 @@ release: project
 # Builds Release and installs it as /Applications/iSmith.app. Quit iSmith first: replacing a
 # running app's bundle can crash it.
 install: release
-	@if pgrep -f '$(INSTALLED)/Contents/MacOS/iSmith' >/dev/null; then \
+	@# Anchored, so pgrep doesn't match this shell's own command line.
+	@if pgrep -f '^$(INSTALLED)/Contents/MacOS/iSmith' >/dev/null; then \
 		echo "iSmith is running. Quit it, then run make install again."; exit 1; fi
 	rm -rf '$(INSTALLED).installing'
 	ditto '$(RELEASE_APP)' '$(INSTALLED).installing'
