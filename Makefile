@@ -52,6 +52,9 @@ install: release
 	ditto '$(RELEASE_APP)' '$(INSTALLED).installing'
 	rm -rf '$(INSTALLED)'
 	mv '$(INSTALLED).installing' '$(INSTALLED)'
+	@# Re-register so Finder and the Dock pick up a changed icon instead of a cached one.
+	touch '$(INSTALLED)'
+	/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f '$(INSTALLED)'
 	@echo "Installed $(INSTALLED)"
 
 project: $(PROJECT)
