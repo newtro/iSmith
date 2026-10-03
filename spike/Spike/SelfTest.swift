@@ -116,8 +116,8 @@ struct SelfTest {
         exit(failures.isEmpty ? 0 : 1)
     }
 
-    /// Space and account management without code: saving a noticed sign-in, creating spaces with
-    /// existing and new accounts, switching a space to another account, and unbinding.
+    /// Shared-by-default sign-ins: new spaces need no setup, overrides still isolate, and an older
+    /// per-space config migrates.
     private func configPhase() async {
         var failures: [String] = []
         func check(_ ok: Bool, _ what: String) {
@@ -128,95 +128,93 @@ struct SelfTest {
         await wipeTestStores()
         let hour = Date().addingTimeInterval(3600)
         let m = await sync.attach(config.space("contoso")!)
-        let b = await sync.attach(config.space("contoso-b")!)
         let t = await sync.attach(config.space("fabrikam")!)
+        let s = await sync.attach(config.space("newtro")!)
         await m.httpCookieStore.setCookie(cookie("SID", "c1", ".google.com", expires: hour))
-        await settle()
-
-        // A Google sign-in in a space with no Google account is noticed, then saved as the shared one.
-        await b.httpCookieStore.setCookie(cookie("SID", "d1", ".google.com", expires: hour))
-        await settle()
-        check(sync.detected["contoso-b"]?.contains("google") == true, "Google sign-in noticed in a space with no Google account")
-        browser.saveDetected(spaceID: "contoso-b", providerID: "google", choice: .existing("google-personal"), newName: "")
-        await settle()
-        check(config.space("contoso-b")?.bindings["google"] == "google-personal", "Saved sign-in binds the space to the chosen account")
-        check(await value(m, "SID") == "d1", "Saved sign-in is shared with other spaces using that account")
-        check(sync.detected["contoso-b"]?.contains("google") != true, "Offer disappears after saving")
-
-        // New space with an existing account starts signed in; with a new account, starts empty.
-        browser.createSpace(name: "Fresh", color: 5, home: "", choices: ["google": .existing("google-personal")], newNames: [:])
-        let fresh = config.spaces.first { $0.name == "Fresh" }!
-        let f = await sync.attach(fresh)
-        check(await value(f, "SID") == "d1", "New space using an existing account is signed in immediately")
-        browser.createSpace(name: "Brand New", color: 6, home: "", choices: ["google": .new], newNames: ["google": "Test Google"])
-        let brand = config.spaces.first { $0.name == "Brand New" }!
-        let n = await sync.attach(brand)
-        check(config.accounts(for: "google").contains { $0.name == "Test Google" }, "New account is created from the space editor")
-        check(await value(n, "SID") == nil, "New space with a new account starts signed out")
-        await n.httpCookieStore.setCookie(cookie("SID", "n1", ".google.com", expires: hour))
-        await settle()
-        let testAccount = config.accounts(for: "google").first { $0.name == "Test Google" }!
-        check(browser.vault.records(for: testAccount.id)?.first { $0.name == "SID" }?.value == "n1", "Signing in to a new account saves it")
-        check(await value(m, "SID") == "d1", "A different Google account does not leak into other spaces")
-
-        // Switching a space to another Microsoft account replaces its sign-in with that account's.
-        await m.httpCookieStore.setCookie(cookie("ismith_probe_ms", "m1", "login.microsoftonline.com", expires: hour, secure: true))
+        await s.httpCookieStore.setCookie(cookie("ismith_probe_ms", "s1", "login.microsoftonline.com", expires: hour, secure: true))
         await t.httpCookieStore.setCookie(cookie("ismith_probe_ms", "t1", "login.microsoftonline.com", expires: hour, secure: true))
         await settle()
-        update("fabrikam") { $0["microsoft"] = .existing("ms-contoso") }
-        await settle()
-        check(await value(t, "ismith_probe_ms") == "m1", "Switching a space to another account loads that account's sign-in")
-        check(browser.vault.records(for: "ms-fabrikam")?.first { $0.name == "ismith_probe_ms" }?.value == "t1", "The old account keeps its own sign-in")
 
-        // Removing an account from a space signs the space out of it, with no offer to re-save it.
-        update("fabrikam") { $0["google"] = AccountChoice.none }
+        // The complaint: a new space should already be signed in to everything.
+        browser.createSpace(name: "Fresh", color: 5, home: "", choices: [:], newNames: [:])
+        let fresh = config.spaces.first { $0.name == "Fresh" }!
+        let f = await sync.attach(fresh)
+        check(fresh.bindings.isEmpty, "New space needs no account setup")
+        check(await value(f, "SID") == "c1", "New space is signed in to Google from another space's sign-in")
+        check(await value(f, "ismith_probe_ms") == "s1", "New space is signed in to the shared Microsoft session")
+        check(await value(t, "ismith_probe_ms") == "t1", "A space with a separate Microsoft account keeps its own")
+
+        // A separate account stays separate.
+        browser.createSpace(name: "Separate", color: 6, home: "", choices: ["google": .new], newNames: ["google": "Second Google"])
+        let sep = config.spaces.first { $0.name == "Separate" }!
+        let n = await sync.attach(sep)
+        check(await value(n, "SID") == nil, "Space with a new separate Google account starts signed out")
+        await n.httpCookieStore.setCookie(cookie("SID", "n1", ".google.com", expires: hour))
         await settle()
-        check(await value(t, "SID") == nil, "Removing the Google account signs the space out of Google")
-        check(sync.detected["fabrikam"]?.contains("google") != true, "No offer to save the removed account's session")
-        check(await value(m, "SID") == "d1", "Other spaces stay signed in after one space drops the account")
+        let (mSID2, fSID2) = (await value(m, "SID"), await value(f, "SID"))
+        check(mSID2 == "c1" && fSID2 == "c1", "Separate account doesn't leak into shared spaces")
+
+        // Moving a space between its separate account and the shared one.
+        update("fabrikam") { $0["microsoft"] = .shared }
+        await settle()
+        check(await value(t, "ismith_probe_ms") == "s1", "Switching to Shared loads the shared Microsoft session")
+        check(browser.vault.records(for: "ms-fabrikam")?.first { $0.name == "ismith_probe_ms" }?.value == "t1", "The separate account keeps its session for later")
+        update("fabrikam") { $0["microsoft"] = .existing("ms-fabrikam") }
+        await settle()
+        check(await value(t, "ismith_probe_ms") == "t1", "Switching back loads the separate account again")
+
+        // Not shared: the space signs out of the shared Google and keeps its own changes local.
+        update("fabrikam") { $0["google"] = .local }
+        await settle()
+        check(await value(t, "SID") == nil, "Not shared signs the space out of the shared Google")
         await t.httpCookieStore.setCookie(cookie("SID", "z9", ".google.com", expires: hour))
         await settle()
-        check(await value(m, "SID") == "d1", "After unbinding, the space's Google changes stay local")
-        check(sync.detected["fabrikam"]?.contains("google") == true, "Unbound sign-in is offered for saving")
-        browser.keepLocal(spaceID: "fabrikam", providerID: "google")
-        sync.rescanAll()
+        check(await value(m, "SID") == "c1", "A not-shared space's sign-in stays in that space")
+        update("fabrikam") { $0["google"] = .shared }
         await settle()
-        check(sync.detected["fabrikam"]?.contains("google") != true, "Keep in this space only stops the offer")
+        check(await value(t, "SID") == "c1", "Back on Shared, the space is signed in again")
 
-        // Saving a sign-in to an existing account replaces that account's sign-in; never mixes two.
-        await m.httpCookieStore.setCookie(cookie("LSID", "old", "accounts.google.com", expires: hour, secure: true))
+        // Custom providers are shared by default too.
+        check(config.addProvider(name: "Okta", domains: ["https://contoso.okta.com/app"], sessionNames: []) == nil, "Provider from a pasted URL is added")
+        let okta = config.providers.last!
+        check(okta.domains == ["contoso.okta.com"] && config.shared[okta.id] != nil, "Custom provider gets a shared sign-in")
+        await m.httpCookieStore.setCookie(cookie("sid", "o1", "contoso.okta.com", expires: hour, secure: true))
         await settle()
-        browser.createSpace(name: "Adopter", color: 7, home: "", choices: [:], newNames: [:])
-        let adopter = config.spaces.first { $0.name == "Adopter" }!
-        let a = await sync.attach(adopter)
-        await a.httpCookieStore.setCookie(cookie("SID", "a1", ".google.com", expires: hour))
-        await settle()
-        browser.saveDetected(spaceID: adopter.id, providerID: "google", choice: .existing("google-personal"), newName: "")
-        browser.saveDetected(spaceID: adopter.id, providerID: "google", choice: .new, newName: "Dup")
-        await settle()
-        let (mSID, mLSID) = (await value(m, "SID"), await value(m, "LSID"))
-        check(mSID == "a1" && mLSID == nil, "Saved sign-in replaces the account's old one (no mixing)")
-        check(!config.accounts.contains { $0.name == "Dup" }, "A second Save click does not create another account")
-
-        // Providers can't claim another provider's cookies.
+        check(await value(f, "sid") == "o1", "Custom provider sign-in reaches other spaces")
         check(config.addProvider(name: "Workspace", domains: ["mail.google.com"], sessionNames: []) != nil, "Provider overlapping Google is refused")
-        check(config.addProvider(name: "Okta", domains: ["https://contoso.okta.com/app"], sessionNames: ["sid"]) == nil, "Provider from a pasted URL is added")
-        check(config.providers.last?.domains == ["contoso.okta.com"], "Pasted URL is reduced to its domain")
 
-        // Spaces created by this test get new stores; remove them so runs don't pile up.
-        for def in config.spaces where ["Fresh", "Brand New", "Adopter"].contains(def.name) {
+        // An older per-space config moves to shared sign-ins, keeping the most-used sessions.
+        let old = AppPaths.dir.appendingPathComponent("migrate-test.json")
+        let v1 = """
+        {"providers":[],"accounts":[{"id":"ms-contoso","providerID":"microsoft","name":"Contoso"},
+         {"id":"ms-fabrikam","providerID":"microsoft","name":"Fabrikam"},
+         {"id":"google-personal","providerID":"google","name":"personal"},
+         {"id":"google-newtro","providerID":"google","name":"Newtro Studios"}],
+         "spaces":[
+          {"id":"a","name":"A","color":0,"storeID":"6F1C2A40-0000-4000-9000-0000000000A1","bindings":{"microsoft":"ms-contoso","google":"google-personal"},"home":""},
+          {"id":"b","name":"B","color":1,"storeID":"6F1C2A40-0000-4000-9000-0000000000A2","bindings":{"microsoft":"ms-fabrikam","google":"google-personal"},"home":""},
+          {"id":"c","name":"C","color":2,"storeID":"6F1C2A40-0000-4000-9000-0000000000A3","bindings":{"microsoft":"ms-contoso"},"home":""},
+          {"id":"d","name":"D","color":3,"storeID":"6F1C2A40-0000-4000-9000-0000000000A4","bindings":{"google":"google-newtro"},"home":""}]}
+        """
+        try? v1.data(using: .utf8)!.write(to: old)
+        let migrated = Config(fileURL: old)
+        check(migrated.spaces.allSatisfy { $0.bindings.isEmpty }, "Migration puts every space on the shared sign-ins")
+        check(migrated.shared["microsoft"] == "ms-contoso" && migrated.shared["google"] == "google-personal",
+              "Migration keeps the most-used sessions as the shared ones")
+        try? FileManager.default.removeItem(at: old)
+
+        for def in config.spaces where ["Fresh", "Separate"].contains(def.name) {
             browser.spaces.first { $0.id == def.id }.map { state in state.tabs.forEach { browser.close($0, in: state) } }
             await sync.detach(def.id)
             try? await WKWebsiteDataStore.remove(forIdentifier: def.storeID)
         }
-
         print(failures.isEmpty ? "CONFIG OK" : "CONFIG FAILED: \(failures.count)")
         exit(failures.isEmpty ? 0 : 1)
     }
 
     private func update(_ spaceID: String, _ change: (inout [String: AccountChoice]) -> Void) {
         let def = browser.config.space(spaceID)!
-        var choices = def.bindings.mapValues { AccountChoice.existing($0) }
+        var choices = def.bindings.mapValues { $0 == SpaceDef.local ? AccountChoice.local : .existing($0) }
         change(&choices)
         browser.updateSpace(spaceID, name: def.name, color: def.color, home: def.home, choices: choices, newNames: [:], confirm: false)
     }

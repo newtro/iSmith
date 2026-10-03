@@ -12,7 +12,7 @@ Status: design. No code yet.
 |---|---|
 | Audience | Scott's daily driver first. Built so other multi-client consultants could use it. |
 | Engine | Swift + WKWebView (macOS 14+). Fallback: Electron, if the sign-in cookie sync spike fails. |
-| Identity model | Accounts + Spaces (below). |
+| Identity model | Sign-in sessions shared by all spaces; site sessions stay in each space (below). |
 | Ungrouped / outside links | URL rules route to a space; otherwise the Default space. |
 | Agent modes | User-selectable per space, with a global default. Includes a YOLO / full mode. |
 | Agent backend | Pluggable. Auto-detect installed CLIs and use the user's subscription; API keys as an alternative. |
@@ -21,39 +21,33 @@ Status: design. No code yet.
 | Agent panel | User setting: right panel, bottom panel, or hidden. |
 | Identity cue | The browser frame reshades to the active space's color, plus an address-bar chip naming the account in use. |
 
-## Identity: Accounts + Spaces
+## Identity: shared sign-ins, separate site sessions
 
-- **Account**: one sign-in at one provider (Microsoft/Contoso, Microsoft/Fabrikam,
-  Google/personal, GitHub, AWS, ...). Sign in once; its session lives in the vault.
-  Unlimited accounts.
-- **Space**: a workspace that binds one account per provider, e.g.
-  - Contoso = MS:Contoso + Google:personal + GitHub:personal
-  - Fabrikam = MS:Fabrikam + Google:personal + GitHub:personal
+Revised 2026-10-02 after testing: per-space accounts meant signing in to Google again in every
+new space. The model now separates two things:
 
-  Unlimited spaces. Tab groups live inside a space and share its sign-ins.
-- **Cookie split**: an account owns its identity-provider cookies (`login.microsoftonline.com`,
-  `.google.com`, `github.com`, ...). App cookies (Outlook, Azure DevOps) live in the space's own
-  jar and are recreated by silent sign-in through the shared session.
-- **One account per provider per space.** This is what keeps tenants from colliding. Sites you
-  sign in to *with* a provider ("Sign in with Google", e.g. two Etsy shops tied to two Google
-  accounts) are not providers: their cookies stay in the space and use the space's account.
-  Two shops = two spaces (Personal with Google: personal, Newtro Studios with Google: Newtro
-  Studios), both signed in at once.
+- **Sign-in sessions are shared by default.** One session per provider (Microsoft, Google,
+  GitHub, any custom provider) is copied into every space. Sign in once anywhere and every
+  space, including new ones, is signed in. Several accounts live in that one session, added
+  with the provider's own picker (Google "Add another account", Microsoft "Use another
+  account").
+- **Site sessions stay in each space.** Cookies and storage for the sites themselves
+  (outlook.office.com, dev.azure.com, etsy.com) never leave their space. So Outlook in Contoso
+  stays the Contoso mailbox and Outlook in Fabrikam stays Fabrikam, and Etsy can be
+  shop 1 in Personal and shop 2 in Newtro Studios. Each app asks which account once per
+  space, using the provider's picker, then remembers.
+- **Overrides, only if needed.** Per space and provider: a separate account (its own session,
+  shared only with spaces that pick it), or "Not shared (this space only)". Changing one
+  clears that space's browsing data and reloads its tabs. This is the fallback if Microsoft
+  apps ever pick the wrong tenant.
 - **Providers are data, not code.** Built-ins: Microsoft (work/school), Microsoft personal,
-  Google (sign-in cookie allowlist), GitHub. Any other site can be added as a provider in the app
-  (name, cookie domains, optional signed-in cookie names), e.g. Okta, AWS, or Etsy if one Etsy
-  sign-in should follow you across spaces.
-- **Discovery**: when a signed-in cookie for a provider appears in a space with no account for
-  it, a banner offers "Save as new account / an existing account / Keep in this space only".
-- **Editing**: spaces are created, edited (name, color, home page, one account per provider,
-  or "New account…") and deleted in the app. Switching a space to another account signs it out
-  of the old one and loads the new one's sign-in. Accounts can be renamed, signed out
-  everywhere, or removed once unused.
-- **Mechanism (WKWebView)**: one `WKWebsiteDataStore(forIdentifier:)` per space. Provider cookies
-  are copied from the vault into the space store; `WKHTTPCookieStoreObserver` writes changes back.
-  **Risk**: unproven. Spike: two MS tenants side by side + shared Google OAuth.
-- **Limits**: company sign-in-frequency policies can still force re-auth; the browser can't
-  override them.
+  Google (sign-in cookie allowlist), GitHub. Any other site can be added in the app by cookie
+  domain (e.g. Okta, AWS); it is shared by default like the rest. Providers may not overlap.
+- **Mechanism (WKWebView)**: one `WKWebsiteDataStore(forIdentifier:)` per space. Provider
+  cookies are synced through a vault on one serial queue with per-space baselines (see
+  `spike/`). Proven by automated tests and Scott's sign-ins.
+- **Limits**: company sign-in-frequency policies and device-based Conditional Access still
+  apply.
 
 ## Routing
 

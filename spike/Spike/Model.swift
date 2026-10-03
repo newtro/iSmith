@@ -26,9 +26,8 @@ struct ProviderDef: Codable, Hashable, Identifiable {
         owns(cookieDomain: cookie.domain) && (names.map { $0.contains(cookie.name) } ?? true)
     }
 
-    func indicatesSignIn(_ cookie: HTTPCookie) -> Bool {
-        guard let sessionNames, !sessionNames.isEmpty else { return false }
-        return tracks(cookie) && sessionNames.contains(cookie.name)
+    func tracks(record: CookieRecord) -> Bool {
+        owns(cookieDomain: record.domain) && (names.map { $0.contains(record.name) } ?? true)
     }
 
     static let builtIns: [ProviderDef] = [
@@ -57,13 +56,18 @@ struct AccountDef: Codable, Hashable, Identifiable {
     var name: String
 }
 
-/// A workspace with its own WebKit data store, bound to at most one account per provider.
+/// A workspace with its own WebKit data store. By default it uses every provider's shared sign-in;
+/// `bindings` holds only the exceptions.
 struct SpaceDef: Codable, Hashable, Identifiable {
+    /// Binding value meaning "this provider's sign-in stays in this space only".
+    static let local = "local"
+
     var id: String
     var name: String
     var color: Int
     var storeID: UUID
-    /// Provider id → account id.
+    /// Provider id → a separate account id, or `SpaceDef.local`. Providers not listed use the
+    /// provider's shared account.
     var bindings: [String: String]
     var home: String
     /// Providers whose sign-ins stay in this space only; the app won't offer to save them.
@@ -123,19 +127,27 @@ enum AppPaths {
 @MainActor
 final class Config: ObservableObject {
     struct File: Codable {
+        var version: Int?
         var providers: [ProviderDef]
         var accounts: [AccountDef]
         var spaces: [SpaceDef]
+        var shared: [String: String]?
     }
 
     @Published private(set) var providers: [ProviderDef] = []
     @Published private(set) var accounts: [AccountDef] = []
     @Published private(set) var spaces: [SpaceDef] = []
-    private let fileURL = AppPaths.dir.appendingPathComponent("config.json")
+    /// Provider id → the account every space uses unless it overrides it. One sign-in session can
+    /// hold several accounts (Google's and Microsoft's own account pickers), so this is normally
+    /// all anyone needs.
+    @Published private(set) var shared: [String: String] = [:]
+    private let fileURL: URL
     /// False when config.json exists but couldn't be read or backed up: nothing is written over it.
     private var canSave = true
 
-    init() {
+    init(fileURL: URL = AppPaths.dir.appendingPathComponent("config.json")) {
+        self.fileURL = fileURL
+        var needsMigration = false
         if FileManager.default.fileExists(atPath: fileURL.path) {
             do {
                 let data = try Data(contentsOf: fileURL)
@@ -143,6 +155,8 @@ final class Config: ObservableObject {
                 providers = file.providers
                 accounts = file.accounts
                 spaces = file.spaces
+                shared = file.shared ?? [:]
+                needsMigration = (file.version ?? 1) < 2
             } catch {
                 // Never overwrite a config that didn't load: keep a copy to recover from.
                 let backup = fileURL.deletingPathExtension()
@@ -156,7 +170,43 @@ final class Config: ObservableObject {
         }
         // Built-in provider definitions always come from the app, so fixes reach existing configs.
         providers = ProviderDef.builtIns + providers.filter { !$0.builtIn }
+        if needsMigration { migrateToShared() }
+        for provider in providers { ensureShared(provider.id) }
         save()
+    }
+
+    /// Version 1 gave each space its own account per provider. Version 2 shares one sign-in per
+    /// provider across all spaces: the account most spaces used becomes the shared one (keeping its
+    /// saved session), and every space goes back to the default.
+    private func migrateToShared() {
+        for provider in providers {
+            let used = spaces.compactMap { $0.bindings[provider.id] }.filter { $0 != SpaceDef.local }
+            let counts = Dictionary(grouping: used, by: { $0 }).mapValues(\.count)
+            guard let top = counts.max(by: { ($0.value, $1.key) < ($1.value, $0.key) })?.key,
+                  let i = accounts.firstIndex(where: { $0.id == top }) else { continue }
+            shared[provider.id] = top
+            accounts[i].name = "All my accounts"
+        }
+        for i in spaces.indices { spaces[i].bindings = [:] }
+        NSLog("iSmith: config moved to shared sign-ins")
+    }
+
+    private func ensureShared(_ providerID: String) {
+        if let id = shared[providerID], account(id) != nil { return }
+        let account = AccountDef(id: "shared-" + providerID, providerID: providerID, name: "All my accounts")
+        if self.account(account.id) == nil { accounts.append(account) }
+        shared[providerID] = account.id
+    }
+
+    func isShared(_ accountID: String) -> Bool { shared.values.contains(accountID) }
+
+    /// The account a space uses for a provider, or nil if the provider's sign-in stays local.
+    func accountID(in space: SpaceDef, for providerID: String) -> String? {
+        switch space.bindings[providerID] {
+        case nil: return shared[providerID]
+        case SpaceDef.local: return nil
+        case let id?: return account(id) == nil ? shared[providerID] : id
+        }
     }
 
     func provider(_ id: String) -> ProviderDef? { providers.first { $0.id == id } }
@@ -166,11 +216,12 @@ final class Config: ObservableObject {
 
     /// The space's accounts in provider order.
     func bound(_ space: SpaceDef) -> [(provider: ProviderDef, account: AccountDef)] {
-        providers.compactMap { p in space.bindings[p.id].flatMap(account).map { (p, $0) } }
+        providers.compactMap { p in accountID(in: space, for: p.id).flatMap(account).map { (p, $0) } }
     }
 
     func spaces(using accountID: String) -> [SpaceDef] {
-        spaces.filter { $0.bindings.values.contains(accountID) }
+        guard let account = account(accountID) else { return [] }
+        return spaces.filter { self.accountID(in: $0, for: account.providerID) == accountID }
     }
 
     func label(_ account: AccountDef) -> String {
@@ -202,7 +253,7 @@ final class Config: ObservableObject {
     }
 
     func removeAccount(_ id: String) {
-        guard spaces(using: id).isEmpty else { return }
+        guard spaces(using: id).isEmpty, !isShared(id) else { return }
         accounts.removeAll { $0.id == id }
         save()
     }
@@ -228,14 +279,22 @@ final class Config: ObservableObject {
         let id = "custom-" + UUID().uuidString.prefix(8).lowercased()
         providers.append(ProviderDef(id: id, name: name, domains: domains,
                                      sessionNames: sessionNames.isEmpty ? nil : sessionNames))
+        ensureShared(id)
         save()
         return nil
     }
 
-    func removeProvider(_ id: String) {
-        guard provider(id)?.builtIn == false, accounts(for: id).isEmpty else { return }
+    /// Removes a custom provider that has no separate accounts. Returns the removed account ids.
+    @discardableResult
+    func removeProvider(_ id: String) -> [String] {
+        guard provider(id)?.builtIn == false, accounts(for: id).allSatisfy({ isShared($0.id) }) else { return [] }
+        let removed = accounts(for: id).map(\.id)
         providers.removeAll { $0.id == id }
+        accounts.removeAll { $0.providerID == id }
+        shared[id] = nil
+        for i in spaces.indices { spaces[i].bindings[id] = nil }
         save()
+        return removed
     }
 
     private func save() {
@@ -243,7 +302,7 @@ final class Config: ObservableObject {
         do {
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            try encoder.encode(File(providers: providers, accounts: accounts, spaces: spaces))
+            try encoder.encode(File(version: 2, providers: providers, accounts: accounts, spaces: spaces, shared: shared))
                 .write(to: fileURL, options: .atomic)
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
         } catch {
@@ -251,32 +310,26 @@ final class Config: ObservableObject {
         }
     }
 
-    /// First-run setup. Account ids and store ids match the earlier hard-coded spike, so sign-ins
-    /// made with it carry over.
+    /// First-run setup: one space; every provider shared. The self-test instead gets a layout with
+    /// separate and local accounts so isolation can be checked.
     private static func starter() -> ([AccountDef], [SpaceDef]) {
+        guard AppPaths.isSelfTest else {
+            return ([], [SpaceDef(id: "personal", name: "Personal", color: 3, storeID: UUID(), bindings: [:],
+                                  home: "https://mail.google.com/")])
+        }
         let accounts = [
             AccountDef(id: "ms-contoso", providerID: "microsoft", name: "Contoso"),
             AccountDef(id: "ms-fabrikam", providerID: "microsoft", name: "Fabrikam"),
-            AccountDef(id: "google-personal", providerID: "google", name: "personal"),
-            AccountDef(id: "google-newtro", providerID: "google", name: "Newtro Studios"),
-            AccountDef(id: "github-personal", providerID: "github", name: "personal"),
         ]
-        func store(_ n: Int) -> UUID {
-            let base = "6F1C2A40-0000-4000-8000-00000000000\(n)"
-            return UUID(uuidString: AppPaths.isSelfTest ? base.replacingOccurrences(of: "-8000-", with: "-9000-") : base)!
-        }
-        let outlook = "https://outlook.office.com/mail/"
+        func store(_ n: Int) -> UUID { UUID(uuidString: "6F1C2A40-0000-4000-9000-00000000000\(n)")! }
+        let local = SpaceDef.local
         let spaces = [
-            SpaceDef(id: "contoso", name: "Contoso", color: 0, storeID: store(1),
-                     bindings: ["microsoft": "ms-contoso", "google": "google-personal", "github": "github-personal"], home: outlook),
-            SpaceDef(id: "fabrikam", name: "Fabrikam", color: 1, storeID: store(2),
-                     bindings: ["microsoft": "ms-fabrikam", "google": "google-personal", "github": "github-personal"], home: outlook),
+            SpaceDef(id: "contoso", name: "Contoso", color: 0, storeID: store(1), bindings: ["microsoft": "ms-contoso"], home: ""),
+            SpaceDef(id: "fabrikam", name: "Fabrikam", color: 1, storeID: store(2), bindings: ["microsoft": "ms-fabrikam"], home: ""),
             SpaceDef(id: "contoso-b", name: "Contoso (second space)", color: 2, storeID: store(3),
-                     bindings: ["microsoft": "ms-contoso"], home: outlook),
-            SpaceDef(id: "personal", name: "Personal", color: 3, storeID: store(4),
-                     bindings: ["google": "google-personal", "github": "github-personal"], home: "https://mail.google.com/"),
-            SpaceDef(id: "newtro", name: "Newtro Studios", color: 4, storeID: store(5),
-                     bindings: ["google": "google-newtro"], home: "https://www.etsy.com/your/shops/me/dashboard"),
+                     bindings: ["microsoft": "ms-contoso", "google": local, "github": local], home: ""),
+            SpaceDef(id: "personal", name: "Personal", color: 3, storeID: store(4), bindings: ["microsoft": local], home: ""),
+            SpaceDef(id: "newtro", name: "Newtro Studios", color: 4, storeID: store(5), bindings: [:], home: ""),
         ]
         return (accounts, spaces)
     }

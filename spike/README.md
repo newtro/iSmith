@@ -4,17 +4,18 @@ Proves the one unproven mechanism in DESIGN.md: copying an account's sign-in coo
 per-space WebKit stores, so you sign in once per account and every space bound to it stays
 signed in.
 
-Nothing is hard-coded: spaces, accounts and providers are managed in the app and saved to
-`~/Library/Application Support/iSmithSpike/config.json`. First launch starts with Contoso,
-Fabrikam, a second Contoso space, Personal and Newtro Studios.
+How it works: **sign in once, every space is signed in.** Each provider's sign-in session
+(Microsoft, Google, GitHub, plus any you add) is shared by all spaces, including new ones. Each
+space keeps its own cookies for the sites themselves, so Outlook, Azure DevOps or Etsy can be a
+different account in each space. Add more accounts with the provider's own picker: Google's
+"Add another account", Microsoft's "Use another account".
 
-- **New space**: + in the rail (⇧⌘N). Pick an account per provider, or "New account…".
-- **Edit or delete a space**: right-click it in the rail (⇧⌘, edits the current one).
-- **Accounts panel** (button at the bottom of the rail): rename accounts, sign out everywhere,
-  remove unused accounts, add your own provider (any site, by cookie domain), and see the sync
-  log.
-- **Signed in somewhere new?** If you sign in to a provider in a space that has no account for
-  it, a banner offers to save that sign-in as a new or existing account, or keep it local.
+- **New space**: + in the rail (⇧⌘N). No account setup needed.
+- **Overrides** (rarely needed): right-click a space → Edit Space. Per provider, pick a separate
+  account or "Not shared (this space only)". Changing one clears that space's browsing data.
+- **Accounts panel** (button at the bottom of the rail): add a provider by cookie domain, sign
+  out everywhere, rename or remove separate accounts, and see the sync log.
+- Settings live in `~/Library/Application Support/iSmithSpike/config.json`.
 
 ## Build and run
 
@@ -34,19 +35,17 @@ build/Build/Products/Debug/iSmithSpike.app/Contents/MacOS/iSmithSpike --selftest
 
 ## Manual acceptance test
 
-1. Contoso (⌘1): sign in to Outlook with the Contoso account. Tick "Stay signed in".
-2. Fabrikam (⌘2): sign in to Outlook with the Fabrikam account.
-3. Switch between ⌘1 and ⌘2: each shows its own mailbox, with no sign-in prompts.
-4. Contoso: Go → Gmail, sign in with your personal Google account.
-5. Fabrikam: Go → Gmail. Expected: already signed in.
-6. Contoso (second space) (⌘3): Outlook. Expected: signed in as Contoso without a password.
-7. Quit (⌘Q), reopen, and repeat steps 3, 5 and 6. Expected: still signed in everywhere.
-8. Personal (⌘4): Go → Etsy shop, "Continue with Google" as you@gmail.com.
-9. Newtro Studios (⌘5): Etsy opens; "Continue with Google" as you@yourstudio.com.
-10. Switch between ⌘4 and ⌘5: each shows its own Etsy shop, both signed in.
+1. Any space: sign in to Gmail as you@gmail.com, then Google's "Add another account" →
+   you@yourstudio.com. Every space's Google picker now shows both.
+2. Personal: Etsy → "Continue with Google" → your personal account. Newtro Studios: Etsy → "Continue with
+   Google" → your studio account. Both shops stay signed in, one per space.
+3. Contoso: Outlook (Contoso). Fabrikam: Outlook → "Use another account" once → Fabrikam
+   Point. Switch between the spaces: each keeps its own mailbox.
+4. Create a new space: Gmail and Outlook open signed in, with the account picker.
+5. Quit and reopen: still signed in everywhere.
 
-The key button at the bottom of the rail shows the vault: cookie names per account (no values)
-and a log of every copy between spaces.
+The Accounts panel shows cookie names per account (no values) and a log of every copy between
+spaces.
 
 What the automated tests cover: sharing between open spaces, isolation between Microsoft
 tenants, Google tracking cookies staying local, simultaneous changes in two spaces, sign-out

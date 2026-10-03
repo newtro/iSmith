@@ -21,8 +21,6 @@ final class CookieSync: ObservableObject {
 
     @Published private(set) var log: [LogLine] = []
     @Published private(set) var attached: Set<String> = []
-    /// Space id → providers someone signed in to in that space that it has no account for.
-    @Published private(set) var detected: [String: Set<String>] = [:]
 
     let vault: Vault
     let config: Config
@@ -69,32 +67,6 @@ final class CookieSync: ObservableObject {
         scheduleScan(spaceID)
     }
 
-    /// "Save this sign-in": `commit` binds the space to the account, then the space's current
-    /// sign-in becomes that account's whole sign-in (never merged key by key with an older one)
-    /// and is loaded into every other open space using the account.
-    func adoptSignIn(spaceID: String, providerID: String, commit: @escaping @MainActor () -> Void) async {
-        detected[spaceID]?.remove(providerID)
-        await enqueue {
-            commit()
-            guard let space = self.config.space(spaceID), let provider = self.config.provider(providerID),
-                  let account = space.bindings[providerID].flatMap(self.config.account),
-                  let store = self.stores[spaceID] else { return }
-            let local = self.keyed(self.records(in: await store.httpCookieStore.allCookies(), for: provider))
-            self.vault.set(Array(local.values), for: account.id)
-            self.baseline[spaceID, default: [:]][providerID] = local
-            for other in self.config.spaces(using: account.id) where other.id != spaceID {
-                guard let otherStore = self.stores[other.id] else { continue } // closed spaces seed from the vault
-                let theirs = self.keyed(self.records(in: await otherStore.httpCookieStore.allCookies(), for: provider))
-                await self.apply(local, removing: Set(theirs.keys).subtracting(local.keys), provider: provider,
-                                 to: otherStore, current: theirs)
-                self.baseline[other.id, default: [:]][providerID] =
-                    self.keyed(self.records(in: await otherStore.httpCookieStore.allCookies(), for: provider))
-            }
-            self.note("\(space.name): saved this \(provider.name) sign-in as \(self.config.label(account))")
-        }
-        scheduleScan(spaceID)
-    }
-
     /// Signs the account out in every space: clears its cookies from the vault and all stores.
     func signOutEverywhere(_ accountID: String) async {
         await enqueue {
@@ -121,13 +93,7 @@ final class CookieSync: ObservableObject {
             self.observers[spaceID] = nil
             self.baseline[spaceID] = nil
             self.attached.remove(spaceID)
-            self.detected[spaceID] = nil
         }
-    }
-
-    /// Hides the "save this sign-in" offer for a provider in a space.
-    func dismissDetected(spaceID: String, providerID: String) {
-        detected[spaceID]?.remove(providerID)
     }
 
     /// Merges every open space's latest changes into the vault. Called before quitting.
@@ -167,8 +133,7 @@ final class CookieSync: ObservableObject {
             guard let self else { return }
             await self.enqueue {
                 guard let space = self.config.space(spaceID) else { return }
-                for accountID in space.bindings.values { await self.reconcile(accountID) }
-                await self.detect(spaceID)
+                for (_, account) in self.config.bound(space) { await self.reconcile(account.id) }
             }
         }
     }
@@ -200,7 +165,7 @@ final class CookieSync: ObservableObject {
         if let saved = vault.records(for: account.id) {
             // The vault is the source of truth: leftover cookies it doesn't have (an older
             // session, another account, or a sign-out elsewhere) are removed.
-            let want = keyed(saved)
+            let want = keyed(saved.filter(provider.tracks(record:)))
             let written = await apply(want, removing: Set(local.keys).subtracting(want.keys), provider: provider,
                                       to: store, current: local)
             note("\(spaceName): loaded \(config.label(account)) (\(saved.count) cookies, \(written.count) written)")
@@ -226,7 +191,6 @@ final class CookieSync: ObservableObject {
         // A closed space's store is opened just to reset it; it is seeded again when opened.
         let store = stores[spaceID] ?? WKWebsiteDataStore(forIdentifier: space.storeID)
         await store.removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast)
-        detected[spaceID] = nil
         baseline[spaceID] = [:]
         for (provider, account) in config.bound(space) {
             let next = await seed(store, spaceName: space.name, provider: provider, account: account, adoptIfNew: false)
@@ -235,21 +199,12 @@ final class CookieSync: ObservableObject {
         note("\(space.name): switched accounts; browsing data cleared")
     }
 
-    private func detect(_ spaceID: String) async {
-        guard let space = config.space(spaceID), let store = stores[spaceID] else { return }
-        let cookies = await store.httpCookieStore.allCookies()
-        let found = Set(config.providers.filter { p in
-            space.bindings[p.id] == nil && !space.localProviders.contains(p.id) && cookies.contains(where: p.indicatesSignIn)
-        }.map(\.id))
-        if detected[spaceID] ?? [] != found { detected[spaceID] = found }
-    }
-
     private func reconcile(_ accountID: String) async {
         guard let account = config.account(accountID), let provider = config.provider(account.providerID) else { return }
-        let members = config.spaces(using: accountID).filter { stores[$0.id] != nil && $0.bindings[provider.id] == accountID }
+        let members = config.spaces(using: accountID).filter { stores[$0.id] != nil }
         guard !members.isEmpty else { return }
         let label = config.label(account)
-        let before = keyed(vault.records(for: account.id) ?? [])
+        let before = keyed((vault.records(for: account.id) ?? []).filter(provider.tracks(record:)))
         var merged = before
         var removed = Set<String>()
         var changedIn: [String] = []

@@ -103,9 +103,6 @@ private struct SpaceView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            ForEach(Array(sync.detected[space.id] ?? []).sorted(), id: \.self) { providerID in
-                SignInBanner(space: space, providerID: providerID)
-            }
             TabStrip(space: space)
             if let tab = space.selected {
                 Toolbar(space: space, tab: tab)
@@ -121,46 +118,6 @@ private struct SpaceView: View {
                 Spacer()
             }
         }
-    }
-}
-
-/// Offered when someone signs in to a provider in a space that has no account for it.
-private struct SignInBanner: View {
-    @EnvironmentObject private var browser: BrowserState
-    @EnvironmentObject private var config: Config
-    @ObservedObject var space: SpaceState
-    let providerID: String
-    @State private var choice: AccountChoice = .new
-    @State private var newName = ""
-
-    var body: some View {
-        let provider = config.provider(providerID)
-        HStack(spacing: 10) {
-            Image(systemName: "person.crop.circle.badge.plus").foregroundStyle(space.color)
-            Text("You signed in to \(provider?.name ?? providerID) in this space.")
-            Picker("Save as", selection: $choice) {
-                Text("New account…").tag(AccountChoice.new)
-                ForEach(config.accounts(for: providerID)) { account in
-                    Text(account.name).tag(AccountChoice.existing(account.id))
-                }
-            }
-            .fixedSize()
-            if choice == .new {
-                TextField("Account name", text: $newName)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 160)
-            }
-            Button("Save") {
-                browser.saveDetected(spaceID: space.id, providerID: providerID, choice: choice, newName: newName)
-            }
-            .buttonStyle(.borderedProminent)
-            Button("Keep in this space only") { browser.keepLocal(spaceID: space.id, providerID: providerID) }
-            Spacer()
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(space.color.opacity(0.12))
-        .onAppear { if newName.isEmpty { newName = space.def.name } }
     }
 }
 
@@ -241,9 +198,10 @@ private struct Toolbar: View {
                 }
             }
             .fixedSize()
+            // Only exceptions are shown; everything else uses the shared sign-ins.
             HStack(spacing: 4) {
-                ForEach(config.bound(space.def), id: \.account.id) { pair in
-                    Text("\(pair.provider.name): \(pair.account.name)")
+                ForEach(exceptions, id: \.self) { label in
+                    Text(label)
                         .font(.caption)
                         .padding(.horizontal, 7).padding(.vertical, 2)
                         .background(Capsule().fill(space.color.opacity(0.18)))
@@ -260,6 +218,16 @@ private struct Toolbar: View {
         }
         .onReceive(tab.$url) { url in
             if !addressFocused { address = url?.absoluteString ?? "" }
+        }
+    }
+
+    private var exceptions: [String] {
+        config.providers.compactMap { p in
+            switch space.def.bindings[p.id] {
+            case nil: return nil
+            case SpaceDef.local: return "\(p.name): this space only"
+            case let id?: return config.account(id).map { "\(p.name): \($0.name)" }
+            }
         }
     }
 
@@ -321,7 +289,7 @@ private struct SpaceEditor: View {
                 } header: {
                     Text("Accounts")
                 } footer: {
-                    Text("One account per provider. Spaces that use the same account share its sign-in. Switching an existing space to a different account signs it out of the old one.")
+                    Text("Leave these on Shared: sign in once anywhere and every space is signed in. Add more accounts with the site's own account picker (Google's \"Add another account\", Microsoft's \"Use another account\"). Each space still keeps its own site sessions, so Outlook or Etsy can show a different account in each space. Changing a setting here clears this space's browsing data.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
@@ -349,15 +317,16 @@ private struct SpaceEditor: View {
     @ViewBuilder
     private func providerRow(_ provider: ProviderDef) -> some View {
         let binding = Binding<AccountChoice>(
-            get: { choices[provider.id] ?? .none },
+            get: { choices[provider.id] ?? .shared },
             set: { choices[provider.id] = $0 })
         VStack(alignment: .leading, spacing: 4) {
             Picker(provider.name, selection: binding) {
-                Text("None").tag(AccountChoice.none)
-                ForEach(config.accounts(for: provider.id)) { account in
-                    Text(account.name).tag(AccountChoice.existing(account.id))
+                Text("Shared with all spaces").tag(AccountChoice.shared)
+                ForEach(config.accounts(for: provider.id).filter { !config.isShared($0.id) }) { account in
+                    Text("Separate: \(account.name)").tag(AccountChoice.existing(account.id))
                 }
-                Text("New account…").tag(AccountChoice.new)
+                Text("New separate account…").tag(AccountChoice.new)
+                Text("Not shared (this space only)").tag(AccountChoice.local)
             }
             if binding.wrappedValue == .new {
                 TextField("New account name", text: Binding(
@@ -383,7 +352,7 @@ private struct SpaceEditor: View {
             name = existing.name
             color = existing.color
             home = existing.home
-            choices = existing.bindings.mapValues { AccountChoice.existing($0) }
+            choices = existing.bindings.mapValues { $0 == SpaceDef.local ? AccountChoice.local : .existing($0) }
         } else {
             color = config.spaces.count % Palette.names.count
         }
@@ -428,9 +397,9 @@ private struct AccountsPanel: View {
                                 Text(provider.name).font(.subheadline.weight(.semibold))
                                 Spacer()
                                 if !provider.builtIn {
-                                    Button("Remove") { config.removeProvider(provider.id) }
+                                    Button("Remove") { browser.removeProvider(provider.id) }
                                         .buttonStyle(.borderless)
-                                        .disabled(!accounts.isEmpty)
+                                        .disabled(!accounts.allSatisfy { config.isShared($0.id) })
                                         .help(accounts.isEmpty ? "Remove this provider" : "Remove its accounts first")
                                 }
                             }
@@ -486,14 +455,15 @@ private struct AccountRow: View {
                 Text(entry.map { $0.cookies.isEmpty ? "signed out" : "\($0.cookies.count) cookies" } ?? "not signed in")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            Text(users.isEmpty ? "Not used by any space"
+            Text(config.isShared(account.id) && users.count == config.spaces.count ? "Shared by all spaces"
+                 : users.isEmpty ? "Not used by any space"
                  : users.map { $0.name + (sync.attached.contains($0.id) ? "" : " (closed)") }.joined(separator: " · "))
                 .font(.caption).foregroundStyle(.secondary)
             HStack(spacing: 12) {
                 Button("Sign out everywhere") { browser.signOutEverywhere(account.id) }
                     .disabled(entry?.cookies.isEmpty ?? true)
                 Button("Remove") { browser.removeAccount(account.id) }
-                    .disabled(!users.isEmpty)
+                    .disabled(!users.isEmpty || config.isShared(account.id))
                     .help(users.isEmpty ? "Remove this account" : "Switch the spaces using it to another account first")
                 if let entry, !entry.cookies.isEmpty {
                     Menu("Cookies") {
@@ -528,9 +498,6 @@ private struct AddProviderForm: View {
                 .font(.caption).foregroundStyle(.secondary)
             TextField("Name (e.g. Okta)", text: $name)
             TextField("Cookie domains, comma separated (e.g. okta.com)", text: $domains)
-            TextField("Signed-in cookie names (optional)", text: $sessionNames)
-            Text("With signed-in cookie names, the app offers to save a sign-in it notices. Without them, pick the account in the space settings.")
-                .font(.caption2).foregroundStyle(.secondary)
             HStack {
                 if let error { Text(error).font(.caption).foregroundStyle(.red) }
                 Spacer()

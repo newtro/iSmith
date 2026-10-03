@@ -51,11 +51,16 @@ final class SpaceState: ObservableObject, Identifiable {
     }
 }
 
-/// The account a space uses for one provider, as picked in the space editor or a sign-in banner.
+/// What a space uses for one provider, as picked in the space editor.
 enum AccountChoice: Hashable {
-    case none
+    /// The provider's shared sign-in, used by every space unless it overrides it (the default).
+    case shared
+    /// A separate account, shared only with spaces that pick it too.
     case existing(String)
+    /// A new separate account, signed in to after saving.
     case new
+    /// Not shared: sign-ins for this provider stay in this space.
+    case local
 }
 
 struct EditorRequest: Identifiable {
@@ -140,12 +145,13 @@ final class BrowserState: NSObject, ObservableObject {
                      choices: [String: AccountChoice], newNames: [String: String], confirm: Bool = true) {
         guard let state = spaces.first(where: { $0.id == id }) else { return }
         let old = state.def
-        let wanted = choices.filter { $0.value != .none }
-        let changed = Set(old.bindings.keys).union(wanted.keys).filter { provider in
-            switch wanted[provider] {
-            case .existing(let accountID): return old.bindings[provider] != accountID
+        let changed = config.providers.map(\.id).filter { provider in
+            let before = config.accountID(in: old, for: provider)
+            switch choices[provider] ?? .shared {
+            case .shared: return before != config.shared[provider]
+            case .local: return before != nil
+            case .existing(let id): return before != id
             case .new: return true
-            default: return old.bindings[provider] != nil
             }
         }
         if !changed.isEmpty && confirm {
@@ -168,7 +174,7 @@ final class BrowserState: NSObject, ObservableObject {
         def.bindings = resolve(choices, newNames, spaceName: name)
         // Every account the space used is saved before the wipe, not only the changed ones, so a
         // cookie refreshed seconds earlier isn't lost.
-        let oldAccounts = Array(Set(old.bindings.values))
+        let oldAccounts = Array(Set(config.bound(old).map(\.account.id)))
         // Pages are parked on a blank page during the switch so a live app (Outlook refreshing a
         // token) can't write the old account back after the wipe.
         let urls = state.tabs.map { ($0, $0.webView.url) }
@@ -207,39 +213,14 @@ final class BrowserState: NSObject, ObservableObject {
 
     /// "Save this sign-in" from the banner: the space now uses `choice` for the provider, and its
     /// current sign-in becomes that account's.
-    func saveDetected(spaceID: String, providerID: String, choice: AccountChoice, newName: String) {
-        guard let state = spaces.first(where: { $0.id == spaceID }), state.def.bindings[providerID] == nil,
-              sync.detected[spaceID]?.contains(providerID) == true else { return }
-        // Hidden right away, so a second click can't create a second account.
-        sync.dismissDetected(spaceID: spaceID, providerID: providerID)
-        let accountID: String
-        switch choice {
-        case .none: return
-        case .existing(let id): accountID = id
-        case .new: accountID = config.addAccount(providerID: providerID, name: newName.isEmpty ? state.def.name : newName).id
-        }
-        Task {
-            await sync.adoptSignIn(spaceID: spaceID, providerID: providerID) { [config, weak self] in
-                guard self?.spaces.contains(where: { $0 === state }) == true else { return } // deleted meanwhile
-                state.def.bindings[providerID] = accountID
-                config.upsert(state.def)
-            }
-        }
-    }
-
-    func keepLocal(spaceID: String, providerID: String) {
-        guard let state = spaces.first(where: { $0.id == spaceID }) else { return }
-        if !state.def.localProviders.contains(providerID) { state.def.localProviders.append(providerID) }
-        config.upsert(state.def)
-        sync.dismissDetected(spaceID: spaceID, providerID: providerID)
-    }
-
+    /// Turns editor choices into the space's exceptions; anything left on .shared isn't stored.
     private func resolve(_ choices: [String: AccountChoice], _ newNames: [String: String], spaceName: String) -> [String: String] {
         var bindings: [String: String] = [:]
         for (providerID, choice) in choices {
             switch choice {
-            case .none: break
-            case .existing(let id): bindings[providerID] = id
+            case .shared: break
+            case .local: bindings[providerID] = SpaceDef.local
+            case .existing(let id): if id != config.shared[providerID] { bindings[providerID] = id }
             case .new:
                 let name = newNames[providerID].flatMap { $0.isEmpty ? nil : $0 } ?? spaceName
                 bindings[providerID] = config.addAccount(providerID: providerID, name: name).id
@@ -254,6 +235,10 @@ final class BrowserState: NSObject, ObservableObject {
         guard config.spaces(using: id).isEmpty else { return }
         config.removeAccount(id)
         vault.remove(id)
+    }
+
+    func removeProvider(_ id: String) {
+        for accountID in config.removeProvider(id) { vault.remove(accountID) }
     }
 
     func signOutEverywhere(_ id: String) {
