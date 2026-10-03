@@ -203,6 +203,9 @@ final class DownloadManager: NSObject, ObservableObject, WKDownloadDelegate {
 
     private func save(_ item: DownloadItem) {
         try? store?.upsert(item.record)
+        // The Dock icon shows how many downloads are running.
+        let running = activeCount
+        NSApp?.dockTile.badgeLabel = running > 0 ? "\(running)" : nil
     }
 
     /// A file name that's safe to create: no path separators or leading dots.

@@ -175,6 +175,9 @@ struct BookmarksManager: View {
     @State private var results: [Bookmark] = []
     @State private var selection: Int64?
     @State private var editing: Bookmark?
+    /// Open folders (roots are open unless collapsed).
+    @State private var expanded = Set<Int64>()
+    @State private var collapsed = Set<Int64>()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -191,9 +194,7 @@ struct BookmarksManager: View {
             Divider()
             List(selection: $selection) {
                 if query.isEmpty {
-                    OutlineGroup(tree, id: \.bookmark.id, children: \.optionalChildren) { node in
-                        row(node.bookmark)
-                    }
+                    ForEach(tree, id: \.bookmark.id) { node(_: $0) }
                 } else {
                     ForEach(results) { row($0) }
                 }
@@ -208,6 +209,23 @@ struct BookmarksManager: View {
         .onChange(of: space) { _, _ in reload() }
         .onChange(of: query) { _, _ in reload() }
         .onReceive(NotificationCenter.default.publisher(for: BookmarkStore.didChange)) { _ in reload() }
+    }
+
+    /// A folder opens and closes; the two roots start open.
+    private func node(_ node: BookmarkTree) -> AnyView {
+        guard node.bookmark.isFolder else { return AnyView(row(node.bookmark)) }
+        let id = node.bookmark.id
+        let open = Binding(get: { node.bookmark.root != nil ? !collapsed.contains(id) : expanded.contains(id) },
+                           set: { on in
+                               if node.bookmark.root != nil {
+                                   if on { collapsed.remove(id) } else { collapsed.insert(id) }
+                               } else if on { expanded.insert(id) } else { expanded.remove(id) }
+                           })
+        return AnyView(DisclosureGroup(isExpanded: open) {
+            ForEach(node.children, id: \.bookmark.id) { self.node($0) }
+        } label: {
+            row(node.bookmark)
+        })
     }
 
     private func row(_ b: Bookmark) -> some View {
@@ -306,11 +324,6 @@ private struct BookmarkEditSheet: View {
             url = bookmark.url ?? ""
         }
     }
-}
-
-extension BookmarkTree {
-    /// nil for bookmarks, so OutlineGroup shows no disclosure triangle on them.
-    var optionalChildren: [BookmarkTree]? { bookmark.isFolder ? children : nil }
 }
 
 // MARK: - Bookmarks menu
