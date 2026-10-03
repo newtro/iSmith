@@ -24,6 +24,8 @@ public struct ImportedLogin: Equatable, Sendable {
     public var actionURL: String?
     public var username: String
     public var password: String
+    /// The note saved with the password in Brave's password manager, if any.
+    public var note: String?
     public var scheme: Scheme
     public var dateCreated: Date?
     public var dateLastUsed: Date?
@@ -33,13 +35,14 @@ public struct ImportedLogin: Equatable, Sendable {
     public var stores: Set<Store>
 
     public init(origin: String, signonRealm: String, actionURL: String?, username: String, password: String,
-                scheme: Scheme, dateCreated: Date?, dateLastUsed: Date?, datePasswordModified: Date?,
-                timesUsed: Int, stores: Set<Store>) {
+                note: String? = nil, scheme: Scheme, dateCreated: Date?, dateLastUsed: Date?,
+                datePasswordModified: Date?, timesUsed: Int, stores: Set<Store>) {
         self.origin = origin
         self.signonRealm = signonRealm
         self.actionURL = actionURL
         self.username = username
         self.password = password
+        self.note = note
         self.scheme = scheme
         self.dateCreated = dateCreated
         self.dateLastUsed = dateLastUsed
@@ -50,34 +53,57 @@ public struct ImportedLogin: Equatable, Sendable {
 }
 
 public struct PasswordImport: Sendable {
-    /// A row that couldn't be decrypted. It is left out of `logins`; the app can list these.
+    /// Something that couldn't be decrypted. A password that fails leaves its login out of
+    /// `logins`; a note that fails leaves the login in, without its note. The app can list these.
     public struct Failure: Equatable, Sendable {
+        public enum Part: Equatable, Sendable { case password, note }
+
         public var store: ImportedLogin.Store
         public var origin: String
         public var username: String
+        public var part: Part
         public var reason: PasswordDecryptionError
+
+        public init(store: ImportedLogin.Store, origin: String, username: String, part: Part,
+                    reason: PasswordDecryptionError) {
+            self.store = store
+            self.origin = origin
+            self.username = username
+            self.part = part
+            self.reason = reason
+        }
     }
 
     /// Imported logins, `Login Data` first then `Login Data For Account`, each in saved order,
-    /// with logins present in both stores merged into one.
+    /// with the same login (site, username and password) merged into one, as Brave shows it.
     public var logins: [ImportedLogin]
     /// Rows the user marked "Never save" for a site. They have no password and are skipped.
     public var skippedNeverSave: Int
     public var failures: [Failure]
+
+    public init(logins: [ImportedLogin], skippedNeverSave: Int, failures: [Failure]) {
+        self.logins = logins
+        self.skippedNeverSave = skippedNeverSave
+        self.failures = failures
+    }
 }
 
 public enum PasswordImportError: Error, Equatable {
-    /// Every encrypted password failed to decrypt, so the Safe Storage key is wrong (for example
-    /// a Keychain item from another install). Nothing is imported rather than nothing but errors.
+    /// Every encrypted password (two or more) failed to decrypt, so the Safe Storage key is wrong
+    /// (for example a Keychain item from another install). Thrown rather than returning nothing
+    /// but failures.
     case wrongKey
 }
 
 /// Reads a Brave profile's saved passwords.
 ///
 /// Both login databases are copied into a private temporary folder (Brave holds them locked),
-/// read there, and the copies are deleted before returning. Brave's files are only ever read.
-/// The "Brave Safe Storage" password is asked for at most once per reader, and only when there
-/// is something encrypted to read, so macOS's Keychain prompt appears once per import.
+/// read there, and the copies are deleted before anything is decrypted. Brave's files are only
+/// ever read. The "Brave Safe Storage" password is asked for at most once per reader, and only
+/// when there is something encrypted to read, so macOS's Keychain prompt appears once per import.
+///
+/// Reading is synchronous and waits while macOS shows its Keychain prompt, so call it off the
+/// main thread.
 public final class BravePasswordReader {
     private let passwordSource: SafeStoragePasswordSource
     private let temporaryDirectory: URL
@@ -94,6 +120,8 @@ public final class BravePasswordReader {
     }
 
     /// Reads the two databases; either may be missing (a profile that never saved to the account).
+    /// A database that can't be looked at (macOS privacy protection) throws
+    /// `BraveAccessError.permissionDenied` rather than counting as missing.
     public func read(loginData: URL?, accountLoginData: URL?) throws -> PasswordImport {
         let work = temporaryDirectory.appendingPathComponent("BraveImport-\(UUID().uuidString)", isDirectory: true)
         try LoginDatabase.makePrivateDirectory(work)
@@ -101,8 +129,8 @@ public final class BravePasswordReader {
 
         var sources: [(ImportedLogin.Store, [RawLogin])] = []
         for (store, url) in [(ImportedLogin.Store.profile, loginData), (.account, accountLoginData)] {
-            guard let url, FileManager.default.fileExists(atPath: url.path) else { continue }
-            sources.append((store, try LoginDatabase.readRows(copyOf: url, workDirectory: work)))
+            guard let url, let rows = try LoginDatabase.readRows(copyOf: url, workDirectory: work) else { continue }
+            sources.append((store, rows))
         }
 
         var logins: [ImportedLogin] = []
@@ -124,13 +152,23 @@ public final class BravePasswordReader {
                     password = try decrypt(row.passwordValue)
                 } catch let reason as PasswordDecryptionError {
                     if isEncrypted { encryptedFailures += 1 }
-                    failures.append(.init(store: store, origin: row.originURL, username: row.username, reason: reason))
+                    failures.append(.init(store: store, origin: row.originURL, username: row.username,
+                                          part: .password, reason: reason))
                     continue
+                }
+                var note: String?
+                if let noteValue = row.noteValue {
+                    do {
+                        note = try decrypt(noteValue)
+                    } catch let reason as PasswordDecryptionError {
+                        failures.append(.init(store: store, origin: row.originURL, username: row.username,
+                                              part: .note, reason: reason))
+                    }
                 }
                 let login = ImportedLogin(
                     origin: row.originURL, signonRealm: row.signonRealm,
                     actionURL: row.actionURL.isEmpty ? nil : row.actionURL,
-                    username: row.username, password: password,
+                    username: row.username, password: password, note: note?.isEmpty == true ? nil : note,
                     scheme: ImportedLogin.Scheme(rawValue: row.scheme) ?? .other,
                     dateCreated: ChromiumTime.date(microseconds: row.dateCreated),
                     dateLastUsed: ChromiumTime.date(microseconds: row.dateLastUsed),
@@ -145,7 +183,8 @@ public final class BravePasswordReader {
                 }
             }
         }
-        if encrypted > 0, encryptedFailures == encrypted {
+        // One damaged value proves nothing about the key; two or more that all fail do.
+        if encrypted >= 2, encryptedFailures == encrypted {
             // The key can't be right; don't keep it for the next profile either.
             cipher = nil
             throw PasswordImportError.wrongKey
@@ -164,7 +203,8 @@ public final class BravePasswordReader {
         return try cipher!.decrypt(value)
     }
 
-    /// The same login in both stores: Brave shows it once, so it is imported once.
+    /// The same login twice (in both stores, or twice in one store from different forms): Brave
+    /// shows it once, so it is imported once.
     private struct MergeKey: Hashable {
         var signonRealm: String
         var username: String
@@ -173,7 +213,8 @@ public final class BravePasswordReader {
 }
 
 extension ImportedLogin {
-    /// Folds in a duplicate from another store: earliest creation, latest use and change.
+    /// Folds in a duplicate: earliest creation, latest use and change, and any note or form
+    /// address the first copy lacked.
     mutating func merge(_ other: ImportedLogin) {
         stores.formUnion(other.stores)
         dateCreated = [dateCreated, other.dateCreated].compactMap { $0 }.min()
@@ -181,5 +222,6 @@ extension ImportedLogin {
         datePasswordModified = [datePasswordModified, other.datePasswordModified].compactMap { $0 }.max()
         timesUsed = max(timesUsed, other.timesUsed)
         if actionURL == nil { actionURL = other.actionURL }
+        if note == nil { note = other.note }
     }
 }

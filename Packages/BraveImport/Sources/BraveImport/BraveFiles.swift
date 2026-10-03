@@ -27,6 +27,27 @@ enum BraveFiles {
         }
     }
 
+    /// Reads a file, or returns nil when it doesn't exist. Any other failure throws, so a refused
+    /// read never looks like "nothing there".
+    static func readIfPresent(_ url: URL) throws -> Data? {
+        do {
+            return try read(url)
+        } catch where isMissing(error) {
+            return nil
+        }
+    }
+
+    static func isMissing(_ error: Error) -> Bool {
+        let ns = error as NSError
+        if ns.domain == NSCocoaErrorDomain,
+           ns.code == CocoaError.fileReadNoSuchFile.rawValue || ns.code == CocoaError.fileNoSuchFile.rawValue {
+            return true
+        }
+        if ns.domain == NSPOSIXErrorDomain, ns.code == Int(ENOENT) { return true }
+        if let underlying = ns.userInfo[NSUnderlyingErrorKey] as? Error { return isMissing(underlying) }
+        return false
+    }
+
     static func isPermissionDenied(_ error: Error) -> Bool {
         let ns = error as NSError
         if ns.domain == NSCocoaErrorDomain, ns.code == CocoaError.fileReadNoPermission.rawValue { return true }

@@ -43,8 +43,9 @@ public enum BraveProfiles {
         var isDir: ObjCBool = false
         guard fm.fileExists(atPath: root.path, isDirectory: &isDir), isDir.boolValue else { return [] }
 
-        let state = LocalState.read(root.appendingPathComponent("Local State"))
-        var candidates = Set(state.names.keys)
+        let state = try LocalState.read(root.appendingPathComponent("Local State"))
+        // Only plain folder names from Local State: never a path that leads outside `root`.
+        var candidates = Set(state.names.keys.filter { !$0.isEmpty && !$0.contains("/") && !$0.hasPrefix(".") })
         for name in try BraveFiles.list(root) where isProfileFolderName(name) {
             candidates.insert(name)
         }
@@ -81,13 +82,14 @@ public enum BraveProfiles {
 }
 
 /// The parts of Brave's `Local State` used here: `profile.info_cache.<folder>.name` and
-/// `profile.profiles_order`. A missing or unreadable file gives no names, not an error.
+/// `profile.profiles_order`. A missing or malformed file gives no names, not an error; a file
+/// macOS refuses to let us read throws, so the refusal isn't hidden.
 struct LocalState {
     var names: [String: String] = [:]
     var order: [String] = []
 
-    static func read(_ url: URL) -> LocalState {
-        guard let data = try? BraveFiles.read(url),
+    static func read(_ url: URL) throws -> LocalState {
+        guard let data = try BraveFiles.readIfPresent(url),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let profile = json["profile"] as? [String: Any] else { return LocalState() }
         var state = LocalState()

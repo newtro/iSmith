@@ -2,14 +2,17 @@ import BraveImport
 import XCTest
 
 final class ProfileDiscoveryTests: XCTestCase {
+    private var base: URL!
     private var root: URL!
 
     override func setUpWithError() throws {
-        root = try makeTempDirectory("ProfileDiscoveryTests")
+        base = try makeTempDirectory("ProfileDiscoveryTests")
+        root = base.appendingPathComponent("Brave-Browser", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     }
 
     override func tearDownWithError() throws {
-        try? FileManager.default.removeItem(at: root)
+        try? FileManager.default.removeItem(at: base)
     }
 
     private func makeProfile(_ name: String, files: [String]) throws {
@@ -33,8 +36,10 @@ final class ProfileDiscoveryTests: XCTestCase {
         try makeProfile("System Profile", files: ["Bookmarks"])
         try makeProfile("Guest Profile", files: ["Bookmarks"])
         try makeProfile("Crashpad", files: ["Bookmarks"]) // not a profile folder
+        try makeProfile("../Outside", files: ["Bookmarks"]) // beside the Brave folder, not in it
         try writeLocalState("""
             {"profile": {"info_cache": {
+                "../Outside": {"name": "Escapes the root"},
                 "Default": {"name": "Personal ✨", "is_using_default_name": false},
                 "Profile 1": {"name": "Contoso"},
                 "Profile 2": {"name": "Deleted folder"},
@@ -81,7 +86,8 @@ final class ProfileDiscoveryTests: XCTestCase {
             try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: loginData.path)
         }
         XCTAssertThrowsError(try BraveProfiles.discover(root: root)) { error in
-            XCTAssertEqual(error as? BraveAccessError, .permissionDenied(path: self.root.path))
+            guard case .permissionDenied(let path) = error as? BraveAccessError else { return XCTFail("\(error)") }
+            XCTAssertTrue(path.hasPrefix(self.root.path), path)
         }
         try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: root.path)
 
@@ -96,5 +102,36 @@ final class ProfileDiscoveryTests: XCTestCase {
             XCTAssertEqual(error as? BraveAccessError, .permissionDenied(path: loginData.path))
         }
         XCTAssertEqual(try fm.contentsOfDirectory(atPath: temp.path), [], "work folder wiped on failure")
+    }
+
+    /// When macOS won't let us look inside a profile folder at all, the readers must say so, not
+    /// report an empty profile.
+    func testUnreadableProfileFolderIsNotEmpty() throws {
+        try makeProfile("Default", files: ["Bookmarks", "Login Data"])
+        let profileDir = root.appendingPathComponent("Default")
+        let fm = FileManager.default
+        try fm.setAttributes([.posixPermissions: 0o000], ofItemAtPath: profileDir.path)
+        defer { try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: profileDir.path) }
+
+        let profile = BraveProfile(directoryName: "Default", displayName: "Default", url: profileDir)
+        XCTAssertThrowsError(try BookmarksReader.read(profile: profile)) { error in
+            XCTAssertEqual(error as? BraveAccessError, .permissionDenied(path: profile.bookmarksURL.path))
+        }
+        let temp = try makeTempDirectory("ProfileDiscoveryTests-temp")
+        defer { try? fm.removeItem(at: temp) }
+        let reader = BravePasswordReader(passwordSource: TestPasswordSource(), temporaryDirectory: temp)
+        XCTAssertThrowsError(try reader.read(profile: profile)) { error in
+            XCTAssertEqual(error as? BraveAccessError, .permissionDenied(path: profile.loginDataURL.path))
+        }
+    }
+
+    func testUnreadableLocalStateIsReported() throws {
+        try makeProfile("Default", files: ["Bookmarks"])
+        try writeLocalState("{}")
+        let localState = root.appendingPathComponent("Local State")
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: localState.path)
+        XCTAssertThrowsError(try BraveProfiles.discover(root: root)) { error in
+            XCTAssertEqual(error as? BraveAccessError, .permissionDenied(path: localState.path))
+        }
     }
 }

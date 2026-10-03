@@ -329,11 +329,15 @@ bookmarks into a space, move passwords into the P4 store, and build the import s
 - `BookmarksReader` turns `Bookmarks` into a neutral tree (folders, titles, URLs as stored,
   dates, GUIDs), one folder per root.
 - `BravePasswordReader` byte-copies both login databases, with any `-journal` or `-wal`, into an
-  owner-only temp folder. It reads them with the system SQLite and deletes the copies before
-  decrypting anything. It decrypts `v10` values, skips "never save" rows, and merges a login
-  found in both stores into one. The Safe Storage password comes from an injected source, asked
-  for once per reader and only when something is encrypted. It throws `wrongKey` when nothing
-  decrypts.
+  owner-only temp folder. If Brave writes during the copy (inode, size or modification time
+  changes), it copies again, up to five times. It reads the copies with the system SQLite and
+  deletes them before decrypting anything.
+- It decrypts `v10` passwords and notes from `password_notes`, skips "never save" rows, and
+  merges the same login (site, username and password) into one, as Brave shows it.
+- The Safe Storage password comes from an injected source. It is asked for once per reader, and
+  only when something is encrypted. The reader throws `wrongKey` when two or more encrypted
+  values all fail to decrypt. To check acceptance, compare against the row count of Brave's
+  "Export passwords" CSV, not its grouped list.
 - **macOS 27 protects Brave's folder.** Another app's process sees the folder but can't read it.
   This shell got "Operation not permitted", while Scott's terminal could read it. The package
   reports that as `BraveAccessError.permissionDenied`, so the import screen has to explain the

@@ -139,6 +139,33 @@ final class PasswordReaderTests: XCTestCase {
         XCTAssertEqual(result.logins[3].stores, [.account])
     }
 
+    func testImportsNotes() throws {
+        let local = try LoginDataFixture(url: profile.loginDataURL)
+        let withNote = try local.insert(row("noted.example", "u", "p"))
+        try local.addNote(to: withNote, value: braveEncrypt("Recovery codes in the safe ✓"))
+        try local.insert(row("plain.example", "u", "p"))
+        let badNote = try local.insert(row("bad-note.example", "u", "p"))
+        try local.addNote(to: badNote, value: Data("v10".utf8) + Data(repeating: 3, count: 32))
+        let keyed = try local.insert(row("keyed.example", "u", "p"))
+        try local.addNote(to: keyed, key: "other", value: braveEncrypt("secondary"))
+        try local.addNote(to: keyed, value: braveEncrypt("primary"))
+        try local.insert(row("shared.example", "u", "p"))
+        local.close()
+        let account = try LoginDataFixture(url: profile.accountLoginDataURL)
+        let shared = try account.insert(row("shared.example", "u", "p"))
+        try account.addNote(to: shared, value: braveEncrypt("from the account"))
+        account.close()
+
+        let result = try BravePasswordReader(passwordSource: TestPasswordSource(), temporaryDirectory: tempDir)
+            .read(profile: profile)
+        XCTAssertEqual(result.logins.map(\.note),
+                       ["Recovery codes in the safe ✓", nil, nil, "primary", "from the account"])
+        XCTAssertEqual(result.logins[2].password, "p", "a bad note keeps its login")
+        XCTAssertEqual(result.failures.map(\.part), [.note])
+        XCTAssertEqual(result.failures.first?.origin, "https://bad-note.example/login")
+        XCTAssertEqual(result.logins[4].stores, [.profile, .account])
+    }
+
     func testAccountStoreAlone() throws {
         let account = try LoginDataFixture(url: profile.accountLoginDataURL)
         try account.insert(row("a.example", "u", "p"))
@@ -158,21 +185,25 @@ final class PasswordReaderTests: XCTestCase {
 
     // MARK: - Locked files and copies
 
-    /// Brave keeps an exclusive lock on `Login Data` while it runs, often mid-transaction. Opening
-    /// the original fails; the reader works from a byte copy, sees only committed rows (the copied
-    /// hot journal rolls the copy back), and leaves Brave's files exactly as they were.
-    func testReadsWhileBraveHoldsAnExclusiveLock() throws {
+    /// Brave keeps an exclusive lock on `Login Data` while it runs, sometimes mid-transaction with
+    /// changed pages already written into the file. Opening the original fails; the reader works
+    /// from a byte copy whose copied hot journal rolls those pages back, so it sees only committed
+    /// data, and Brave's files stay exactly as they were.
+    func testReadsWhileBraveHoldsAnExclusiveLockMidTransaction() throws {
         let brave = try LoginDataFixture(url: profile.loginDataURL)
-        try brave.insert(row("committed.example", "me", "pw"))
-        try brave.exec("PRAGMA locking_mode=EXCLUSIVE")
-        try brave.exec("PRAGMA cache_size=1") // spill writes into the file so the journal is hot
-        try brave.exec("BEGIN EXCLUSIVE")
-        for i in 0..<200 {
-            try brave.insert(row("uncommitted-\(i).example", "me", String(repeating: "p", count: 200)))
+        try brave.exec("BEGIN")
+        for i in 0..<500 {
+            try brave.insert(row("site-\(i).example", "me", String(repeating: "p", count: 600)))
         }
+        try brave.exec("COMMIT")
+        try brave.exec("PRAGMA locking_mode=EXCLUSIVE")
+        try brave.exec("PRAGMA cache_size=1")
+        try brave.exec("PRAGMA cache_spill=ON") // changed pages go into the file before commit
+        try brave.exec("BEGIN EXCLUSIVE")
+        try brave.exec("UPDATE logins SET origin_url = 'https://overwritten.example/'")
         defer { try? brave.exec("ROLLBACK"); brave.close() }
 
-        // Prove the lock is real: a direct reader of the original is refused.
+        // The lock is real: a direct reader of the original is refused.
         var direct: OpaquePointer?
         XCTAssertEqual(sqlite3_open_v2(profile.loginDataURL.path, &direct, SQLITE_OPEN_READONLY, nil), SQLITE_OK)
         var stmt: OpaquePointer?
@@ -183,17 +214,27 @@ final class PasswordReaderTests: XCTestCase {
         XCTAssertEqual(stepped, SQLITE_BUSY)
         XCTAssertTrue(FileManager.default.fileExists(atPath: profile.loginDataURL.path + "-journal"))
 
+        // The scenario needs the journal: a copy of the main file alone shows uncommitted changes.
+        let proofDir = tempDir.appendingPathComponent("proof")
+        try FileManager.default.createDirectory(at: proofDir, withIntermediateDirectories: true)
+        try LoginDatabase.copyFile(profile.loginDataURL, to: proofDir.appendingPathComponent("Login Data"))
+        let torn = try LoginDatabase.readRows(openingCopy: proofDir.appendingPathComponent("Login Data"))
+        XCTAssertGreaterThan(torn.filter { $0.originURL == "https://overwritten.example/" }.count, 0)
+        try FileManager.default.removeItem(at: proofDir)
+
         let before = try snapshot(profileDir)
         let result = try BravePasswordReader(passwordSource: TestPasswordSource(), temporaryDirectory: tempDir)
             .read(profile: profile)
 
-        XCTAssertEqual(result.logins.map(\.signonRealm), ["https://committed.example/"])
+        XCTAssertEqual(result.logins.count, 500)
+        XCTAssertEqual(result.logins.filter { $0.origin == "https://overwritten.example/" }.count, 0)
+        XCTAssertEqual(result.logins.first?.origin, "https://site-0.example/login")
         XCTAssertEqual(try snapshot(profileDir), before, "Brave's files are untouched")
         XCTAssertEqual(try tempContents(), [], "copies are wiped")
     }
 
     /// With a write-ahead log, recent saves live in `Login Data-wal` until a checkpoint. The copy
-    /// takes the log too, so they're imported; no `-shm` or anything else appears beside Brave's files.
+    /// takes the log too, so they're imported, and nothing beside Brave's files changes.
     func testIncludesRowsStillInTheWriteAheadLog() throws {
         let brave = try LoginDataFixture(url: profile.loginDataURL, journalMode: "WAL")
         try brave.exec("PRAGMA wal_autocheckpoint=0")
@@ -207,6 +248,37 @@ final class PasswordReaderTests: XCTestCase {
             .read(profile: profile)
         XCTAssertEqual(result.logins.map(\.password), ["fresh"])
         XCTAssertEqual(try snapshot(profileDir), before)
+        XCTAssertEqual(try tempContents(), [])
+    }
+
+    /// Brave writing while the files are copied (here, between the copy and its re-check) makes
+    /// the reader take a fresh copy, which then includes the write.
+    func testRetakesTheCopyWhenBraveWritesDuringIt() throws {
+        let brave = try LoginDataFixture(url: profile.loginDataURL)
+        try brave.insert(row("first.example", "u", "p"))
+        defer { brave.close() }
+        var attempts: [Int] = []
+        let rows = try LoginDatabase.readRows(copyOf: profile.loginDataURL, workDirectory: tempDir) { attempt in
+            attempts.append(attempt)
+            if attempt == 1 { try brave.insert(self.row("second.example", "u", "p")) }
+        }
+        XCTAssertEqual(attempts, [1, 2])
+        XCTAssertEqual(rows?.map(\.signonRealm), ["https://first.example/", "https://second.example/"])
+        XCTAssertEqual(try tempContents(), [])
+    }
+
+    func testGivesUpWhenBraveKeepsWriting() throws {
+        let brave = try LoginDataFixture(url: profile.loginDataURL)
+        try brave.insert(row("first.example", "u", "p"))
+        defer { brave.close() }
+        var attempts = 0
+        XCTAssertThrowsError(try LoginDatabase.readRows(copyOf: profile.loginDataURL, workDirectory: tempDir) { n in
+            attempts += 1
+            try brave.insert(self.row("write-\(n).example", "u", "p"))
+        }) { error in
+            guard case LoginDatabaseError.copyInconsistent = error else { return XCTFail("\(error)") }
+        }
+        XCTAssertEqual(attempts, LoginDatabase.attempts)
         XCTAssertEqual(try tempContents(), [])
     }
 
@@ -270,6 +342,21 @@ final class PasswordReaderTests: XCTestCase {
         XCTAssertEqual(result.failures.count, 1)
         XCTAssertEqual(result.failures.first?.origin, "https://bad.example/login")
         XCTAssertEqual(result.failures.first?.reason, .decryptFailed)
+        XCTAssertEqual(result.failures.first?.part, .password)
+    }
+
+    func testASingleDamagedValueIsAFailureNotAWrongKey() throws {
+        let db = try LoginDataFixture(url: profile.loginDataURL)
+        try db.insert(LoginDataFixture.Row(origin: "https://empty.example/", realm: "https://empty.example/",
+                                           username: "u", passwordValue: Data()))
+        var damaged = row("bad.example", "u", "x")
+        damaged.passwordValue = Data("v10".utf8) + Data(repeating: 9, count: 32)
+        try db.insert(damaged)
+        db.close()
+        let result = try BravePasswordReader(passwordSource: TestPasswordSource(), temporaryDirectory: tempDir)
+            .read(profile: profile)
+        XCTAssertEqual(result.logins.map(\.signonRealm), ["https://empty.example/"])
+        XCTAssertEqual(result.failures.map(\.part), [.password])
     }
 
     func testKeychainDenialStopsTheImportAndWipesCopies() throws {
@@ -307,6 +394,7 @@ final class PasswordReaderTests: XCTestCase {
         XCTAssertEqual(try tempContents(), [])
     }
 
+    /// An older schema: `times_used` under its old name, no `id`, no notes table.
     func testOlderSchemaWithoutNewerColumns() throws {
         let old = """
             CREATE TABLE logins (origin_url VARCHAR NOT NULL, action_url VARCHAR, username_element VARCHAR,
@@ -316,10 +404,12 @@ final class PasswordReaderTests: XCTestCase {
               date_password_modified INTEGER);
             """
         let db = try LoginDataFixture(url: profile.loginDataURL, schema: old)
-        try db.insert(row("old.example", "u", "p"))
+        try db.insert(row("old.example", "u", "p", timesUsed: 4))
         db.close()
         let result = try BravePasswordReader(passwordSource: TestPasswordSource(), temporaryDirectory: tempDir)
             .read(profile: profile)
         XCTAssertEqual(result.logins.map(\.password), ["p"])
+        XCTAssertEqual(result.logins.map(\.timesUsed), [4])
+        XCTAssertEqual(result.logins.map(\.note), [nil])
     }
 }

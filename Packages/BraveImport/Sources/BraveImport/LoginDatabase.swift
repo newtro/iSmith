@@ -14,6 +14,8 @@ struct RawLogin {
     var neverSave: Bool
     var timesUsed: Int
     var scheme: Int
+    /// The encrypted note saved with the password (`password_notes`), when there is one.
+    var noteValue: Data?
 }
 
 public enum LoginDatabaseError: Error, Equatable {
@@ -29,37 +31,77 @@ public enum LoginDatabaseError: Error, Equatable {
 ///
 /// Brave keeps `Login Data` open (and locked) while it runs, so the file and any journal or
 /// write-ahead log beside it are byte-copied into a private folder and the copy is opened instead.
-/// A copy taken mid-write can be torn; reading is retried on a fresh copy a few times.
+/// The files are copied one after another, so a write by Brave in between would give a copy that
+/// mixes two states without SQLite noticing. Each file's identity, size and modification time are
+/// therefore checked before and after copying, and the copy is retaken until nothing moved.
 enum LoginDatabase {
     /// Companion files SQLite needs to see the latest committed data. `-shm` is not copied: it is
     /// only an index of the `-wal`, and SQLite rebuilds it.
     static let companionSuffixes = ["-journal", "-wal"]
-    static let attempts = 3
+    static let attempts = 5
+    static let retryDelay: TimeInterval = 0.2
 
-    static func readRows(copyOf source: URL, workDirectory: URL) throws -> [RawLogin] {
-        var lastError: Error = LoginDatabaseError.copyInconsistent(source.lastPathComponent)
+    /// Copies `source` (and its companions) and reads the copy. Returns nil when `source` doesn't
+    /// exist. `afterCopy` runs after each attempt's copy, before the files are re-checked (tests
+    /// use it to play Brave writing mid-copy).
+    static func readRows(copyOf source: URL, workDirectory: URL,
+                         afterCopy: ((Int) throws -> Void)? = nil) throws -> [RawLogin]? {
+        let files = [source] + companionSuffixes.map { URL(fileURLWithPath: source.path + $0) }
+        var lastProblem = "\(source.lastPathComponent) kept changing while it was copied"
         for attempt in 1...attempts {
+            if attempt > 1 { Thread.sleep(forTimeInterval: retryDelay) }
+            let before = try files.map(FileState.of)
+            guard before[0] != nil else {
+                if attempt == 1 { return nil } // no such store
+                throw LoginDatabaseError.copyInconsistent("\(source.lastPathComponent) disappeared while it was copied")
+            }
             let copyDir = workDirectory.appendingPathComponent("copy-\(attempt)-\(UUID().uuidString)", isDirectory: true)
             try makePrivateDirectory(copyDir)
             defer { try? FileManager.default.removeItem(at: copyDir) }
             let copy = copyDir.appendingPathComponent("Login Data")
-            try copyFile(source, to: copy)
-            for suffix in companionSuffixes {
-                let companion = URL(fileURLWithPath: source.path + suffix)
-                if FileManager.default.fileExists(atPath: companion.path) {
-                    // A companion can vanish between the check and the copy (a checkpoint); that's fine.
-                    try? copyFile(companion, to: URL(fileURLWithPath: copy.path + suffix))
+            for (index, file) in files.enumerated() where before[index] != nil {
+                let destination = URL(fileURLWithPath: copy.path + (index == 0 ? "" : companionSuffixes[index - 1]))
+                do {
+                    try copyFile(file, to: destination)
+                } catch where BraveFiles.isMissing(error) {
+                    // Went away mid-copy (a checkpoint removes the journal): the re-check retries.
                 }
             }
+            try afterCopy?(attempt)
+            guard try files.map(FileState.of) == before else { continue }
             do {
                 return try readRows(openingCopy: copy)
             } catch LoginDatabaseError.sqlite(let code, let message)
                         where code == SQLITE_CORRUPT || code == SQLITE_NOTADB || code == SQLITE_IOERR {
-                lastError = LoginDatabaseError.copyInconsistent("\(source.lastPathComponent): \(message)")
-                continue
+                lastProblem = "\(source.lastPathComponent): \(message)"
             }
         }
-        throw lastError
+        throw LoginDatabaseError.copyInconsistent(lastProblem)
+    }
+
+    /// What identifies a file's content cheaply: inode, size and modification time (nanoseconds).
+    struct FileState: Equatable {
+        var inode: UInt64
+        var size: Int64
+        var modified: timespec
+
+        /// Nil when the file doesn't exist. A refused look (macOS privacy protection) throws, so
+        /// it can't pass for "no passwords".
+        static func of(_ url: URL) throws -> FileState? {
+            var info = stat()
+            guard stat(url.path, &info) == 0 else {
+                let code = errno
+                if code == ENOENT || code == ENOTDIR { return nil }
+                if code == EPERM || code == EACCES { throw BraveAccessError.permissionDenied(path: url.path) }
+                throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
+            }
+            return FileState(inode: info.st_ino, size: info.st_size, modified: info.st_mtimespec)
+        }
+
+        static func == (a: FileState, b: FileState) -> Bool {
+            a.inode == b.inode && a.size == b.size
+                && a.modified.tv_sec == b.modified.tv_sec && a.modified.tv_nsec == b.modified.tv_nsec
+        }
     }
 
     /// Reads the rows of a database file that belongs to this process (a private copy).
@@ -77,12 +119,15 @@ enum LoginDatabase {
         for name in required where !columns.contains(name) {
             throw LoginDatabaseError.notALoginDatabase("logins has no \(name) column")
         }
-        // Columns added in later Chromium versions read as their defaults when absent.
+        // Columns added in later Chromium versions read as their defaults when absent. Newer
+        // versions renamed `times_used` to `times_used_in_html_form`.
+        let timesUsed = columns.contains("times_used_in_html_form") ? "times_used_in_html_form" : "times_used"
         let wanted = ["origin_url", "action_url", "signon_realm", "username_value", "password_value",
                       "date_created", "date_last_used", "date_password_modified", "blacklisted_by_user",
-                      "times_used", "scheme"]
+                      timesUsed, "scheme", "id"]
         let select = wanted.map { columns.contains($0) ? "\"\($0)\"" : "NULL" }.joined(separator: ", ")
         let order = columns.contains("id") ? " ORDER BY id" : ""
+        let notes = columns.contains("id") ? try readNotes(db) : [:]
         let stmt = try prepare(db, "SELECT \(select) FROM logins\(order)")
         defer { sqlite3_finalize(stmt) }
 
@@ -98,9 +143,33 @@ enum LoginDatabase {
                                  datePasswordModified: sqlite3_column_int64(stmt, 7),
                                  neverSave: sqlite3_column_int64(stmt, 8) != 0,
                                  timesUsed: Int(sqlite3_column_int64(stmt, 9)),
-                                 scheme: Int(sqlite3_column_int64(stmt, 10))))
+                                 scheme: Int(sqlite3_column_int64(stmt, 10)),
+                                 noteValue: sqlite3_column_type(stmt, 11) == SQLITE_NULL
+                                    ? nil : notes[sqlite3_column_int64(stmt, 11)]))
         }
         return rows
+    }
+
+    /// Chromium keeps notes in `password_notes` (`parent_id` → `logins.id`), encrypted like
+    /// passwords. A login can have several keyed notes; the user's note is the one with an empty
+    /// key, else the oldest.
+    private static func readNotes(_ db: OpaquePointer) throws -> [Int64: Data] {
+        let columns = try tableColumns(db, "password_notes")
+        guard columns.contains("parent_id"), columns.contains("value") else { return [:] }
+        let keyOrder = columns.contains("key") ? "(\"key\" != ''), " : ""
+        let idOrder = columns.contains("id") ? "id" : "rowid"
+        let stmt = try prepare(db, "SELECT parent_id, value FROM password_notes ORDER BY \(keyOrder)\(idOrder)")
+        defer { sqlite3_finalize(stmt) }
+        var notes: [Int64: Data] = [:]
+        while true {
+            let step = sqlite3_step(stmt)
+            if step == SQLITE_DONE { break }
+            guard step == SQLITE_ROW else { throw error(db, step) }
+            let parent = sqlite3_column_int64(stmt, 0)
+            let value = blob(stmt, 1)
+            if notes[parent] == nil, !value.isEmpty { notes[parent] = value }
+        }
+        return notes
     }
 
     // MARK: - Files

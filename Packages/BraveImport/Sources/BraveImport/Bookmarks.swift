@@ -70,9 +70,18 @@ public struct BraveBookmarks: Equatable, Sendable {
         public var root: Root
         /// The root folder, with Brave's title for it.
         public var folder: BookmarkNode
+
+        public init(root: Root, folder: BookmarkNode) {
+            self.root = root
+            self.folder = folder
+        }
     }
 
     public var roots: [Entry]
+
+    public init(roots: [Entry]) {
+        self.roots = roots
+    }
 
     public var bookmarkCount: Int { roots.reduce(0) { $0 + $1.folder.bookmarkCount } }
     /// Folders inside the roots (the roots themselves are not counted).
@@ -85,10 +94,11 @@ public enum BookmarksError: Error, Equatable {
 }
 
 public enum BookmarksReader {
-    /// Reads a profile's `Bookmarks` file. A profile without one has no bookmarks.
+    /// Reads a profile's `Bookmarks` file. A profile without one has no bookmarks; one that can't
+    /// be read throws (`BraveAccessError.permissionDenied` when macOS refuses), never "empty".
     public static func read(profile: BraveProfile) throws -> BraveBookmarks {
-        guard profile.hasBookmarks else { return BraveBookmarks(roots: []) }
-        return try read(contentsOf: profile.bookmarksURL)
+        guard let data = try BraveFiles.readIfPresent(profile.bookmarksURL) else { return BraveBookmarks(roots: []) }
+        return try parse(data)
     }
 
     public static func read(contentsOf url: URL) throws -> BraveBookmarks {
