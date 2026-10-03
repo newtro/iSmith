@@ -24,17 +24,6 @@ final class CookieSync: ObservableObject {
     /// Space id → providers someone signed in to in that space that it has no account for.
     @Published private(set) var detected: [String: Set<String>] = [:]
 
-    /// How a space's account for a provider changed.
-    enum Rebind {
-        /// The space no longer uses an account for the provider; its cookies stay in the space.
-        case unbind
-        /// The space now uses the account; its current cookies are cleared and replaced by the
-        /// account's (or left empty for a new account, ready to sign in).
-        case replace
-        /// The space's current sign-in becomes the account's (from "Save this sign-in").
-        case adopt
-    }
-
     let vault: Vault
     let config: Config
     private var stores: [String: WKWebsiteDataStore] = [:]
@@ -65,9 +54,43 @@ final class CookieSync: ObservableObject {
         return store
     }
 
-    /// Applies a change to which account a space uses for a provider. Call after updating Config.
-    func rebind(spaceID: String, providerID: String, _ change: Rebind) async {
-        await enqueue { await self.performRebind(spaceID: spaceID, providerID: providerID, change) }
+    /// Changes which accounts a space uses. Runs on the queue so no scan sees a half-applied change:
+    /// the old accounts' latest cookies are saved under the old binding first, then `commit`
+    /// updates the config, then the space's browsing data is cleared and every bound account's
+    /// sign-in is loaded. Clearing everything (not just the provider's cookies) is what makes the
+    /// sites themselves (Outlook, Gmail, Etsy) switch accounts too.
+    func switchAccounts(spaceID: String, oldAccounts: [String], commit: @escaping @MainActor () -> Void) async {
+        await enqueue {
+            for accountID in oldAccounts { await self.reconcile(accountID) }
+            commit()
+            await self.resetStore(spaceID)
+        }
+        scheduleScan(spaceID)
+    }
+
+    /// "Save this sign-in": `commit` binds the space to the account, then the space's current
+    /// sign-in becomes that account's whole sign-in (never merged key by key with an older one)
+    /// and is loaded into every other open space using the account.
+    func adoptSignIn(spaceID: String, providerID: String, commit: @escaping @MainActor () -> Void) async {
+        detected[spaceID]?.remove(providerID)
+        await enqueue {
+            commit()
+            guard let space = self.config.space(spaceID), let provider = self.config.provider(providerID),
+                  let account = space.bindings[providerID].flatMap(self.config.account),
+                  let store = self.stores[spaceID] else { return }
+            let local = self.keyed(self.records(in: await store.httpCookieStore.allCookies(), for: provider))
+            self.vault.set(Array(local.values), for: account.id)
+            self.baseline[spaceID, default: [:]][providerID] = local
+            for other in self.config.spaces(using: account.id) where other.id != spaceID {
+                guard let otherStore = self.stores[other.id] else { continue } // closed spaces seed from the vault
+                let theirs = self.keyed(self.records(in: await otherStore.httpCookieStore.allCookies(), for: provider))
+                await self.apply(local, removing: Set(theirs.keys).subtracting(local.keys), provider: provider,
+                                 to: otherStore, current: theirs)
+                self.baseline[other.id, default: [:]][providerID] =
+                    self.keyed(self.records(in: await otherStore.httpCookieStore.allCookies(), for: provider))
+            }
+            self.note("\(space.name): saved this \(provider.name) sign-in as \(self.config.label(account))")
+        }
         scheduleScan(spaceID)
     }
 
@@ -152,7 +175,8 @@ final class CookieSync: ObservableObject {
     // MARK: - Work (only ever runs on the queue)
 
     private func performAttach(_ spaceID: String) async -> WKWebsiteDataStore {
-        let space = config.space(spaceID)!
+        // A space deleted while its first open was queued gets a throwaway store, never attached.
+        guard let space = config.space(spaceID) else { return .nonPersistent() }
         let store = WKWebsiteDataStore(forIdentifier: space.storeID)
         for (provider, account) in config.bound(space) {
             await seed(store, spaceName: space.name, provider: provider, account: account, adoptIfNew: true)
@@ -195,31 +219,19 @@ final class CookieSync: ObservableObject {
         return [:]
     }
 
-    private func performRebind(spaceID: String, providerID: String, _ change: Rebind) async {
-        guard let space = config.space(spaceID), let provider = config.provider(providerID) else { return }
-        detected[spaceID]?.remove(providerID)
-        let isOpen = stores[spaceID] != nil
-        if case .unbind = change {
-            baseline[spaceID]?[providerID] = nil
-            note("\(space.name): \(provider.name) sign-ins now stay in this space")
-            return
-        }
-        guard let account = space.bindings[providerID].flatMap(config.account) else { return }
-        // A closed space's store is opened just to update its cookies; it is seeded again when opened.
+    /// Clears all of a space's browsing data and loads each bound account's sign-in from the vault.
+    private func resetStore(_ spaceID: String) async {
+        guard let space = config.space(spaceID) else { return }
+        // A closed space's store is opened just to reset it; it is seeded again when opened.
         let store = stores[spaceID] ?? WKWebsiteDataStore(forIdentifier: space.storeID)
-        switch change {
-        case .adopt:
-            let local = keyed(records(in: await store.httpCookieStore.allCookies(), for: provider))
-            if vault.records(for: account.id) == nil { vault.set(Array(local.values), for: account.id) }
-            // An empty baseline makes the next reconcile merge this sign-in and share it.
-            if isOpen { baseline[spaceID, default: [:]][providerID] = [:] }
-            note("\(space.name): saved this \(provider.name) sign-in as \(config.label(account))")
-        case .replace:
+        await store.removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast)
+        detected[spaceID] = nil
+        baseline[spaceID] = [:]
+        for (provider, account) in config.bound(space) {
             let next = await seed(store, spaceName: space.name, provider: provider, account: account, adoptIfNew: false)
-            if isOpen { baseline[spaceID, default: [:]][providerID] = next }
-        case .unbind:
-            break
+            if stores[spaceID] != nil { baseline[spaceID, default: [:]][provider.id] = next }
         }
+        note("\(space.name): switched accounts; browsing data cleared")
     }
 
     private func detect(_ spaceID: String) async {

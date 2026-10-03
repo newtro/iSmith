@@ -134,24 +134,45 @@ final class BrowserState: NSObject, ObservableObject {
         select(state)
     }
 
-    /// Saves edits. A provider whose account changed is signed out of the old account in this space
-    /// and switched to the new one.
+    /// Saves edits. If any account changed, the space's browsing data is cleared (after asking),
+    /// every bound account's sign-in is loaded, and its tabs reload as the new accounts.
     func updateSpace(_ id: String, name: String, color: Int, home: String,
-                     choices: [String: AccountChoice], newNames: [String: String]) {
+                     choices: [String: AccountChoice], newNames: [String: String], confirm: Bool = true) {
         guard let state = spaces.first(where: { $0.id == id }) else { return }
         let old = state.def
+        let wanted = choices.filter { $0.value != .none }
+        let changed = Set(old.bindings.keys).union(wanted.keys).filter { provider in
+            switch wanted[provider] {
+            case .existing(let accountID): return old.bindings[provider] != accountID
+            case .new: return true
+            default: return old.bindings[provider] != nil
+            }
+        }
+        if !changed.isEmpty && confirm {
+            let alert = NSAlert()
+            alert.messageText = "Switch accounts in \(old.name)?"
+            alert.informativeText = "This clears the space's browsing data, including other sites you're signed in to here, and reloads its tabs with the new accounts. Other spaces aren't affected."
+            alert.addButton(withTitle: "Switch")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
         var def = old
         def.name = name
         def.color = color
         def.home = home
+        guard !changed.isEmpty else {
+            config.upsert(def)
+            state.def = def
+            return
+        }
         def.bindings = resolve(choices, newNames, spaceName: name)
-        config.upsert(def)
-        state.def = def
-        let changed = Set(old.bindings.keys).union(def.bindings.keys).filter { old.bindings[$0] != def.bindings[$0] }
+        let oldAccounts = changed.compactMap { old.bindings[$0] }
         Task {
-            for providerID in changed.sorted() {
-                await sync.rebind(spaceID: id, providerID: providerID, def.bindings[providerID] == nil ? .unbind : .replace)
+            await sync.switchAccounts(spaceID: id, oldAccounts: oldAccounts) { [config] in
+                config.upsert(def)
+                state.def = def
             }
+            for tab in state.tabs { tab.webView.reload() }
         }
     }
 
@@ -180,21 +201,27 @@ final class BrowserState: NSObject, ObservableObject {
     /// "Save this sign-in" from the banner: the space now uses `choice` for the provider, and its
     /// current sign-in becomes that account's.
     func saveDetected(spaceID: String, providerID: String, choice: AccountChoice, newName: String) {
-        guard let state = spaces.first(where: { $0.id == spaceID }) else { return }
+        guard let state = spaces.first(where: { $0.id == spaceID }), state.def.bindings[providerID] == nil,
+              sync.detected[spaceID]?.contains(providerID) == true else { return }
+        // Hidden right away, so a second click can't create a second account.
+        sync.dismissDetected(spaceID: spaceID, providerID: providerID)
         let accountID: String
         switch choice {
         case .none: return
         case .existing(let id): accountID = id
         case .new: accountID = config.addAccount(providerID: providerID, name: newName.isEmpty ? state.def.name : newName).id
         }
-        state.def.bindings[providerID] = accountID
-        config.upsert(state.def)
-        Task { await sync.rebind(spaceID: spaceID, providerID: providerID, .adopt) }
+        Task {
+            await sync.adoptSignIn(spaceID: spaceID, providerID: providerID) { [config] in
+                state.def.bindings[providerID] = accountID
+                config.upsert(state.def)
+            }
+        }
     }
 
     func keepLocal(spaceID: String, providerID: String) {
         guard let state = spaces.first(where: { $0.id == spaceID }) else { return }
-        state.def.localProviders.append(providerID)
+        if !state.def.localProviders.contains(providerID) { state.def.localProviders.append(providerID) }
         config.upsert(state.def)
         sync.dismissDetected(spaceID: spaceID, providerID: providerID)
     }
@@ -235,6 +262,7 @@ final class BrowserState: NSObject, ObservableObject {
     func newTab(in space: SpaceState, url: URL?) async {
         // Seeding must finish before the first request, or the page loads signed out.
         let store = await sync.attach(space.def)
+        guard spaces.contains(where: { $0 === space }) else { return } // deleted while opening
         let config = WKWebViewConfiguration()
         config.websiteDataStore = store
         config.preferences.javaScriptCanOpenWindowsAutomatically = true

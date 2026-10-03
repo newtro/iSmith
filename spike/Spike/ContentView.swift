@@ -520,6 +520,7 @@ private struct AddProviderForm: View {
     @State private var name = ""
     @State private var domains = ""
     @State private var sessionNames = ""
+    @State private var error: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -531,10 +532,12 @@ private struct AddProviderForm: View {
             Text("With signed-in cookie names, the app offers to save a sign-in it notices. Without them, pick the account in the space settings.")
                 .font(.caption2).foregroundStyle(.secondary)
             HStack {
+                if let error { Text(error).font(.caption).foregroundStyle(.red) }
                 Spacer()
                 Button("Add Provider") {
-                    config.addProvider(name: name.trimmingCharacters(in: .whitespaces),
-                                       domains: list(domains).map { $0.lowercased() }, sessionNames: list(sessionNames))
+                    error = config.addProvider(name: name.trimmingCharacters(in: .whitespaces),
+                                               domains: list(domains), sessionNames: list(sessionNames))
+                    guard error == nil else { return }
                     name = ""; domains = ""; sessionNames = ""
                     done()
                 }

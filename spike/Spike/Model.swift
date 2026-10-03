@@ -69,6 +69,24 @@ struct SpaceDef: Codable, Hashable, Identifiable {
     /// Providers whose sign-ins stay in this space only; the app won't offer to save them.
     var localProviders: [String] = []
 
+    init(id: String, name: String, color: Int, storeID: UUID, bindings: [String: String], home: String,
+         localProviders: [String] = []) {
+        (self.id, self.name, self.color, self.storeID, self.bindings, self.home, self.localProviders) =
+            (id, name, color, storeID, bindings, home, localProviders)
+    }
+
+    /// Fields added later decode with defaults, so an older config.json still loads.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        color = try c.decodeIfPresent(Int.self, forKey: .color) ?? 0
+        storeID = try c.decode(UUID.self, forKey: .storeID)
+        bindings = try c.decodeIfPresent([String: String].self, forKey: .bindings) ?? [:]
+        home = try c.decodeIfPresent(String.self, forKey: .home) ?? ""
+        localProviders = try c.decodeIfPresent([String].self, forKey: .localProviders) ?? []
+    }
+
     var initials: String {
         let words = name.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).prefix(2)
         let letters = words.compactMap(\.first).map { String($0).uppercased() }.joined()
@@ -116,10 +134,20 @@ final class Config: ObservableObject {
     private let fileURL = AppPaths.dir.appendingPathComponent("config.json")
 
     init() {
-        if let data = try? Data(contentsOf: fileURL), let file = try? JSONDecoder().decode(File.self, from: data) {
-            providers = file.providers
-            accounts = file.accounts
-            spaces = file.spaces
+        if let data = try? Data(contentsOf: fileURL) {
+            do {
+                let file = try JSONDecoder().decode(File.self, from: data)
+                providers = file.providers
+                accounts = file.accounts
+                spaces = file.spaces
+            } catch {
+                // Never overwrite a config that didn't load: keep a copy to recover from.
+                let backup = fileURL.deletingPathExtension()
+                    .appendingPathExtension("unreadable-\(Int(Date().timeIntervalSince1970)).json")
+                try? FileManager.default.copyItem(at: fileURL, to: backup)
+                NSLog("iSmith: config.json could not be read (\(error)); saved a copy at \(backup.path)")
+                (accounts, spaces) = Self.starter()
+            }
         } else {
             (accounts, spaces) = Self.starter()
         }
@@ -176,11 +204,29 @@ final class Config: ObservableObject {
         save()
     }
 
-    func addProvider(name: String, domains: [String], sessionNames: [String]) {
+    /// Adds a provider, or returns why it can't be added. Two providers may not claim the same
+    /// cookies, or two accounts in one space would overwrite each other's sign-in.
+    @discardableResult
+    func addProvider(name: String, domains: [String], sessionNames: [String]) -> String? {
+        let domains = domains.map { d -> String in
+            var d = d.lowercased()
+            if let host = URL(string: d.contains("://") ? d : "https://" + d)?.host { d = host }
+            while d.hasPrefix(".") || d.hasPrefix("*") { d.removeFirst() }
+            return d
+        }.filter { $0.contains(".") }
+        guard !domains.isEmpty else { return "Enter at least one domain, like okta.com." }
+        for d in domains {
+            for p in providers {
+                if let clash = p.domains.first(where: { $0 == d || $0.hasSuffix("." + d) || d.hasSuffix("." + $0) }) {
+                    return "\(d) overlaps \(p.name) (\(clash))."
+                }
+            }
+        }
         let id = "custom-" + UUID().uuidString.prefix(8).lowercased()
         providers.append(ProviderDef(id: id, name: name, domains: domains,
                                      sessionNames: sessionNames.isEmpty ? nil : sessionNames))
         save()
+        return nil
     }
 
     func removeProvider(_ id: String) {
@@ -195,6 +241,7 @@ final class Config: ObservableObject {
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             try encoder.encode(File(providers: providers, accounts: accounts, spaces: spaces))
                 .write(to: fileURL, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
         } catch {
             NSLog("iSmith config save failed: \(error)")
         }

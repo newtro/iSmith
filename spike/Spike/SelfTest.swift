@@ -18,6 +18,7 @@ struct SelfTest {
             if !ok { failures.append(what) }
         }
 
+        await wipeTestStores()
         let byID = Dictionary(uniqueKeysWithValues: browser.config.spaces.map { ($0.id, $0) })
         let m = await sync.attach(byID["contoso"]!)
         let t = await sync.attach(byID["fabrikam"]!)
@@ -124,6 +125,7 @@ struct SelfTest {
             if !ok { failures.append(what) }
         }
         let config = browser.config
+        await wipeTestStores()
         let hour = Date().addingTimeInterval(3600)
         let m = await sync.attach(config.space("contoso")!)
         let b = await sync.attach(config.space("contoso-b")!)
@@ -166,9 +168,12 @@ struct SelfTest {
         check(await value(t, "ismith_probe_ms") == "m1", "Switching a space to another account loads that account's sign-in")
         check(browser.vault.records(for: "ms-fabrikam")?.first { $0.name == "ismith_probe_ms" }?.value == "t1", "The old account keeps its own sign-in")
 
-        // Unbinding: the space keeps its cookies but stops sharing them.
+        // Removing an account from a space signs the space out of it, with no offer to re-save it.
         update("fabrikam") { $0["google"] = AccountChoice.none }
         await settle()
+        check(await value(t, "SID") == nil, "Removing the Google account signs the space out of Google")
+        check(sync.detected["fabrikam"]?.contains("google") != true, "No offer to save the removed account's session")
+        check(await value(m, "SID") == "d1", "Other spaces stay signed in after one space drops the account")
         await t.httpCookieStore.setCookie(cookie("SID", "z9", ".google.com", expires: hour))
         await settle()
         check(await value(m, "SID") == "d1", "After unbinding, the space's Google changes stay local")
@@ -178,6 +183,33 @@ struct SelfTest {
         await settle()
         check(sync.detected["fabrikam"]?.contains("google") != true, "Keep in this space only stops the offer")
 
+        // Saving a sign-in to an existing account replaces that account's sign-in; never mixes two.
+        await m.httpCookieStore.setCookie(cookie("LSID", "old", "accounts.google.com", expires: hour, secure: true))
+        await settle()
+        browser.createSpace(name: "Adopter", color: 7, home: "", choices: [:], newNames: [:])
+        let adopter = config.spaces.first { $0.name == "Adopter" }!
+        let a = await sync.attach(adopter)
+        await a.httpCookieStore.setCookie(cookie("SID", "a1", ".google.com", expires: hour))
+        await settle()
+        browser.saveDetected(spaceID: adopter.id, providerID: "google", choice: .existing("google-personal"), newName: "")
+        browser.saveDetected(spaceID: adopter.id, providerID: "google", choice: .new, newName: "Dup")
+        await settle()
+        let (mSID, mLSID) = (await value(m, "SID"), await value(m, "LSID"))
+        check(mSID == "a1" && mLSID == nil, "Saved sign-in replaces the account's old one (no mixing)")
+        check(!config.accounts.contains { $0.name == "Dup" }, "A second Save click does not create another account")
+
+        // Providers can't claim another provider's cookies.
+        check(config.addProvider(name: "Workspace", domains: ["mail.google.com"], sessionNames: []) != nil, "Provider overlapping Google is refused")
+        check(config.addProvider(name: "Okta", domains: ["https://contoso.okta.com/app"], sessionNames: ["sid"]) == nil, "Provider from a pasted URL is added")
+        check(config.providers.last?.domains == ["contoso.okta.com"], "Pasted URL is reduced to its domain")
+
+        // Spaces created by this test get new stores; remove them so runs don't pile up.
+        for def in config.spaces where ["Fresh", "Brand New", "Adopter"].contains(def.name) {
+            browser.spaces.first { $0.id == def.id }.map { state in state.tabs.forEach { browser.close($0, in: state) } }
+            await sync.detach(def.id)
+            try? await WKWebsiteDataStore.remove(forIdentifier: def.storeID)
+        }
+
         print(failures.isEmpty ? "CONFIG OK" : "CONFIG FAILED: \(failures.count)")
         exit(failures.isEmpty ? 0 : 1)
     }
@@ -186,7 +218,17 @@ struct SelfTest {
         let def = browser.config.space(spaceID)!
         var choices = def.bindings.mapValues { AccountChoice.existing($0) }
         change(&choices)
-        browser.updateSpace(spaceID, name: def.name, color: def.color, home: def.home, choices: choices, newNames: [:])
+        browser.updateSpace(spaceID, name: def.name, color: def.color, home: def.home, choices: choices, newNames: [:], confirm: false)
+    }
+
+    /// Test stores are reused between runs (WebKit keeps them by identifier), so each suite starts
+    /// by clearing them. Only the self-test's own stores are touched.
+    private func wipeTestStores() async {
+        precondition(AppPaths.isSelfTest)
+        for def in browser.config.spaces {
+            await WKWebsiteDataStore(forIdentifier: def.storeID)
+                .removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast)
+        }
     }
 
     private func settle() async {
