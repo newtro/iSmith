@@ -31,5 +31,18 @@ struct ISmithSpikeApp: App {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    /// Set by BrowserState: saves the latest cookie changes to the vault before quitting.
+    @MainActor static var flush: (() async -> Void)?
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+
+    @MainActor
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let flush = Self.flush else { return .terminateNow }
+        Task { @MainActor in
+            await flush()
+            NSApp.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
 }

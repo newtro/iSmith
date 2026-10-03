@@ -35,5 +35,18 @@ build/Build/Products/Debug/iSmithSpike.app/Contents/MacOS/iSmithSpike --selftest
 The key button at the bottom of the rail shows the vault: cookie names per account (no values)
 and a log of every copy between spaces.
 
+What the automated tests cover: sharing between open spaces, isolation between Microsoft
+tenants, Google tracking cookies staying local, simultaneous changes in two spaces, sign-out
+spreading, and session-only cookies surviving a relaunch (the case only the vault can cover).
+
+Known risks outside the code:
+- A tenant with device-based Conditional Access needs Apple's Enterprise SSO plug-in, which
+  serves Safari and allowlisted apps only. If a tenant blocks sign-in here, that is policy, not
+  cookies.
+- Passkeys and Keychain autofill need Apple's web-browser entitlement. Use a password or
+  Authenticator for now.
+- A space that was closed while an account signed out elsewhere keeps its old cookies until the
+  site rejects them.
+
 Spike limits: the vault is plain JSON with owner-only permissions (the real one encrypts with a
 Keychain key), password autofill isn't available, and spaces are hard-coded.

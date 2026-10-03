@@ -9,6 +9,8 @@ final class Tab: ObservableObject, Identifiable {
     @Published var title = "New tab"
     @Published var url: URL?
     @Published var isLoading = false
+    @Published var canGoBack = false
+    @Published var canGoForward = false
     private var observations: [NSKeyValueObservation] = []
 
     init(webView: WKWebView) {
@@ -22,6 +24,12 @@ final class Tab: ObservableObject, Identifiable {
             },
             webView.observe(\.isLoading) { [weak self] wv, _ in
                 Task { @MainActor in self?.isLoading = wv.isLoading }
+            },
+            webView.observe(\.canGoBack) { [weak self] wv, _ in
+                Task { @MainActor in self?.canGoBack = wv.canGoBack }
+            },
+            webView.observe(\.canGoForward) { [weak self] wv, _ in
+                Task { @MainActor in self?.canGoForward = wv.canGoForward }
             },
         ]
     }
@@ -48,6 +56,7 @@ final class BrowserState: NSObject, ObservableObject {
     let spaces: [SpaceState]
     @Published var activeID: String
     @Published var showVault = true
+    private var opening: Set<String> = []
 
     /// Safari's user agent, so sites (Google sign-in in particular) treat the spike as Safari
     /// rather than an embedded web view.
@@ -65,6 +74,7 @@ final class BrowserState: NSObject, ObservableObject {
         spaces = Seed.spaces.map(SpaceState.init)
         activeID = Seed.spaces[0].id
         super.init()
+        AppDelegate.flush = { [sync] in await sync.flush() }
     }
 
     var active: SpaceState { spaces.first { $0.id == activeID } ?? spaces[0] }
@@ -79,8 +89,13 @@ final class BrowserState: NSObject, ObservableObject {
 
     func select(_ space: SpaceState) {
         activeID = space.id
-        if space.tabs.isEmpty {
-            Task { await newTab(in: space, url: space.space.home) }
+        // Attaching takes a moment; a second click in that window must not open a second home tab.
+        if space.tabs.isEmpty, !opening.contains(space.id) {
+            opening.insert(space.id)
+            Task {
+                await newTab(in: space, url: space.space.home)
+                opening.remove(space.id)
+            }
         }
     }
 

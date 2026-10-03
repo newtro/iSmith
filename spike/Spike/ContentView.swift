@@ -141,9 +141,9 @@ private struct Toolbar: View {
     var body: some View {
         HStack(spacing: 8) {
             Button { tab.webView.goBack() } label: { Image(systemName: "chevron.left") }
-                .disabled(!tab.webView.canGoBack)
+                .disabled(!tab.canGoBack)
             Button { tab.webView.goForward() } label: { Image(systemName: "chevron.right") }
-                .disabled(!tab.webView.canGoForward)
+                .disabled(!tab.canGoForward)
             Button { tab.webView.reload() } label: { Image(systemName: "arrow.clockwise") }
             TextField("Search or enter address", text: $address)
                 .textFieldStyle(.roundedBorder)

@@ -6,6 +6,13 @@ struct Provider: Hashable, Identifiable {
     /// Cookie domains owned by the provider. A cookie belongs to the provider when its domain
     /// equals one of these or is a subdomain of one.
     let domains: [String]
+    /// When set, only these cookie names are shared. Google sets many fast-changing app and
+    /// tracking cookies on google.com; only the sign-in session set needs to follow the account.
+    var names: Set<String>? = nil
+
+    func tracks(_ cookie: HTTPCookie) -> Bool {
+        owns(cookieDomain: cookie.domain) && (names?.contains(cookie.name) ?? true)
+    }
 
     func owns(cookieDomain: String) -> Bool {
         var host = cookieDomain.lowercased()
@@ -16,7 +23,12 @@ struct Provider: Hashable, Identifiable {
     static let microsoft = Provider(id: "Microsoft", domains: [
         "login.microsoftonline.com", "login.microsoft.com", "login.windows.net", "login.live.com",
     ])
-    static let google = Provider(id: "Google", domains: ["google.com"])
+    static let google = Provider(id: "Google", domains: ["google.com"], names: [
+        "SID", "HSID", "SSID", "APISID", "SAPISID",
+        "__Secure-1PSID", "__Secure-3PSID", "__Secure-1PAPISID", "__Secure-3PAPISID",
+        "__Secure-1PSIDTS", "__Secure-3PSIDTS",
+        "LSID", "__Host-1PLSID", "__Host-3PLSID", "__Host-GAPS", "ACCOUNT_CHOOSER",
+    ])
     static let github = Provider(id: "GitHub", domains: ["github.com"])
 }
 
