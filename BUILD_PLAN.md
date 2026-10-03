@@ -984,6 +984,11 @@ macOS's "change your default web browser?" question.
 
 Acceptance: installing from the DMG passes Gatekeeper; a test 1.0.1 release auto-updates 1.0.0.
 
+- **Status (2026-10-03)**: done. 1.0.0 released (build 64) with `Tools/release.sh`: notarized
+  through the Xcode-signed-in Apple ID (no API key), Gatekeeper accepts it, Sparkle feed live at
+  `appcast.xml`, repo public with history scrubbed of private names. 1.0.1 published to prove
+  auto-update.
+
 ### P8. Hardening and acceptance (M)
 
 - **Performance**: 40 tabs across four spaces under 3 GB RAM, counting WebKit's web content
