@@ -98,13 +98,32 @@
     return true;
   };
 
+  // Forms and documents have named properties that override built-ins (`<input name="elements">`
+  // makes `form.elements` that input; `<img name="body">` does the same to `document.body`), in
+  // every world. These read the real values through the prototypes' own getters.
+  const getter = (proto, name) => Object.getOwnPropertyDescriptor(proto, name).get;
+  const formElementsOf = getter(HTMLFormElement.prototype, "elements");
+  const formsOf = getter(Document.prototype, "forms");
+  const bodyOf = getter(Document.prototype, "body");
+  const rootOf = getter(Document.prototype, "documentElement");
+  const inputFormOf = getter(HTMLInputElement.prototype, "form");
+  const buttonFormOf = getter(HTMLButtonElement.prototype, "form");
+  const queryAll = Element.prototype.querySelectorAll;
+  const docBody = () => bodyOf.call(document) || rootOf.call(document);
+  const formOf = (el) => {
+    if (isInput(el)) return inputFormOf.call(el);
+    if (el instanceof HTMLButtonElement) return buttonFormOf.call(el);
+    return null;
+  };
+
   // The form a field belongs to, or for fields outside any form, the document body (fields in
   // other forms excluded).
-  const scopeOf = (el) => el.form || document.body || document.documentElement;
+  const scopeOf = (el) => formOf(el) || docBody();
 
   const scopeInputs = (scope) => {
-    if (scope instanceof HTMLFormElement) return Array.from(scope.elements).filter(isInput);
-    return Array.from(scope.querySelectorAll("input")).filter((el) => !el.form);
+    if (!scope) return [];
+    if (scope instanceof HTMLFormElement) return Array.from(formElementsOf.call(scope)).filter(isInput);
+    return Array.from(queryAll.call(scope, "input")).filter((el) => !inputFormOf.call(el));
   };
 
   // What kind of form a scope holds, and its fields:
@@ -168,7 +187,8 @@
   // A username shown but not typed on a password-only page: a hidden or read-only field the
   // site keeps from the first step (Microsoft, Google).
   const usernameHint = (scope) => {
-    for (const el of scopeInputs(scope).concat(scope === document.body ? [] : scopeInputs(document.body))) {
+    const body = docBody();
+    for (const el of scopeInputs(scope).concat(scope === body ? [] : scopeInputs(body))) {
       if (isPasswordField(el)) continue;
       const looksRight = el.type === "email" || autocompleteTokens(el).includes("username") ||
         (USERNAME_HINT.test(attrText(el)) && !NOT_USERNAME.test(attrText(el)));
@@ -251,7 +271,7 @@
       if (node instanceof HTMLButtonElement) return node;
       if (isInput(node) && (node.type === "submit" || node.type === "button" || node.type === "image")) return node;
       if (node.getAttribute("role") === "button") return node;
-      if (node instanceof HTMLFormElement || node === document.body) return null;
+      if (node instanceof HTMLFormElement || node === docBody()) return null;
     }
     return null;
   };
@@ -263,11 +283,11 @@
     if (!button) return;
     const label = [button.textContent, button.value, button.getAttribute("aria-label"), button.id, button.name]
       .filter(Boolean).join(" ").slice(0, 200);
-    const isSubmit = (button instanceof HTMLButtonElement && button.type === "submit" && button.form) ||
+    const isSubmit = (button instanceof HTMLButtonElement && button.type === "submit" && formOf(button)) ||
       (isInput(button) && button.type === "submit");
     if (NOT_SUBMIT_TEXT.test(label) && !isSubmit) return;
     if (!isSubmit && !SUBMIT_TEXT.test(label)) return;
-    report(button.form || scopeOf(button));
+    report(formOf(button) || scopeOf(button));
   }, true);
 
   // MARK: Forms on the page
@@ -278,12 +298,12 @@
   const scan = () => {
     scanTimer = null;
     const kinds = new Set();
-    for (const form of Array.from(document.forms)) {
+    for (const form of Array.from(formsOf.call(document))) {
       const a = analyze(form);
       if (a.kind) kinds.add(a.kind);
     }
-    if (document.body) {
-      const a = analyze(document.body);
+    if (docBody()) {
+      const a = analyze(docBody());
       if (a.kind) kinds.add(a.kind);
     }
     const summary = Array.from(kinds).sort().join(",");
@@ -296,7 +316,7 @@
   };
   const startObserving = () => {
     scheduleScan();
-    new MutationObserver(scheduleScan).observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ["type", "style", "class", "hidden"] });
+    new MutationObserver(scheduleScan).observe(rootOf.call(document), { childList: true, subtree: true, attributes: true, attributeFilter: ["type", "style", "class", "hidden"] });
   };
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", startObserving, { once: true });
   else startObserving();

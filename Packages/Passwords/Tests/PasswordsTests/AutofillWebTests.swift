@@ -291,6 +291,19 @@ final class AutofillWebTests: XCTestCase {
         XCTAssertEqual(filled, "Victim-Secret-8")
     }
 
+    func testNamedElementsCannotHideTheForm() async throws {
+        let saved = try h.store.add(origin: origin, username: "user", password: "Clobber-Secret-11")
+        try await h.load(server.url("/clobber.html"))
+        let clobbered = try await h.pageString("return [typeof document.body.tagName, document.forms.tagName, document.getElementById('login').elements.tagName].join()")
+        XCTAssertEqual(clobbered, "string,IMG,INPUT", "the fixture really shadows the built-ins")
+        try await h.waitUntil("the login form to be found") { h.forms.contains { $0.kinds.contains(.login) } }
+        let focus = try await focus("password")
+        XCTAssertEqual(focus.form, .login)
+        try await h.autofill.fill(saved.id, into: focus)
+        let pass = try await value("password")
+        XCTAssertEqual(pass, "Clobber-Secret-11")
+    }
+
     func testHiddenFieldsAreNeverOfferedOrFilled() async throws {
         let saved = try h.store.add(origin: origin, username: "user", password: "Hidden-Secret-9")
         try await h.load(server.url("/hidden.html"))
