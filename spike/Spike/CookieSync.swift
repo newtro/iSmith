@@ -63,6 +63,7 @@ final class CookieSync: ObservableObject {
         await enqueue {
             for accountID in oldAccounts { await self.reconcile(accountID) }
             commit()
+            guard self.config.space(spaceID) != nil else { return }
             await self.resetStore(spaceID)
         }
         scheduleScan(spaceID)

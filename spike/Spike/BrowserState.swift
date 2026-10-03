@@ -166,13 +166,20 @@ final class BrowserState: NSObject, ObservableObject {
             return
         }
         def.bindings = resolve(choices, newNames, spaceName: name)
-        let oldAccounts = changed.compactMap { old.bindings[$0] }
+        // Every account the space used is saved before the wipe, not only the changed ones, so a
+        // cookie refreshed seconds earlier isn't lost.
+        let oldAccounts = Array(Set(old.bindings.values))
+        // Pages are parked on a blank page during the switch so a live app (Outlook refreshing a
+        // token) can't write the old account back after the wipe.
+        let urls = state.tabs.map { ($0, $0.webView.url) }
+        for (tab, _) in urls { tab.webView.load(URLRequest(url: URL(string: "about:blank")!)) }
         Task {
-            await sync.switchAccounts(spaceID: id, oldAccounts: oldAccounts) { [config] in
+            await sync.switchAccounts(spaceID: id, oldAccounts: oldAccounts) { [config, weak self] in
+                guard self?.spaces.contains(where: { $0 === state }) == true else { return } // deleted meanwhile
                 config.upsert(def)
                 state.def = def
             }
-            for tab in state.tabs { tab.webView.reload() }
+            for (tab, url) in urls { if let url { tab.webView.load(URLRequest(url: url)) } }
         }
     }
 
@@ -212,7 +219,8 @@ final class BrowserState: NSObject, ObservableObject {
         case .new: accountID = config.addAccount(providerID: providerID, name: newName.isEmpty ? state.def.name : newName).id
         }
         Task {
-            await sync.adoptSignIn(spaceID: spaceID, providerID: providerID) { [config] in
+            await sync.adoptSignIn(spaceID: spaceID, providerID: providerID) { [config, weak self] in
+                guard self?.spaces.contains(where: { $0 === state }) == true else { return } // deleted meanwhile
                 state.def.bindings[providerID] = accountID
                 config.upsert(state.def)
             }

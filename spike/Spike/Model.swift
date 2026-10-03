@@ -132,10 +132,13 @@ final class Config: ObservableObject {
     @Published private(set) var accounts: [AccountDef] = []
     @Published private(set) var spaces: [SpaceDef] = []
     private let fileURL = AppPaths.dir.appendingPathComponent("config.json")
+    /// False when config.json exists but couldn't be read or backed up: nothing is written over it.
+    private var canSave = true
 
     init() {
-        if let data = try? Data(contentsOf: fileURL) {
+        if FileManager.default.fileExists(atPath: fileURL.path) {
             do {
+                let data = try Data(contentsOf: fileURL)
                 let file = try JSONDecoder().decode(File.self, from: data)
                 providers = file.providers
                 accounts = file.accounts
@@ -144,7 +147,7 @@ final class Config: ObservableObject {
                 // Never overwrite a config that didn't load: keep a copy to recover from.
                 let backup = fileURL.deletingPathExtension()
                     .appendingPathExtension("unreadable-\(Int(Date().timeIntervalSince1970)).json")
-                try? FileManager.default.copyItem(at: fileURL, to: backup)
+                canSave = (try? FileManager.default.copyItem(at: fileURL, to: backup)) != nil
                 NSLog("iSmith: config.json could not be read (\(error)); saved a copy at \(backup.path)")
                 (accounts, spaces) = Self.starter()
             }
@@ -236,6 +239,7 @@ final class Config: ObservableObject {
     }
 
     private func save() {
+        guard canSave else { return }
         do {
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
