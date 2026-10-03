@@ -1003,8 +1003,11 @@ The engineering half is done; the acceptance run on Scott's accounts is next, fo
   as the sync last saw them in that store, and each cookie a page changed or deleted gets its
   own time. A diff runs as soon as a store reports a change, at most ten times a second per
   store (changes meanwhile are read together); a change is dated by the first notification
-  since the store was last read, or by the read itself if its notification hasn't arrived. So a
-  change is dated to within about 0.1 s even on a page that keeps setting other cookies. Values
+  since the store was last read, or by the read itself if its notification hasn't arrived. While
+  the sync is idle, that dates a change to within about 0.1 s even on a page that keeps setting
+  other cookies. Diffs wait their turn on the sync's queue, so while it's busy (launch, an
+  account switch) a change can be dated as early as the first notification since the store's
+  last read, including the echo of the sync's own write; see the round 2 review below. Values
   the sync writes (seeding, reconciles, sign-out everywhere, an account switch's wipe) update
   `seen` without a time, so they never count as a page's change; a cookie that merely expired
   isn't one either. A reconcile picks, per cookie, the newest change any space made since its
@@ -1027,9 +1030,11 @@ The engineering half is done; the acceptance run on Scott's accounts is next, fo
   account holds exactly the vault's cookies; after a quiet round the vault equals a model of the
   newest change to each cookie; at the end a relaunch seeds every space from the saved vault and
   the checks run again. Default run: 24 rounds, about a minute. Runs, all passing: before the
-  review's fixes, the default seed and seeds 1–5 at 40 rounds (224 rounds, 150 quiet, 689
-  steps; no account switches or sign-out everywhere yet); after them, the default seed and seeds
-  1–3 at 40 rounds (144 rounds, 99 quiet, 435 steps, 28 account switches). Chaotic rounds don't check
+  review's fixes, the default seed (24 rounds) and seeds 1–5 (40 rounds each): 224 rounds, 150
+  quiet, 689 steps, with no account switches or sign-out everywhere yet; after them, the default
+  seed (24 rounds) and seeds 1–3 (40 each): 144 rounds, 99 quiet, 435 steps, 28 account
+  switches. The switches happen between rounds once the sync is quiet, not while pages in other
+  spaces are writing. Chaotic rounds don't check
   "newest wins": WebKit has no compare-and-set, so a page write landing between the sync's read
   of a store and its write there loses to the sync's value (as before this phase).
 - **Every web view path is equipped the same** (`WebViewPathsTests`): new tab, popup, duplicate,
@@ -1064,7 +1069,10 @@ The engineering half is done; the acceptance run on Scott's accounts is next, fo
   That's the final run, on the reviewed code. RSS counts pages shared between WebKit processes
   once per process, so it overstates and varies from run to run (the run before it measured
   3,423, 2,290 and 583 MB for the last three stages); the footprint (3,349, 1,707 and 497 MB
-  then) is steadier. Space switch (select until laid out and drawn, plus one turn of the run
+  then) is steadier. On a first launch (a fresh data folder, so the filter lists are converted
+  in the app's process) the app itself stays at about 540 MB RSS for that run instead of about
+  120 MB, which puts the capped stage at 2,914 MB RSS (footprint 1,704 MB) in a check run after
+  the review. Space switch (select until laid out and drawn, plus one turn of the run
   loop; 40 switches per stage): median 32–48 ms, 95th percentile 34–66 ms, max 76 ms across the
   three loaded stages; earlier runs were similar (max 73 ms). All under 100 ms.
 
@@ -1075,7 +1083,8 @@ The engineering half is done; the acceptance run on Scott's accounts is next, fo
   screen, sites allowed to show notifications (they keep their 30 minutes), and tabs
   hibernation already protects (edits, dialogs, media, camera, sign-in popups) are never
   unloaded by it. When macOS warns of memory pressure, background tabs not shown for 5 minutes
-  are unloaded (at most once a minute); at critical pressure, every background tab that can be.
+  are unloaded, and the minute timer keeps using 5 minutes until the pressure ends; at critical
+  pressure, every background tab that can be.
   Fixture pages are lighter than Outlook or Teams (about 85 MB per WebContent process here);
   with real pages the capped state is higher, which is what the pressure handler and check 7 of
   the acceptance run are for (`Tools/memory.py` sums iSmith's own processes). The peak right
@@ -1120,7 +1129,7 @@ The engineering half is done; the acceptance run on Scott's accounts is next, fo
 - **Tests**: `make test` is green. SignInSync 31 (3 new: the two newest-wins tests and the
   fuzz test). App-hosted 84 (5 new: `WebViewPathsTests` (2), and `HardeningTests` for the cap
   and memory pressure, overlapping builds, and ⌘⇧T's window fallback).
-- **Review**: one adversarial round, no critical or high. Fixed: the two mediums (a change could
+- **Review**: two adversarial rounds, neither with a critical or high finding. Round 1 fixed: the two mediums (a change could
   be dated by a later, unrelated cookie change in the same store; a memory-pressure warning
   unloaded every background tab, even one shown seconds ago), and the cheap lows (build
   generations taken when scheduled; leaving a space now marks its tab as just shown; the cap
@@ -1128,9 +1137,23 @@ The engineering half is done; the acceptance run on Scott's accounts is next, fo
   never carries an old change time; ⌘⇧T with no space showing reopens a window as before;
   the perf script stops the app and removes its WebKit stores afterwards and reads the stage
   file safely; ACCEPTANCE.md's labels, where links must be clicked, and the memory check).
-  Deferred (low): more cookie-store reads on the main actor (at most ten a second per busy
-  store, each a few milliseconds); the memory-pressure source itself isn't driven by a test
-  (its handler is).
+  Round 2 fixed its cheap lows: a memory-pressure warning acted only once (macOS reports
+  changes, not levels), so the minute timer now uses the 5-minute limit while pressure lasts,
+  and the warning, critical and normal handling plus the notify exemption are tested; the perf
+  script finds its own app's pid right after launching it and removes stores only once that app
+  is gone; ACCEPTANCE.md's SharePoint host wording and which memory number to compare.
+  Deferred (low):
+  - While the sync's queue is busy (launch, an account switch), a change can be dated as early
+    as the first notification since its store was last read, which may be the echo of the
+    sync's own write; if another space changed the same cookie in between, the older value can
+    win. It needs two spaces changing the same sign-in cookie within that window (a few hundred
+    milliseconds at launch), and both values are then valid tokens of the same session. Fix if
+    seen: ignore notifications that arrive while the sync writes to that store.
+  - More cookie-store reads on the main actor (at most ten a second per busy store, each a few
+    milliseconds).
+  - The fuzz test's account switches run while the sync is quiet, not interleaved with page
+    writes in other spaces.
+  - The memory-pressure source itself isn't driven by a test (its handler is).
 
 ## Acceptance checklist (v1)
 

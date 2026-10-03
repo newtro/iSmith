@@ -23,8 +23,8 @@ For sign-in problems, also copy the last lines of Settings (⌘,) ▸ Accounts �
      web browser shows iSmith.
    - Report if: the status still says it isn't the default, or Safari/Brave still opens links.
 2. In Settings ▸ Links, add rules (Add Rule…): `dev.azure.com/contoso-dev` → Contoso, and
-   Fabrikam's SharePoint host (the part before the first `/` of a SharePoint link, such as
-   `<tenant>.sharepoint.com`) → Fabrikam. Set the Default space to Personal.
+   Fabrikam's SharePoint host (what's between `https://` and the next `/` in a SharePoint
+   link, such as `<tenant>.sharepoint.com`) → Fabrikam. Set the Default space to Personal.
 3. In the Teams and Outlook **desktop apps** (or Slack, Mail), click. (Links clicked inside
    iSmith stay in the space of the tab you clicked them in; only links from other apps are
    routed.)
@@ -108,11 +108,13 @@ For sign-in problems, also copy the last lines of Settings (⌘,) ▸ Accounts �
    - Report if: anything is missing or out of place.
 3. Leave it running for an hour with all 40 tabs, then in the repo run `Tools/memory.py`. It
    sums iSmith and only its own WebKit processes (Activity Monitor lists those separately and
-   mixes in Mail's and Safari's). The total should stay under 3 GB once you've left most tabs
-   alone (background tabs are unloaded after 30 minutes, and beyond the 15 most recently shown
-   after a minute). Switching spaces should feel instant.
-   - Report if: the total stays above 3 GB (send the line it prints), or a space switch visibly
-     lags.
+   mixes in Mail's and Safari's). Compare its **first** number (Activity Monitor's Memory,
+   summed) with 3 GB; the RSS figure after it counts shared memory more than once. It should
+   stay under 3 GB once you've left most tabs alone (background tabs are unloaded after 30
+   minutes, and beyond the 15 most recently shown after a minute, except Keep alive tabs and
+   sites you've allowed to notify). Switching spaces should feel instant.
+   - Report if: the first number stays above 3 GB (send the line it prints), or a space switch
+     visibly lags.
 
 ## 8. Everyday browser features and a Teams call
 

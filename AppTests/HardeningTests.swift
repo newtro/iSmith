@@ -1,3 +1,4 @@
+import BrowserData
 import Combine
 import WebKit
 import XCTest
@@ -24,43 +25,64 @@ final class HardeningTests: XCTestCase {
     private func url(_ n: Int) -> URL { URL(string: "http://127.0.0.1:\(server.port)/page.html?\(n)")! }
 
     /// Past `maxLoadedBackgroundTabs`, the least recently shown background tabs are unloaded once
-    /// they've been in the background for a minute; younger ones and Keep alive tabs stay. Memory
-    /// pressure unloads every background tab at once.
+    /// they've been in the background for a minute; younger ones, Keep alive tabs and sites
+    /// allowed to notify stay. A memory-pressure warning unloads tabs idle for `pressureIdle`
+    /// (and the minute timer keeps doing so while it lasts); critical pressure unloads every
+    /// background tab.
     func testLoadedBackgroundTabsAreCapped() async throws {
         let browser = wired.browser
         let count = BrowserState.maxLoadedBackgroundTabs + 3
         var tabs: [Tab] = []
-        for n in 0..<count { tabs.append(browser.openTab(in: wired.window, space: wired.spaceID, url: url(n), select: false)) }
+        for n in 0..<count {
+            // One tab is on another site, which may show notifications.
+            let address = n == 1 ? URL(string: "http://localhost:\(server.port)/page.html?\(n)")! : url(n)
+            tabs.append(browser.openTab(in: wired.window, space: wired.spaceID, url: address, select: false))
+        }
+        try browser.data?.sites.setDecision(.allow, for: .notifications, origin: WebNotifications.originKey(tabs[1].url!)!)
         let kept = browser.openTab(in: wired.window, space: wired.spaceID, url: url(99), keepAlive: true, select: false)
         let built = await eventually(timeout: 30) { tabs.allSatisfy { $0.webView != nil } && kept.webView != nil }
         XCTAssertTrue(built)
         let visible = try XCTUnwrap(wired.tabs.selected)
         let background = tabs.filter { $0 !== visible }
+        XCTAssertEqual(background.count, count, "the window's first (empty) tab is the one on screen")
         let now = Date()
-        // Oldest first: background[0] was shown longest ago. The two oldest are past the grace
-        // period; everything else is recent.
+        // Oldest first: background[0] was shown longest ago. The three oldest are past the grace
+        // period; everything else is recent. background[1] may notify.
         for (i, tab) in background.enumerated() { tab.lastShown = now.addingTimeInterval(-Double(background.count - i)) }
-        background[0].lastShown = now.addingTimeInterval(-BrowserState.loadedTabGrace - 20)
-        background[1].lastShown = now.addingTimeInterval(-BrowserState.loadedTabGrace - 10)
-        kept.lastShown = now.addingTimeInterval(-BrowserState.loadedTabGrace - 30)
+        background[0].lastShown = now.addingTimeInterval(-BrowserState.loadedTabGrace - 30)
+        background[1].lastShown = now.addingTimeInterval(-BrowserState.loadedTabGrace - 20)
+        background[2].lastShown = now.addingTimeInterval(-BrowserState.loadedTabGrace - 10)
+        kept.lastShown = now.addingTimeInterval(-BrowserState.loadedTabGrace - 40)
 
         browser.hibernateIdleTabs(now: now)
-        let trimmed = await eventually { background[0].webView == nil && background[1].webView == nil }
+        let trimmed = await eventually { background[0].webView == nil && background[2].webView == nil }
         XCTAssertTrue(trimmed, "the two oldest beyond the cap were unloaded")
         try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertNotNil(background[1].webView, "a site allowed to notify keeps its half hour")
         let loaded = background.filter { $0.webView != nil }.count
-        // Beyond the cap by `count - 1 - max`; only those past the grace period went.
         XCTAssertEqual(loaded, background.count - 2, "the others stay: within the cap or too recent")
         XCTAssertNotNil(visible.webView, "the tab on screen stays")
         XCTAssertNotNil(kept.webView, "Keep alive stays")
         XCTAssertNotNil(background[0].savedState ?? background[0].url, "an unloaded tab keeps where it was")
 
-        // Memory pressure: every background tab that can be unloaded is.
-        browser.hibernateIdleTabs(idleFor: 0)
+        // A memory-pressure warning: tabs idle for `pressureIdle` go, recent ones stay.
+        background[3].lastShown = now.addingTimeInterval(-BrowserState.pressureIdle - 10)
+        browser.memoryPressureChanged(.warning, now: now)
+        XCTAssertEqual(browser.hibernationIdleLimit, BrowserState.pressureIdle, "the minute timer follows the warning")
+        let warned = await eventually { background[3].webView == nil }
+        XCTAssertTrue(warned, "a tab idle past the pressure limit was unloaded")
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertNotNil(background[4].webView, "a recent tab stays under a warning")
+
+        // Critical: every background tab that can be unloaded is.
+        browser.memoryPressureChanged(.critical, now: now)
+        XCTAssertEqual(browser.hibernationIdleLimit, 0)
         let all = await eventually { background.allSatisfy { $0.webView == nil } }
-        XCTAssertTrue(all, "memory pressure unloaded every background tab")
+        XCTAssertTrue(all, "critical pressure unloaded every background tab")
         XCTAssertNotNil(visible.webView)
         XCTAssertNotNil(kept.webView)
+        browser.memoryPressureChanged(.normal, now: now)
+        XCTAssertEqual(browser.hibernationIdleLimit, BrowserState.hibernateAfter, "back to normal")
     }
 
     /// Two builds for one tab overlapping (a tab moved again while its store opened): only the

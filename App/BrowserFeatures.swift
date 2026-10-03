@@ -146,23 +146,29 @@ extension BrowserState {
         return window.activeSpaceID == tabs.spaceID && tabs.layout.selected == tab.id
     }
 
-    /// macOS is short of memory. A warning unloads background tabs that haven't been shown for
-    /// `pressureIdle` (at most once a minute); critical pressure unloads every background tab
-    /// that can be unloaded.
+    /// How long a background tab stays loaded at the current memory pressure: `hibernateAfter`
+    /// normally, `pressureIdle` while macOS warns of pressure, and not at all while it's critical.
+    /// The minute timer uses it, so a long warning keeps unloading tabs as they go idle.
+    var hibernationIdleLimit: TimeInterval {
+        if pressure.contains(.critical) { return 0 }
+        if pressure.contains(.warning) { return Self.pressureIdle }
+        return Self.hibernateAfter
+    }
+
+    /// macOS reports a new memory pressure level (it only reports changes).
+    func memoryPressureChanged(_ event: DispatchSource.MemoryPressureEvent, now: Date = Date()) {
+        pressure = event
+        guard event.contains(.warning) || event.contains(.critical) else { return }
+        NSLog("iSmith: memory pressure; unloading background tabs idle for \(Int(hibernationIdleLimit)) s")
+        hibernateIdleTabs(now: now, idleFor: hibernationIdleLimit)
+    }
+
     func watchMemoryPressure() -> DispatchSourceMemoryPressure {
-        let source = DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical], queue: .main)
-        var lastWarning = Date.distantPast
+        let source = DispatchSource.makeMemoryPressureSource(eventMask: [.normal, .warning, .critical], queue: .main)
         source.setEventHandler { [weak self, weak source] in
             MainActor.assumeIsolated {
                 guard let self, let event = source?.data else { return }
-                if event.contains(.critical) {
-                    NSLog("iSmith: critical memory pressure; unloading background tabs")
-                    self.hibernateIdleTabs(idleFor: 0)
-                } else if event.contains(.warning), Date().timeIntervalSince(lastWarning) > 60 {
-                    lastWarning = Date()
-                    NSLog("iSmith: memory pressure; unloading background tabs idle for \(Int(Self.pressureIdle)) s")
-                    self.hibernateIdleTabs(idleFor: Self.pressureIdle)
-                }
+                self.memoryPressureChanged(event)
             }
         }
         source.activate()

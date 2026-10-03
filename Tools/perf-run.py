@@ -69,6 +69,12 @@ def read_stage(path):
         return None
 
 
+def debug_pids(binary):
+    """Running copies of this checkout's Debug binary (matched by its full path)."""
+    out = subprocess.run(["pgrep", "-f", "^" + binary], capture_output=True, text=True).stdout
+    return [int(p) for p in out.split()]
+
+
 def alive(pid):
     try:
         os.kill(pid, 0)
@@ -122,9 +128,19 @@ def main():
         if os.path.exists(leftover):
             os.remove(leftover)
 
+    # Launched through LaunchServices (not as a child of this script), so macOS counts the WebKit
+    # processes as the app's own. The pid is this checkout's Debug binary started just now.
+    binary = os.path.join(APP, "Contents/MacOS/iSmith")
+    before = set(debug_pids(binary))
     subprocess.run(["open", "-n", "-a", APP, "--env", f"ISMITH_DATA_DIR={data}", "--env", f"ISMITH_PERF_STAGE_FILE={stage_file}",
                     "--env", f"ISMITH_BRAVE_ROOT={os.path.join(scratch, 'no-brave')}"], check=True)
     app_pid = None
+    for _ in range(30):
+        started_now = [p for p in debug_pids(binary) if p not in before]
+        if started_now:
+            app_pid = started_now[0]
+            break
+        time.sleep(0.5)
     seen = None
     samples = {}
     started = time.time()
@@ -134,7 +150,9 @@ def main():
             stage = read_stage(stage_file)
             if stage is None:
                 continue
-            name, app_pid = stage
+            name, stage_pid = stage
+            if app_pid is None:
+                app_pid = stage_pid
             if name == "done":
                 break
             if name != seen:
@@ -167,7 +185,8 @@ def main():
                 time.sleep(3)
                 if alive(app_pid):
                     os.kill(app_pid, signal.SIGKILL)
-        if not keep and (app_pid is None or not alive(app_pid)):
+        # Stores are removed only once the app that used them is known to be gone.
+        if not keep and app_pid is not None and not alive(app_pid):
             for space in spaces:
                 shutil.rmtree(os.path.join(DEBUG_STORES, space["storeID"].lower()), ignore_errors=True)
 

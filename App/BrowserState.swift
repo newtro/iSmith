@@ -80,6 +80,8 @@ final class BrowserState: NSObject, ObservableObject {
     private var hibernationTimer: Timer?
     private var networkMonitor: NWPathMonitor?
     private var memoryPressure: DispatchSourceMemoryPressure?
+    /// The memory pressure macOS last reported (see `hibernationIdleLimit`).
+    var pressure: DispatchSource.MemoryPressureEvent = .normal
     /// A background tab (not Keep alive) is unloaded after this long off screen.
     static let hibernateAfter: TimeInterval = 30 * 60
     /// At most this many background tabs (not Keep alive) keep their pages loaded; past that the
@@ -227,8 +229,9 @@ final class BrowserState: NSObject, ObservableObject {
         refresh()
         hibernationTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
-                self?.hibernateIdleTabs()
-                self?.retryFailedLoads(networkReturned: false)
+                guard let self else { return }
+                self.hibernateIdleTabs(idleFor: self.hibernationIdleLimit)
+                self.retryFailedLoads(networkReturned: false)
             }
         }
         networkMonitor = watchNetwork()
