@@ -551,6 +551,10 @@ and Etsy each land in the right space.
 
 ### P7. Distribution (M)
 
+- **License (decided 2026-10-03)**: the ad-block converter (SafariConverterLib) is GPL-3.0 and is
+  compiled into the app. Scott accepted the GPL: releases publish iSmith's source alongside the
+  binaries (for example, by making the repo public at the first release).
+
 - `Tools/release.sh`:
   1. build Release;
   2. sign with Developer ID and hardened runtime;
