@@ -4,8 +4,9 @@ Proves the one unproven mechanism in DESIGN.md: copying an account's sign-in coo
 per-space WebKit stores, so you sign in once per account and every space bound to it stays
 signed in.
 
-Spaces: Contoso (Microsoft: Contoso, Google, GitHub), Fabrikam (Microsoft: Fabrikam,
-Google, GitHub), Contoso (second space) (Microsoft: Contoso only), Personal (Google, GitHub).
+Spaces: Contoso (Microsoft: Contoso, Google: personal, GitHub), Fabrikam (Microsoft:
+Fabrikam, Google: personal, GitHub), Contoso (second space) (Microsoft: Contoso only),
+Personal (Google: personal, GitHub), Newtro Studios (Google: Newtro Studios).
 
 ## Build and run
 
@@ -31,6 +32,9 @@ build/Build/Products/Debug/iSmithSpike.app/Contents/MacOS/iSmithSpike --selftest
 5. Fabrikam: Go → Gmail. Expected: already signed in.
 6. Contoso (second space) (⌘3): Outlook. Expected: signed in as Contoso without a password.
 7. Quit (⌘Q), reopen, and repeat steps 3, 5 and 6. Expected: still signed in everywhere.
+8. Personal (⌘4): Go → Etsy shop, "Continue with Google" as you@gmail.com.
+9. Newtro Studios (⌘5): Etsy opens; "Continue with Google" as you@yourstudio.com.
+10. Switch between ⌘4 and ⌘5: each shows its own Etsy shop, both signed in.
 
 The key button at the bottom of the rail shows the vault: cookie names per account (no values)
 and a log of every copy between spaces.

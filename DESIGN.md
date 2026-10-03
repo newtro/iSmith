@@ -34,6 +34,11 @@ Status: design. No code yet.
 - **Cookie split**: an account owns its identity-provider cookies (`login.microsoftonline.com`,
   `.google.com`, `github.com`, ...). App cookies (Outlook, Azure DevOps) live in the space's own
   jar and are recreated by silent sign-in through the shared session.
+- **One account per provider per space.** This is what keeps tenants from colliding. Sites you
+  sign in to *with* a provider ("Sign in with Google", e.g. two Etsy shops tied to two Google
+  accounts) are not providers: their cookies stay in the space and use the space's account.
+  Two shops = two spaces (Personal with Google: personal, Newtro Studios with Google: Newtro
+  Studios), both signed in at once.
 - **Discovery**: signing in as an account the browser doesn't know offers to save it as a new
   account.
 - **Mechanism (WKWebView)**: one `WKWebsiteDataStore(forIdentifier:)` per space. Provider cookies

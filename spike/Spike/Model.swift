@@ -64,11 +64,13 @@ enum Seed {
     static let msContoso = Account(id: "ms-contoso", provider: .microsoft, name: "Contoso")
     static let msFabrikam = Account(id: "ms-fabrikam", provider: .microsoft, name: "Fabrikam")
     static let googlePersonal = Account(id: "google-personal", provider: .google, name: "personal")
+    static let googleNewtro = Account(id: "google-newtro", provider: .google, name: "Newtro Studios")
     static let githubPersonal = Account(id: "github-personal", provider: .github, name: "personal")
-    static let accounts = [msContoso, msFabrikam, googlePersonal, githubPersonal]
+    static let accounts = [msContoso, msFabrikam, googlePersonal, googleNewtro, githubPersonal]
 
     static let outlook = URL(string: "https://outlook.office.com/mail/")!
     static let gmail = URL(string: "https://mail.google.com/")!
+    static let etsy = URL(string: "https://www.etsy.com/your/shops/me/dashboard")!
 
     // Store identifiers are fixed so each space reopens the same WebKit store on every launch.
     static let spaces: [Space] = [
@@ -84,6 +86,9 @@ enum Seed {
         Space(id: "personal", name: "Personal", initials: "P", color: Color(red: 0.76, green: 0.42, blue: 0.02),
               storeID: storeID("6F1C2A40-0000-4000-8000-000000000004"),
               accounts: [googlePersonal, githubPersonal], home: gmail),
+        Space(id: "newtro", name: "Newtro Studios", initials: "NS", color: Color(red: 0.75, green: 0.07, blue: 0.24),
+              storeID: storeID("6F1C2A40-0000-4000-8000-000000000005"),
+              accounts: [googleNewtro], home: etsy),
     ]
 
     private static func storeID(_ base: String) -> UUID {
@@ -98,5 +103,6 @@ enum Seed {
         ("Gmail", "https://mail.google.com/"),
         ("Google account", "https://myaccount.google.com"),
         ("GitHub", "https://github.com"),
+        ("Etsy shop", "https://www.etsy.com/your/shops/me/dashboard"),
     ].map { QuickLink(name: $0.0, url: URL(string: $0.1)!) }
 }
