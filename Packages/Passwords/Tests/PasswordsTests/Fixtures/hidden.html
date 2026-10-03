@@ -1,0 +1,17 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Hidden form</title></head>
+<body>
+<form id="visible" onsubmit="event.preventDefault()">
+  <input id="username" type="text" autocomplete="username">
+  <input id="password" type="password">
+</form>
+<!-- Forms a page could use to harvest autofill: transparent, and off-screen. -->
+<form id="transparent" style="opacity: 0" onsubmit="event.preventDefault()">
+  <input id="t-username" type="text" autocomplete="username">
+  <input id="t-password" type="password">
+</form>
+<form id="offscreen" style="position: absolute; left: -9999px; top: -9999px" onsubmit="event.preventDefault()">
+  <input id="o-username" type="text" autocomplete="username">
+  <input id="o-password" type="password">
+</form>
+</body></html>

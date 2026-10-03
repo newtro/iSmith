@@ -1,0 +1,30 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Probe</title></head>
+<body>
+<form id="login" onsubmit="event.preventDefault()">
+  <input id="username" type="text" autocomplete="username">
+  <input id="password" type="password">
+</form>
+<script>
+  // A hostile page: it looks for iSmith's handler and fill function from the page's own world,
+  // tries to post a fake submission, fires fake focus and click events, and plants a lookalike.
+  const handlers = window.webkit && window.webkit.messageHandlers;
+  window.probe = {
+    hasWebkit: typeof window.webkit,
+    handler: typeof (handlers && handlers.ismithPasswords),
+    fill: typeof window.__ismithPasswordsFill,
+    globals: Object.getOwnPropertyNames(window).filter((n) => /ismith/i.test(n)),
+    postError: null,
+  };
+  try {
+    handlers.ismithPasswords.postMessage({ type: "submit", form: "login", username: "evil", password: "stolen", docID: "0".repeat(32) });
+    window.probe.postError = "posted";
+  } catch (e) {
+    window.probe.postError = String(e && e.name);
+  }
+  window.__ismithPasswordsFill = () => "page-fill";
+  const password = document.getElementById("password");
+  password.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+  password.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+</script>
+</body></html>
