@@ -30,6 +30,8 @@ See [DESIGN.md](DESIGN.md) for the model and [BUILD_PLAN.md](BUILD_PLAN.md) for 
     shown over a tab (questions, find, crash, failed load, bookmarks bar). `Settings.swift`.
   - `TabStripView.swift`, `WindowView.swift`, `MainMenu.swift`, `Panels.swift`: the UI.
   - `PageRules.swift`: unread badges from page titles, and which pages are kept alive.
+  - `LinkRouting.swift`: links from other apps (which space and window), the default-browser
+    seam, learned-rule offers, the Dock's "Open in Space". `LinkSettings.swift`: Settings ▸ Links.
   - `Support.swift`: `AppIdentity` (Debug vs Release), `AppPaths`, search engines, address input.
 - `Packages/SignInSync/`: the sign-in engine, with no UI. It holds providers, accounts and spaces
   (`Config`), the encrypted `Vault`, `CookieSync`, `SpaceManager`, and the one-time import from
@@ -45,6 +47,9 @@ See [DESIGN.md](DESIGN.md) for the model and [BUILD_PLAN.md](BUILD_PLAN.md) for 
 - `Packages/Passwords/`: the password store and autofill core, with no UI: encrypted logins in
   SQLite, origin matching, the capture and fill script, and the `PasswordAutofill` controller.
   [INTEGRATION.md](Packages/Passwords/INTEGRATION.md) lists the app's hook points.
+- `Packages/Routing/`: link routing, with no UI: URL patterns, ordered rules, the space last used
+  for shared-address sites (Outlook, Teams, Gmail, Etsy), the Default space, Safe Links
+  unwrapping and learned rules, saved in `routing.json`.
 - `Packages/BrowserData/`: `browser.sqlite` through GRDB: history and bookmarks per space, site
   settings (permissions, zoom, app-link answers) and the downloads list. No UI.
 - `AppTests/`: tests that run inside the signed app.
@@ -56,7 +61,7 @@ Needs Xcode and XcodeGen (`brew install xcodegen`).
 
 ```bash
 make build   # generate the project and build Debug ("iSmith Dev") into build/
-make test    # package tests (SignInSync, BraveImport, Blocking, Passwords, BrowserData; swift test), then the app-hosted tests
+make test    # package tests (SignInSync, BraveImport, Blocking, Passwords, BrowserData, Routing; swift test), then the app-hosted tests
 make run     # build and open the Debug app, "iSmith Dev"
 make install # build Release and install it as /Applications/iSmith.app (quit iSmith first)
 ```
@@ -84,6 +89,9 @@ afterwards. A full run takes about two minutes because the tests wait for the sy
   sealed (AES-GCM, a key derived from the vault key). The file is saved a second after a
   navigation or a change to the tabs, and on quit, and restored at launch (after a crash too).
   Restored tabs load when you select them; Keep alive tabs load at once.
+- `routing.json` holds the link rules, the Default space, the space each shared-address site was
+  last used in, learned moves and suggestions turned off. It's owner-only; a file that can't be
+  read is kept aside.
 - `browser.sqlite` holds history and bookmarks (per space), site settings (camera, microphone,
   location and notification answers per site, zoom per site, app-link answers per scheme) and
   the downloads list. History older than a year is removed at launch.
@@ -125,6 +133,13 @@ afterwards. A full run takes about two minutes because the tests wait for the sy
   Teams) appear as a bar above the page. Answers are kept per site (per scheme for apps) and can
   be changed in Settings ▸ Websites. Site notifications appear in Notification Center; clicking
   one brings its tab forward.
+- **Links from other apps**: make iSmith the default browser from the first-run bar or Settings ▸
+  Links (macOS asks you to confirm). A link opens in a new tab in the space of the first matching
+  rule. With no match, Outlook, Teams, Gmail and Etsy links open in the space you last used them
+  in, and anything else opens in the Default space. Rules are edited in Settings ▸ Links:
+  `dev.azure.com/contoso-dev`, `*.fabrikam.com` or `github.com`, first match wins. Move two
+  links of the same kind to one space and iSmith offers a rule ("Always open … in Contoso?").
+  The Dock menu's "Open in Space ▸" moves the front tab to another space.
 - **Background tabs** are unloaded after 30 minutes off screen (not Keep alive tabs, and not
   pages you've edited), keeping their history; they reload when selected. A page whose process
   crashed shows Reload.

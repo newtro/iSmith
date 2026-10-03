@@ -166,6 +166,8 @@ extension BrowserState: WKNavigationDelegate {
             tab.lastNavigationType = navigationAction.navigationType
             // A newer navigation replaces any load waiting to be tried again.
             tab.retryURL = nil
+            // Following a link in the page: the tab is no longer the link another app sent.
+            if navigationAction.navigationType == .linkActivated { routing.forget(tab.id) }
         }
         if navigationAction.navigationType == .linkActivated, navigationAction.targetFrame?.isMainFrame == true,
            Self.opensInBackground(navigationAction), let url, let (window, tabs, tab) = owner(of: webView) {

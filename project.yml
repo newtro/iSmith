@@ -8,6 +8,8 @@ packages:
     path: Packages/SignInSync
   BrowserData:
     path: Packages/BrowserData
+  Routing:
+    path: Packages/Routing
   Sparkle:
     url: https://github.com/sparkle-project/Sparkle
     exactVersion: 2.10.0
@@ -25,6 +27,7 @@ targets:
     dependencies:
       - package: SignInSync
       - package: BrowserData
+      - package: Routing
       - package: Sparkle
     info:
       path: App/Info.plist
@@ -43,6 +46,25 @@ targets:
         SUFeedURL: https://raw.githubusercontent.com/newtro/iSmith-releases/main/appcast.xml
         SUEnableAutomaticChecks: false
         SUPublicEDKey: Ezl8lB6Z6JnAQ08oLRWy8uOWsNpPxzlNEV4d5+xFyEU=
+        # P6: iSmith opens web links (so it's listed as a default browser) and HTML documents.
+        # Documents rank as Alternate, so installing iSmith never takes over .html files by itself.
+        CFBundleURLTypes:
+          - CFBundleURLName: Web site URL
+            CFBundleTypeRole: Viewer
+            CFBundleURLSchemes: [http, https]
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: HTML document
+            CFBundleTypeRole: Viewer
+            LSHandlerRank: Alternate
+            LSItemContentTypes: [public.html]
+          - CFBundleTypeName: XHTML document
+            CFBundleTypeRole: Viewer
+            LSHandlerRank: Alternate
+            LSItemContentTypes: [public.xhtml]
+          - CFBundleTypeName: Web archive
+            CFBundleTypeRole: Viewer
+            LSHandlerRank: Alternate
+            LSItemContentTypes: [com.apple.webarchive]
         # Drag types for tabs and spaces inside the app (the tab strip, the rail, other windows).
         UTExportedTypeDeclarations:
           - UTTypeIdentifier: $(PRODUCT_BUNDLE_IDENTIFIER).tab
