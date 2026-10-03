@@ -71,6 +71,31 @@ final class SharingTests: XCTestCase {
         check(mS == "y1" && pH == "x1", "Simultaneous changes cross over between the two spaces")
     }
 
+    /// Two spaces change the same sign-in cookie before a sync: the newer change wins, per cookie,
+    /// even when the space with the older change keeps changing other cookies afterwards (a busy
+    /// page in Contoso used to make all of Contoso "newest" and undo Fabrikam's sign-in).
+    func testNewestChangeWinsPerCookie() async {
+        let (m, t, _, p) = await openSpaces()
+        await m.httpCookieStore.setCookie(cookie("SID", "v0", ".google.com", expires: hour))
+        await settle()
+
+        // All of this happens within the 0.4 s debounce, so one reconcile sees every change.
+        await m.httpCookieStore.setCookie(cookie("SID", "older", ".google.com", expires: hour))
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        await t.httpCookieStore.setCookie(cookie("SID", "newer", ".google.com", expires: hour))
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        await m.httpCookieStore.setCookie(cookie("HSID", "h1", ".google.com", expires: hour))
+        await m.httpCookieStore.setCookie(cookie("NID", "busy", ".google.com", expires: hour))
+        await settle()
+
+        let sids = [await valueOf(m, "SID"), await valueOf(t, "SID"), await valueOf(p, "SID")]
+        check(sids == ["newer", "newer", "newer"], "The newer SID (Fabrikam) wins everywhere: \(sids)")
+        let hsids = [await valueOf(m, "HSID"), await valueOf(t, "HSID"), await valueOf(p, "HSID")]
+        check(hsids == ["h1", "h1", "h1"], "Contoso' later change to another cookie still spreads: \(hsids)")
+        let vault = fx.vault.records(for: fx.config.shared["google"]!)?.first { $0.name == "SID" }?.value
+        check(vault == "newer", "The vault keeps the newer SID")
+    }
+
     func testSignOutSpreadsAndLeavesTheVaultClean() async {
         let (m, t, b, p) = await openSpaces()
         await m.httpCookieStore.setCookie(cookie("SID", "v2", ".google.com", expires: hour))

@@ -7,6 +7,7 @@ sign in once. Each site's own session stays in its space, so Outlook or Etsy can
 account in each space.
 
 See [DESIGN.md](DESIGN.md) for the model and [BUILD_PLAN.md](BUILD_PLAN.md) for the v1 phases.
+[ACCEPTANCE.md](ACCEPTANCE.md) is the runbook for the v1 checks on real accounts.
 `spike/` is the prototype that proved the sign-in sync. It's kept for reference.
 
 ## Layout
@@ -37,6 +38,7 @@ See [DESIGN.md](DESIGN.md) for the model and [BUILD_PLAN.md](BUILD_PLAN.md) for 
     `PasswordsWindow.swift`: the Passwords window. `ImportFromBrave.swift`: the Brave import
     (first-run screen and File ▸ Import from Brave…).
   - `Support.swift`: `AppIdentity` (Debug vs Release), `AppPaths`, search engines, address input.
+  - `PerfHarness.swift` (Debug only): drives the performance run started by `Tools/perf-run.py`.
 - `Packages/SignInSync/`: the sign-in engine, with no UI. It holds providers, accounts and spaces
   (`Config`), the encrypted `Vault`, `CookieSync`, `SpaceManager`, and the one-time import from
   the spike.
@@ -48,6 +50,9 @@ See [DESIGN.md](DESIGN.md) for the model and [BUILD_PLAN.md](BUILD_PLAN.md) for 
   EasyPrivacy become WebKit content-rule lists, refreshed weekly, with a per-site allowlist.
   `Packages/Blocking/INTEGRATION.md` lists the app's hook points.
 - `Tools/update-blocking-snapshot.sh`: refreshes the filter lists bundled for first launch.
+- `Tools/perf-run.py`: the P8 performance run (after `make build`): 40 fixture tabs across four
+  spaces in "iSmith Dev" on a scratch data folder, with the memory of the app and its WebKit
+  processes at each stage and the space-switch times.
 - `Packages/Passwords/`: the password store and autofill core (the app's UI is in `App/`): encrypted logins in
   SQLite, origin matching, the capture and fill script, and the `PasswordAutofill` controller.
   [INTEGRATION.md](Packages/Passwords/INTEGRATION.md) lists the app's hook points.
@@ -79,7 +84,10 @@ Drive a test copy only through its own process (by pid, or through code); never 
 the installed iSmith by app name or bundle id.
 
 The package's sync tests use real WebKit stores. Each test makes its own stores and deletes them
-afterwards. A full run takes about two minutes because the tests wait for the sync to settle.
+afterwards. A full run takes about two and a half minutes because the tests wait for the sync to
+settle. `FuzzTests` runs seeded random sign-ins, rotations and sign-outs across five spaces;
+`SIGNINSYNC_FUZZ_SEED=<n> SIGNINSYNC_FUZZ_ROUNDS=<n> swift test --filter FuzzTests` replays a
+seed or runs longer.
 
 ## Data
 
@@ -164,8 +172,10 @@ afterwards. A full run takes about two minutes because the tests wait for the sy
   permission to read Brave's data (Privacy & Security ▸ Files & Folders if you said no) and for
   your Mac password to use the "Brave Safe Storage" key.
 - **Background tabs** are unloaded after 30 minutes off screen (not Keep alive tabs, and not
-  pages you've edited), keeping their history; they reload when selected. A page whose process
-  crashed shows Reload.
+  pages you've edited), keeping their history; they reload when selected. Only the 15 most
+  recently shown background tabs stay loaded for longer than a minute, and when macOS is short
+  of memory every background tab that can be is unloaded at once. A page whose process crashed
+  shows Reload.
 
 ## Updates
 

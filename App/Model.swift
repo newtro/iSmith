@@ -28,6 +28,8 @@ final class Tab: ObservableObject, Identifiable {
     private(set) var appliedKeepAlive: Bool?
     /// A web view is being made for the tab (opening a space's store takes a moment).
     var isBuilding = false
+    /// Counts web view builds, so an older one that's still waiting knows it was replaced.
+    var buildGeneration = 0
     /// The tab whose page opened this one (a popup). Neither web view is replaced automatically
     /// while both are open, since they may still talk to each other (sign-in popups do), and
     /// closing the popup goes back to its opener.
@@ -354,6 +356,7 @@ struct ClosedTab {
     var before: UUID?
     var keepAlive: Bool?
     var state: Any?
+    var closedAt = Date()
 }
 
 extension UTType {

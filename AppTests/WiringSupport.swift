@@ -20,12 +20,16 @@ final class WiredBrowser {
     let defaults: UserDefaults
     private let defaultsSuite = "iSmithTests.\(UUID().uuidString)"
 
-    init(blocking: ((URL) throws -> BlockingController?)? = nil) throws {
+    /// `extraSpaces` are more space ids after "fixture", each with its own store.
+    init(extraSpaces: [String] = [], blocking: ((URL) throws -> BlockingController?)? = nil) throws {
         dir = FileManager.default.temporaryDirectory.appendingPathComponent("iSmithWiring-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let spaces = ([spaceID] + extraSpaces).enumerated().map { index, id in
+            #"{"id":"\#(id)","name":"\#(id.capitalized)","color":\#(index),"storeID":"\#(UUID().uuidString)","bindings":{},"home":""}"#
+        }
         let config = """
             {"version":2,"providers":[],"accounts":[],"shared":{},
-             "spaces":[{"id":"fixture","name":"Fixture","color":0,"storeID":"\(UUID().uuidString)","bindings":{},"home":""}]}
+             "spaces":[\(spaces.joined(separator: ","))]}
             """
         try Data(config.utf8).write(to: dir.appendingPathComponent("config.json"))
         let blockingDir = dir.appendingPathComponent("Blocking", isDirectory: true)
@@ -86,12 +90,14 @@ final class WiredBrowser {
         browser.passwordUI.close()
         for tab in browser.windows.flatMap(\.allTabs) { tab.unload() }
         UserDefaults.standard.removePersistentDomain(forName: defaultsSuite)
-        // Deletes the space's WebKit store (retried while WebKit lets go of it).
-        let removal = browser.manager.deleteSpace(spaceID)
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            let once = Once<Void> { continuation.resume() }
-            Task { await removal.value; once.run() }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 10) { once.run() }
+        // Deletes the spaces' WebKit stores (retried while WebKit lets go of them).
+        for id in browser.config.spaces.map(\.id) {
+            let removal = browser.manager.deleteSpace(id)
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                let once = Once<Void> { continuation.resume() }
+                Task { await removal.value; once.run() }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 10) { once.run() }
+            }
         }
         try? FileManager.default.removeItem(at: dir)
     }
