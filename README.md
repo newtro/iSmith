@@ -171,3 +171,14 @@ afterwards. A full run takes about two minutes because the tests wait for the sy
 
 Sparkle 2 is built in. "Check for Updates…" is in the app menu and reads the appcast from the
 public `newtro/iSmith-releases` repo. Automatic checks stay off until releases exist (P7).
+
+## Releasing
+
+`Tools/release.sh <version>` archives, notarizes (with the Apple ID signed in to Xcode), packages
+a zip and DMG, signs the update for Sparkle, updates `appcast.xml`, and publishes a GitHub
+Release. Installed copies check `appcast.xml` daily.
+
+## License
+
+GPL-3.0, because iSmith includes AdGuard's SafariConverterLib. See [LICENSE](LICENSE) and
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

@@ -10,3 +10,4 @@ spike/*.xcodeproj/
 .swiftpm/
 Packages/*/Package.resolved
 .claude/worktrees/
+build/
