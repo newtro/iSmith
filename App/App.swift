@@ -37,6 +37,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var settings: NSWindowController?
     private var historyWindow: NSWindowController?
     private var bookmarksWindow: NSWindowController?
+    private var passwordsWindow: NSWindowController?
+    private var passwordsModel: PasswordsModel?
+    private var importWindow: NSWindowController?
     private var commands: Commands?
     private var keyMonitor: Any?
     /// Links handed over before the browser started (a launch to open a link).
@@ -56,6 +59,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.browser = browser
         browser.presentWindow = { [weak self] state in self?.present(state) }
         browser.openSettings = { [weak self] in self?.showSettings() }
+        browser.passwordUI.openManager = { [weak self] in self?.showPasswords() }
+        browser.openPasswords = { [weak self] in self?.showPasswords() }
+        browser.openImport = { [weak self] in self?.showImport() }
         let commands = Commands(browser: browser, app: self)
         self.commands = commands
         NSApp.mainMenu = MainMenu.build(commands: commands, updater: updater)
@@ -66,6 +72,60 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         pendingLinks = []
         browser.routing.offerDefaultBrowserIfNeeded()
         NSApp.activate(ignoringOtherApps: true)
+        offerBraveImportOnFirstRun(browser)
+    }
+
+    /// The first launch on a data folder offers the Brave import once, if Brave is installed.
+    /// (The folder's existence is visible even when macOS protects its contents; reading it
+    /// waits for the import screen, where a refusal is explained.)
+    private func offerBraveImportOnFirstRun(_ browser: BrowserState) {
+        let marker = browser.paths.braveImportOfferedURL
+        guard !FileManager.default.fileExists(atPath: marker.path),
+              FileManager.default.fileExists(atPath: BraveImporter.root.path) else { return }
+        FileManager.default.createFile(atPath: marker.path, contents: Data())
+        showImport(firstRun: true)
+    }
+
+    /// File ▸ Import from Brave… (and the first-run screen).
+    func showImport(firstRun: Bool = false) {
+        guard let browser else { return }
+        if let window = importWindow?.window, window.isVisible {
+            window.makeKeyAndOrderFront(nil)
+            return
+        }
+        let model = ImportFromBraveModel(browser: browser, firstRun: firstRun)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 460),
+                              styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        window.title = firstRun ? "Welcome to \(AppIdentity.displayName)" : "Import from Brave"
+        window.isReleasedWhenClosed = false
+        window.isRestorable = false
+        window.contentView = NSHostingView(rootView: ImportFromBraveView(model: model).environmentObject(browser))
+        model.close = { [weak window] in window?.close() }
+        window.center()
+        importWindow = NSWindowController(window: window)
+        importWindow?.showWindow(nil)
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    /// ⌥⌘P: saved passwords.
+    func showPasswords() {
+        guard let browser else { return }
+        if passwordsWindow == nil {
+            let model = PasswordsModel(store: browser.passwords?.store, problem: browser.passwordsProblem)
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 820, height: 560),
+                                  styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: false)
+            window.title = "Passwords"
+            window.isReleasedWhenClosed = false
+            window.isRestorable = false
+            window.contentView = NSHostingView(rootView: PasswordsView(model: model))
+            window.center()
+            model.watch(window)
+            passwordsModel = model
+            passwordsWindow = NSWindowController(window: window)
+        }
+        passwordsModel?.reload()
+        passwordsWindow?.showWindow(nil)
+        passwordsWindow?.window?.makeKeyAndOrderFront(nil)
     }
 
     /// Links and HTML files from other apps (iSmith as the default browser, `open -a`).

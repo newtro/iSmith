@@ -94,6 +94,17 @@ public final class BlockingController {
     private let attached = NSMapTable<WKUserContentController, NSArray>.weakToStrongObjects()
     private var loadError: String?
 
+    /// Blocking for every site (Settings ▸ "Block ads and trackers"). When false, `apply` takes
+    /// the lists off every content controller it's given, without waiting for them to load. A
+    /// change posts `listsDidChange`, so the app re-applies to open web views (from their next
+    /// load on). The allowlist is kept either way.
+    public var isEnabled = true {
+        didSet {
+            guard isEnabled != oldValue else { return }
+            NotificationCenter.default.post(name: Self.listsDidChange, object: self)
+        }
+    }
+
     private static let identifierPrefix = "ismith-blocking-"
 
     public convenience init(directory: URL) throws {
@@ -507,6 +518,7 @@ public final class BlockingController {
         nextTicket += 1
         let ticket = nextTicket
         applyTickets.setObject(NSNumber(value: ticket), forKey: controller)
+        guard isEnabled else { return attach([], to: controller, host: host) }
         let current = await ruleLists()
         // A later call for this controller has already applied (or will); it wins.
         guard applyTickets.object(forKey: controller)?.intValue == ticket else { return }
@@ -518,13 +530,17 @@ public final class BlockingController {
     /// one is for a navigation in progress.
     @discardableResult
     public func applyIfLoaded(to controller: WKUserContentController, host: String?) -> Bool {
+        guard isEnabled else {
+            attach([], to: controller, host: host)
+            return true
+        }
         guard let lists else { return false }
         attach(lists, to: controller, host: host)
         return true
     }
 
     private func attach(_ current: [WKContentRuleList], to controller: WKUserContentController, host: String?) {
-        let blocked = host.map(isBlocked(host:)) ?? true
+        let blocked = isEnabled && (host.map(isBlocked(host:)) ?? true)
         let wanted = blocked ? current : []
         let previous = attached.object(forKey: controller) as? [WKContentRuleList] ?? []
         // Already attached: leave them, so the page is never briefly without its lists.

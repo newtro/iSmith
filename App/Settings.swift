@@ -12,12 +12,45 @@ struct SettingsView: View {
                 .tabItem { Label("Accounts", systemImage: "person.2") }
             GeneralSettings()
                 .tabItem { Label("General", systemImage: "gearshape") }
+            PrivacySettings(shields: browser.shields)
+                .tabItem { Label("Privacy", systemImage: "hand.raised") }
+            PasswordSettings()
+                .tabItem { Label("Passwords", systemImage: "key") }
             WebsiteSettings()
                 .tabItem { Label("Websites", systemImage: "globe") }
             LinkSettings(routing: browser.routing, store: browser.routing.store)
                 .tabItem { Label("Links", systemImage: "arrow.triangle.branch") }
         }
         .padding(.top, 6)
+    }
+}
+
+/// Where saved passwords live and how to get to them.
+private struct PasswordSettings: View {
+    @EnvironmentObject private var browser: BrowserState
+
+    var body: some View {
+        Form {
+            Section {
+                if let problem = browser.passwordsProblem {
+                    Label(problem, systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
+                }
+                LabeledContent("Saved passwords") {
+                    Button("Open Passwords…") { browser.openPasswords?() }
+                        .disabled(browser.passwords == nil)
+                }
+                LabeledContent("From Brave") {
+                    Button("Import from Brave…") { browser.openImport?() }
+                }
+            }
+            Section("Autofill") {
+                Text("Click a username or password field to pick a saved login, or press ⌘\\ to fill the one saved for the site. iSmith offers to save passwords when you sign in, and suggests a strong password on sign-up forms.")
+                    .foregroundStyle(.secondary)
+                Text("Passwords are encrypted with a key in your login Keychain. Showing or copying one asks for Touch ID or your Mac password.")
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
     }
 }
 

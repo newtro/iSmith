@@ -30,6 +30,15 @@ final class BrowserWebView: WKWebView {
         lastUserInput = Date()
         super.keyDown(with: event)
     }
+
+    /// Called when the web view joins or leaves a window (a tab switch takes it out of its
+    /// window): the autofill popover anchored to it closes.
+    var windowChanged: ((BrowserWebView) -> Void)?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        windowChanged?(self)
+    }
     /// The element the last context menu was opened on.
     var contextElement: ContextElement?
     /// Builds the app's items for a link or image; set by `BrowserState`.

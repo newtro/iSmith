@@ -41,7 +41,7 @@ final class AppTests: XCTestCase {
             .write(to: spike.appendingPathComponent("vault.json"))
 
         let paths = AppPaths(dataDir: dir.appendingPathComponent("iSmith", isDirectory: true), spikeDir: spike)
-        let browser = BrowserState(paths: paths, keyStore: InMemoryKeyStore())
+        let browser = BrowserState(paths: paths, keyStore: InMemoryKeyStore(), passwordsKeyStore: InMemoryKeyStore(), blocking: { _ in nil })
         XCTAssertEqual(browser.spaces.map(\.def.name), ["Contoso", "Fabrikam"])
         XCTAssertEqual(browser.vault.records(for: "shared-google")?.first?.value, "v1")
         XCTAssertTrue(FileManager.default.fileExists(atPath: paths.configURL.path))
@@ -49,10 +49,13 @@ final class AppTests: XCTestCase {
 
     func testFreshDataFolderStartsWithOneSpace() {
         let paths = AppPaths(dataDir: dir, spikeDir: nil)
-        let browser = BrowserState(paths: paths, keyStore: InMemoryKeyStore())
+        let browser = BrowserState(paths: paths, keyStore: InMemoryKeyStore(), passwordsKeyStore: InMemoryKeyStore())
         XCTAssertEqual(browser.spaces.map(\.def.name), ["Personal"])
         XCTAssertEqual(browser.spaces.first?.def.home, "https://mail.google.com/")
         XCTAssertTrue(browser.windows.isEmpty, "windows open only when the app starts them")
+        // P3 and P4 keep their files in the run's data folder (Dev-aware), not the packages' defaults.
+        XCTAssertEqual(browser.passwords?.store.fileURL, dir.appendingPathComponent("passwords.sqlite"))
+        XCTAssertEqual(browser.shields.controller?.configuration.directory, dir.appendingPathComponent("Blocking", isDirectory: true))
     }
 
     func testAddressInput() {
@@ -69,6 +72,7 @@ final class AppTests: XCTestCase {
         XCTAssertEqual(AppIdentity.displayName, "iSmith Dev")
         XCTAssertEqual(AppIdentity.vaultKeyService, "com.scottsmith.ismith.debug.vault-key")
         XCTAssertEqual(AppIdentity.passwordsKeyService, "com.scottsmith.ismith.debug.passwords-key")
+        XCTAssertEqual(AppIdentity.passwordsKeyStore().service, "com.scottsmith.ismith.debug.passwords-key")
         XCTAssertNotEqual(AppIdentity.vaultKeyStore().service, KeychainKeyStore.vaultService)
         XCTAssertEqual(AppIdentity.dataFolderName, "iSmith Dev")
         XCTAssertFalse(AppIdentity.importsSpike)

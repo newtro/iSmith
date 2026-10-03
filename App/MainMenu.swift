@@ -18,6 +18,7 @@ enum MainMenu {
         }
         app.addItem(.separator())
         app.addItem(item("Settings…", #selector(Commands.showSettings), ",", commands))
+        app.addItem(item("Passwords…", #selector(Commands.showPasswords), "p", commands, [.command, .option]))
         app.addItem(.separator())
         let services = NSMenuItem(title: "Services", action: nil, keyEquivalent: "")
         services.submenu = NSMenu()
@@ -40,6 +41,8 @@ enum MainMenu {
         file.addItem(item("Reopen Closed Tab", #selector(Commands.reopenClosedTab), "T", commands))
         file.addItem(item("Reopen Closed Window", #selector(Commands.reopenClosedWindow), "", commands))
         file.addItem(.separator())
+        file.addItem(item("Import from Brave…", #selector(Commands.importFromBrave), "", commands))
+        file.addItem(.separator())
         file.addItem(item("Close Tab", #selector(Commands.closeTab), "w", commands))
         file.addItem(item("Close Window", #selector(Commands.closeWindow), "W", commands))
         file.addItem(.separator())
@@ -56,6 +59,8 @@ enum MainMenu {
             .keyEquivalentModifierMask = [.command, .option, .shift]
         edit.addItem(withTitle: "Delete", action: #selector(NSText.delete(_:)), keyEquivalent: "")
         edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        edit.addItem(.separator())
+        edit.addItem(item("AutoFill Password", #selector(Commands.fillPassword), "\\", commands))
         edit.addItem(.separator())
         let find = NSMenuItem(title: "Find", action: nil, keyEquivalent: "")
         find.submenu = NSMenu(title: "Find")
@@ -272,6 +277,15 @@ final class Commands: NSObject, NSMenuDelegate, NSMenuItemValidation {
     }
 
     @objc func showHistory() { app?.showHistory() }
+    @objc func showPasswords() { app?.showPasswords() }
+    @objc func importFromBrave() { app?.showImport() }
+
+    /// ⌘\: fills the saved login into the field last clicked on the page.
+    @objc func fillPassword() {
+        // Only into the browser window in front, never one behind Settings or Passwords.
+        guard otherKeyWindow == nil else { return NSSound.beep() }
+        browser.passwordUI.fillShortcut(in: tab?.webView)
+    }
     @objc func showBookmarks() { app?.showBookmarks() }
 
     @objc func bookmarkPage() {
@@ -302,6 +316,7 @@ final class Commands: NSObject, NSMenuDelegate, NSMenuItemValidation {
         case #selector(zoomIn), #selector(zoomOut), #selector(zoomReset), #selector(printPage): return tab?.webView != nil
         case #selector(bookmarkPage): return tab?.url != nil && browser.data != nil
         case #selector(showHistory), #selector(showBookmarks): return browser.data != nil
+        case #selector(fillPassword): return tab?.webView != nil && browser.passwords != nil
         case #selector(toggleBookmarksBar):
             item.title = (UserDefaults.standard.object(forKey: "showBookmarksBar") as? Bool ?? true) ? "Hide Bookmarks Bar" : "Show Bookmarks Bar"
             return true

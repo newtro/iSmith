@@ -10,6 +10,12 @@ packages:
     path: Packages/BrowserData
   Routing:
     path: Packages/Routing
+  Blocking:
+    path: Packages/Blocking
+  Passwords:
+    path: Packages/Passwords
+  BraveImport:
+    path: Packages/BraveImport
   Sparkle:
     url: https://github.com/sparkle-project/Sparkle
     exactVersion: 2.10.0
@@ -28,6 +34,9 @@ targets:
       - package: SignInSync
       - package: BrowserData
       - package: Routing
+      - package: Blocking
+      - package: Passwords
+      - package: BraveImport
       - package: Sparkle
     info:
       path: App/Info.plist

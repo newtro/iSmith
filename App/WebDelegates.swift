@@ -30,10 +30,18 @@ extension BrowserState: WKUIDelegate {
         }
         let keepAlive = KeepAlive.isAutomatic(navigationAction.request.url)
         configuration.preferences = Self.preferences(keepAlive: keepAlive)
+        // WebKit hands over the opener's content controller; the popup gets its own, so its
+        // shield and password state are its own. `makeWebView` adds the app's scripts and
+        // handlers (and autofill) to it. A popup with no URL yet (window.open('')) is about the
+        // opener's site, which then writes into it.
+        configuration.userContentController = WKUserContentController()
+        prepareBlocking(configuration, host: navigationAction.request.url?.host ?? webView.url?.host)
         let tab = Tab(url: navigationAction.request.url)
         tab.openerID = opener.id
+        tab.agentControlled = opener.agentControlled
         hook(tab)
         let popup = makeWebView(configuration)
+        applyAgentControl(tab, to: popup)
         tab.attach(popup, keepAlive: keepAlive)
         tabs.add(tab) { $0.insert(tab.id, after: opener.id) }
         if window.activeSpaceID == tabs.spaceID { selectTab(tab.id, in: tabs) }
@@ -189,6 +197,18 @@ extension BrowserState: WKNavigationDelegate {
             Task { await buildWebView(for: tab, space: tabs.spaceID, state: state, load: request) }
             return
         }
+        // Blocking follows the destination's site, applied once the navigation is allowed and
+        // before its request goes out (Blocking INTEGRATION.md §4). Only main-frame navigations:
+        // an iframe follows the page's shield.
+        if navigationAction.targetFrame?.isMainFrame == true, shields.controller != nil {
+            let controller = webView.configuration.userContentController
+            let host = url?.host
+            Task { @MainActor in
+                await self.applyBlocking(to: controller, host: host)
+                decisionHandler(.allow)
+            }
+            return
+        }
         decisionHandler(.allow)
     }
 
@@ -216,10 +236,21 @@ extension BrowserState: WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, navigationResponse: WKNavigationResponse, didBecome download: WKDownload) {
         trackDownload(download, from: webView)
+        // The navigation became a download and never commits: the page on screen keeps its own
+        // blocking setting.
+        if navigationResponse.isForMainFrame, let (_, _, tab) = owner(of: webView) {
+            shields.controller?.applyIfLoaded(to: webView.configuration.userContentController, host: tab.committedHost)
+        }
+    }
+
+    func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        passwordUI.webViewChanged(webView)
     }
 
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        passwordUI.webViewChanged(webView)
         guard let (_, tabs, tab) = owner(of: webView) else { return }
+        tab.committedHost = webView.url?.host
         tab.certificateProblem = nil
         tab.retryURL = nil
         (webView as? BrowserWebView)?.editedSinceLoad = false
@@ -243,6 +274,11 @@ extension BrowserState: WKNavigationDelegate {
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        // The page on screen is still the committed one: put its blocking setting back, unless a
+        // newer navigation replaced this one (it has applied its own).
+        if !webView.isLoading, let (_, _, tab) = owner(of: webView) {
+            shields.controller?.applyIfLoaded(to: webView.configuration.userContentController, host: tab.committedHost)
+        }
         showLoadError(error, in: webView)
     }
 

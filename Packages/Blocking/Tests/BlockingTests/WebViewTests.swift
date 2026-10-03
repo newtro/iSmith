@@ -126,6 +126,32 @@ final class WebViewTests: XCTestCase {
         XCTAssertEqual(page7, PageResult(adLoaded: false, newAdLoaded: true, bannerHidden: true))
     }
 
+    /// Settings' global switch: off takes the lists off (from the next load) without waiting for
+    /// them, and posts `listsDidChange`; on puts them back. The allowlist is untouched.
+    func testGlobalSwitchTurnsBlockingOffAndOn() async throws {
+        let blocking = try fixtureController()
+        let navigator = Navigator()
+        navigator.blocking = blocking
+        let webView = makeWebView(navigator)
+        try await navigator.load(pageURL("127.0.0.1"), in: webView)
+        let blockedFirst = try await inspect(webView).adLoaded
+        XCTAssertFalse(blockedFirst)
+
+        let changed = expectation(forNotification: BlockingController.listsDidChange, object: blocking)
+        blocking.isEnabled = false
+        await fulfillment(of: [changed], timeout: 1)
+        XCTAssertTrue(blocking.applyIfLoaded(to: webView.configuration.userContentController, host: "127.0.0.1"))
+        try await navigator.reload(webView)
+        let off = try await inspect(webView)
+        XCTAssertEqual(off, PageResult(adLoaded: true, newAdLoaded: true, bannerHidden: false))
+        XCTAssertTrue(blocking.isBlocked(host: "127.0.0.1"), "the allowlist itself doesn't change")
+
+        blocking.isEnabled = true
+        try await navigator.reload(webView)
+        let on = try await inspect(webView)
+        XCTAssertEqual(on, PageResult(adLoaded: false, newAdLoaded: true, bannerHidden: true))
+    }
+
     /// After a refresh, re-applying to an open web view swaps the old lists for the new ones.
     func testRefreshedListsReplaceTheOldOnesInAnOpenWebView() async throws {
         let fetcher = FakeFetcher()
