@@ -51,6 +51,14 @@ What the automated tests cover: sharing between open spaces, isolation between M
 tenants, Google tracking cookies staying local, simultaneous changes in two spaces, sign-out
 spreading, and session-only cookies surviving a relaunch (the case only the vault can cover).
 
+Known trade-offs of sharing one sign-in session:
+- Signing out of Google or Microsoft in any space signs every space out of it (the session is
+  shared). Close the tab instead of signing out.
+- Upgrading from the per-space version: the most-used signed-in account per provider becomes
+  the shared one; another signed-in account (Fabrikam) stays a separate account for its
+  space, so nothing needs signing in again. To share it too, sign in to it once with the
+  provider's picker in any shared space, then set that space to Shared in Edit Space.
+
 Known risks outside the code:
 - A tenant with device-based Conditional Access needs Apple's Enterprise SSO plug-in, which
   serves Safari and allowlisted apps only. If a tenant blocks sign-in here, that is policy, not

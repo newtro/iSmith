@@ -30,9 +30,20 @@ struct ProviderDef: Codable, Hashable, Identifiable {
         owns(cookieDomain: record.domain) && (names.map { $0.contains(record.name) } ?? true)
     }
 
+    /// The cookies that carry a signed-in session; empty if the provider doesn't name them.
+    func session(_ records: [CookieRecord]) -> [String: String] {
+        guard let sessionNames else { return [:] }
+        var out: [String: String] = [:]
+        for r in records where sessionNames.contains(r.name) && tracks(record: r) { out[r.key] = r.value }
+        return out
+    }
+
     static let builtIns: [ProviderDef] = [
+        // Only the session cookies are shared. Per-sign-in cookies (esctx, fpc, x-ms-gateway-slice)
+        // stay in each space, so a sign-in in one space can't break one in progress in another.
         ProviderDef(id: "microsoft", name: "Microsoft",
                     domains: ["login.microsoftonline.com", "login.microsoft.com", "login.windows.net"],
+                    names: ["ESTSAUTH", "ESTSAUTHPERSISTENT", "ESTSAUTHLIGHT", "ESTSSSOTILES", "buid", "SignInStateCookie"],
                     sessionNames: ["ESTSAUTH", "ESTSAUTHPERSISTENT"], builtIn: true),
         ProviderDef(id: "microsoft-personal", name: "Microsoft personal", domains: ["live.com"],
                     sessionNames: ["MSPAuth", "WLSSC"], builtIn: true),
@@ -132,6 +143,7 @@ final class Config: ObservableObject {
         var accounts: [AccountDef]
         var spaces: [SpaceDef]
         var shared: [String: String]?
+        var pendingAdoption: [String: [String]]?
     }
 
     @Published private(set) var providers: [ProviderDef] = []
@@ -141,12 +153,20 @@ final class Config: ObservableObject {
     /// hold several accounts (Google's and Microsoft's own account pickers), so this is normally
     /// all anyone needs.
     @Published private(set) var shared: [String: String] = [:]
+    /// Space id → providers whose cookies, in version 1, belonged to the space alone (unbound, or
+    /// bound to an account with no session). On the space's first open, a session it holds for one
+    /// of these is kept as a separate account, never deleted. Providers the space already shared
+    /// in version 1 aren't checked: their cookies are the same account, just possibly newer.
+    @Published private(set) var pendingAdoption: [String: [String]] = [:]
     private let fileURL: URL
+    private let hasSession: (String) -> Bool
     /// False when config.json exists but couldn't be read or backed up: nothing is written over it.
     private var canSave = true
 
-    init(fileURL: URL = AppPaths.dir.appendingPathComponent("config.json")) {
+    /// `hasSession` tells whether the vault holds a signed-in session for an account id.
+    init(fileURL: URL = AppPaths.dir.appendingPathComponent("config.json"), hasSession: @escaping (String) -> Bool) {
         self.fileURL = fileURL
+        self.hasSession = hasSession
         var needsMigration = false
         if FileManager.default.fileExists(atPath: fileURL.path) {
             do {
@@ -156,6 +176,7 @@ final class Config: ObservableObject {
                 accounts = file.accounts
                 spaces = file.spaces
                 shared = file.shared ?? [:]
+                pendingAdoption = file.pendingAdoption ?? [:]
                 needsMigration = (file.version ?? 1) < 2
             } catch {
                 // Never overwrite a config that didn't load: keep a copy to recover from.
@@ -176,19 +197,50 @@ final class Config: ObservableObject {
     }
 
     /// Version 1 gave each space its own account per provider. Version 2 shares one sign-in per
-    /// provider across all spaces: the account most spaces used becomes the shared one (keeping its
-    /// saved session), and every space goes back to the default.
+    /// provider. Nothing signed in is lost:
+    /// - the most-used account that has a session becomes the shared one;
+    /// - any other account with a session stays bound to its spaces as a separate account;
+    /// - accounts with no session, and providers a space didn't bind, move to the shared one;
+    ///   on first open, a session such a space holds on its own is kept (see `pendingAdoption`).
     private func migrateToShared() {
+        for space in spaces {
+            pendingAdoption[space.id] = providers.map(\.id).filter { p in
+                guard let bound = space.bindings[p], bound != SpaceDef.local else { return true }
+                return !hasSession(bound)
+            }
+        }
         for provider in providers {
-            let used = spaces.compactMap { $0.bindings[provider.id] }.filter { $0 != SpaceDef.local }
-            let counts = Dictionary(grouping: used, by: { $0 }).mapValues(\.count)
-            guard let top = counts.max(by: { ($0.value, $1.key) < ($1.value, $0.key) })?.key,
-                  let i = accounts.firstIndex(where: { $0.id == top }) else { continue }
+            let used = spaces.compactMap { $0.bindings[provider.id] }.filter { account($0) != nil }
+            let signedIn = used.filter(hasSession)
+            let pool = signedIn.isEmpty ? used : signedIn
+            let counts = Dictionary(grouping: pool, by: { $0 }).mapValues(\.count)
+            let order = accounts.map(\.id)
+            guard let top = counts.max(by: { a, b in
+                a.value != b.value ? a.value < b.value
+                    : (order.firstIndex(of: a.key) ?? 0) > (order.firstIndex(of: b.key) ?? 0)
+            })?.key, let i = accounts.firstIndex(where: { $0.id == top }) else { continue }
             shared[provider.id] = top
             accounts[i].name = "All my accounts"
+            for s in spaces.indices {
+                guard let bound = spaces[s].bindings[provider.id] else { continue }
+                if bound == top || bound == SpaceDef.local || !hasSession(bound) { spaces[s].bindings[provider.id] = nil }
+            }
         }
-        for i in spaces.indices { spaces[i].bindings = [:] }
+        for s in spaces.indices {
+            spaces[s].bindings = spaces[s].bindings.filter { $0.value != SpaceDef.local }
+        }
         NSLog("iSmith: config moved to shared sign-ins")
+    }
+
+    func finishAdoption(_ spaceID: String) {
+        guard pendingAdoption.removeValue(forKey: spaceID) != nil else { return }
+        save()
+    }
+
+    /// Test hook: treat a space's providers as freshly migrated.
+    func markPendingAdoption(_ spaceID: String, providers: [String]) {
+        pendingAdoption[spaceID] = providers
+        save()
     }
 
     private func ensureShared(_ providerID: String) {
@@ -302,7 +354,8 @@ final class Config: ObservableObject {
         do {
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            try encoder.encode(File(version: 2, providers: providers, accounts: accounts, spaces: spaces, shared: shared))
+            try encoder.encode(File(version: 2, providers: providers, accounts: accounts, spaces: spaces, shared: shared,
+                                    pendingAdoption: pendingAdoption.isEmpty ? nil : pendingAdoption))
                 .write(to: fileURL, options: .atomic)
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
         } catch {

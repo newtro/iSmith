@@ -29,7 +29,7 @@ struct SelfTest {
         let hour = Date().addingTimeInterval(3600)
         let gPersistent = cookie("SID", "v1", ".google.com", expires: hour)
         let gSession = cookie("LSID", "s1", "accounts.google.com", expires: nil, secure: true, httpOnly: true)
-        let msHost = cookie("ismith_probe_ms", "m1", "login.microsoftonline.com", expires: hour, secure: true, httpOnly: true)
+        let msHost = cookie("ESTSAUTHPERSISTENT", "m1", "login.microsoftonline.com", expires: hour, secure: true, httpOnly: true)
         let gHostPrefix = cookie("__Host-GAPS", "h1", "accounts.google.com", expires: hour, secure: true)
 
         await m.httpCookieStore.setCookie(gPersistent)
@@ -46,9 +46,9 @@ struct SelfTest {
         check(await value(t, "LSID") == "s1", "Google session cookie reaches Fabrikam")
         check(await find(t, "LSID")?.isHTTPOnly == true, "HttpOnly flag survives the copy")
         check(await find(t, "__Host-GAPS")?.domain == "accounts.google.com", "__Host- cookie stays host-only")
-        check(await value(b, "ismith_probe_ms") == "m1", "Contoso Microsoft cookie reaches Contoso (second space)")
-        check(await value(t, "ismith_probe_ms") == nil, "Contoso Microsoft cookie does not reach Fabrikam")
-        check(await find(b, "ismith_probe_ms")?.domain == "login.microsoftonline.com", "Microsoft host-only cookie stays host-only")
+        check(await value(b, "ESTSAUTHPERSISTENT") == "m1", "Contoso Microsoft cookie reaches Contoso (second space)")
+        check(await value(t, "ESTSAUTHPERSISTENT") == nil, "Contoso Microsoft cookie does not reach Fabrikam")
+        check(await find(b, "ESTSAUTHPERSISTENT")?.domain == "login.microsoftonline.com", "Microsoft host-only cookie stays host-only")
 
         await t.httpCookieStore.setCookie(cookie("SID", "v2", ".google.com", expires: hour))
         await settle()
@@ -73,9 +73,9 @@ struct SelfTest {
         check(await value(m, "SID") == nil, "Sign-out (deleted cookie) in Personal spreads to Contoso")
         check(await value(t, "LSID") == nil, "Sign-out in Personal spreads to Fabrikam")
 
-        if let c = await find(b, "ismith_probe_ms") { await b.httpCookieStore.deleteCookie(c) }
+        if let c = await find(b, "ESTSAUTHPERSISTENT") { await b.httpCookieStore.deleteCookie(c) }
         await settle()
-        check(await value(m, "ismith_probe_ms") == nil, "Microsoft sign-out in second space spreads to Contoso")
+        check(await value(m, "ESTSAUTHPERSISTENT") == nil, "Microsoft sign-out in second space spreads to Contoso")
 
         let saved = Vault()
         let leftovers = saved.entries.values.flatMap(\.cookies).filter { $0.value != "" && ($0.name.contains("ismith_probe") || probes.contains($0.name)) }
@@ -89,7 +89,7 @@ struct SelfTest {
     private func writePhase() async {
         let m = await sync.attach(browser.config.space("contoso")!)
         await m.httpCookieStore.setCookie(cookie("LSID", "s1", "accounts.google.com", expires: nil, secure: true))
-        await m.httpCookieStore.setCookie(cookie("ismith_relaunch_ms", "m1", "login.microsoftonline.com",
+        await m.httpCookieStore.setCookie(cookie("ESTSAUTH", "m1", "login.microsoftonline.com",
                                                  expires: Date().addingTimeInterval(3600), secure: true))
         await settle()
         print("WRITE PHASE DONE")
@@ -107,10 +107,10 @@ struct SelfTest {
         let t = await sync.attach(browser.config.space("fabrikam")!)
         let b = await sync.attach(browser.config.space("contoso-b")!)
         check(await value(t, "LSID") == "s1", "After relaunch, Google session cookie is in Fabrikam")
-        check(await value(b, "ismith_relaunch_ms") == "m1", "After relaunch, Contoso Microsoft cookie is in the second Contoso space")
-        check(await value(t, "ismith_relaunch_ms") == nil, "After relaunch, Contoso Microsoft cookie is still not in Fabrikam")
+        check(await value(b, "ESTSAUTH") == "m1", "After relaunch, Contoso Microsoft cookie is in the second Contoso space")
+        check(await value(t, "ESTSAUTH") == nil, "After relaunch, Contoso Microsoft cookie is still not in Fabrikam")
         for c in await t.httpCookieStore.allCookies() where c.name.hasPrefix("ismith_relaunch") || c.name == "LSID" { await t.httpCookieStore.deleteCookie(c) }
-        for c in await b.httpCookieStore.allCookies() where c.name.hasPrefix("ismith_relaunch") { await b.httpCookieStore.deleteCookie(c) }
+        for c in await b.httpCookieStore.allCookies() where c.name.hasPrefix("ismith_relaunch") || c.name == "ESTSAUTH" { await b.httpCookieStore.deleteCookie(c) }
         await settle()
         print(failures.isEmpty ? "RELAUNCH OK" : "RELAUNCH FAILED: \(failures.count)")
         exit(failures.isEmpty ? 0 : 1)
@@ -131,8 +131,8 @@ struct SelfTest {
         let t = await sync.attach(config.space("fabrikam")!)
         let s = await sync.attach(config.space("newtro")!)
         await m.httpCookieStore.setCookie(cookie("SID", "c1", ".google.com", expires: hour))
-        await s.httpCookieStore.setCookie(cookie("ismith_probe_ms", "s1", "login.microsoftonline.com", expires: hour, secure: true))
-        await t.httpCookieStore.setCookie(cookie("ismith_probe_ms", "t1", "login.microsoftonline.com", expires: hour, secure: true))
+        await s.httpCookieStore.setCookie(cookie("ESTSAUTHPERSISTENT", "s1", "login.microsoftonline.com", expires: hour, secure: true))
+        await t.httpCookieStore.setCookie(cookie("ESTSAUTHPERSISTENT", "t1", "login.microsoftonline.com", expires: hour, secure: true))
         await settle()
 
         // The complaint: a new space should already be signed in to everything.
@@ -141,8 +141,8 @@ struct SelfTest {
         let f = await sync.attach(fresh)
         check(fresh.bindings.isEmpty, "New space needs no account setup")
         check(await value(f, "SID") == "c1", "New space is signed in to Google from another space's sign-in")
-        check(await value(f, "ismith_probe_ms") == "s1", "New space is signed in to the shared Microsoft session")
-        check(await value(t, "ismith_probe_ms") == "t1", "A space with a separate Microsoft account keeps its own")
+        check(await value(f, "ESTSAUTHPERSISTENT") == "s1", "New space is signed in to the shared Microsoft session")
+        check(await value(t, "ESTSAUTHPERSISTENT") == "t1", "A space with a separate Microsoft account keeps its own")
 
         // A separate account stays separate.
         browser.createSpace(name: "Separate", color: 6, home: "", choices: ["google": .new], newNames: ["google": "Second Google"])
@@ -157,11 +157,11 @@ struct SelfTest {
         // Moving a space between its separate account and the shared one.
         update("fabrikam") { $0["microsoft"] = .shared }
         await settle()
-        check(await value(t, "ismith_probe_ms") == "s1", "Switching to Shared loads the shared Microsoft session")
-        check(browser.vault.records(for: "ms-fabrikam")?.first { $0.name == "ismith_probe_ms" }?.value == "t1", "The separate account keeps its session for later")
+        check(await value(t, "ESTSAUTHPERSISTENT") == "s1", "Switching to Shared loads the shared Microsoft session")
+        check(browser.vault.records(for: "ms-fabrikam")?.first { $0.name == "ESTSAUTHPERSISTENT" }?.value == "t1", "The separate account keeps its session for later")
         update("fabrikam") { $0["microsoft"] = .existing("ms-fabrikam") }
         await settle()
-        check(await value(t, "ismith_probe_ms") == "t1", "Switching back loads the separate account again")
+        check(await value(t, "ESTSAUTHPERSISTENT") == "t1", "Switching back loads the separate account again")
 
         // Not shared: the space signs out of the shared Google and keeps its own changes local.
         update("fabrikam") { $0["google"] = .local }
@@ -183,6 +183,31 @@ struct SelfTest {
         check(await value(f, "sid") == "o1", "Custom provider sign-in reaches other spaces")
         check(config.addProvider(name: "Workspace", domains: ["mail.google.com"], sessionNames: []) != nil, "Provider overlapping Google is refused")
 
+        // Two spaces change the same Microsoft session cookie: the newest change wins everywhere.
+        await f.httpCookieStore.setCookie(cookie("ESTSAUTH", "older", "login.microsoftonline.com", expires: nil, secure: true))
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        await s.httpCookieStore.setCookie(cookie("ESTSAUTH", "newer", "login.microsoftonline.com", expires: nil, secure: true))
+        await settle()
+        let (fE, sE) = (await value(f, "ESTSAUTH"), await value(s, "ESTSAUTH"))
+        check(fE == "newer" && sE == "newer", "Newest Microsoft session change wins in every space")
+        await f.httpCookieStore.setCookie(cookie("esctx", "only-f", "login.microsoftonline.com", expires: nil, secure: true))
+        await settle()
+        check(await value(s, "esctx") == nil, "Per-sign-in Microsoft cookies stay in their space")
+
+        // A migrated space that holds its own GitHub sign-in keeps it on first open.
+        await m.httpCookieStore.setCookie(cookie("user_session", "g1", "github.com", expires: hour, secure: true))
+        await settle()
+        let personal = config.space("personal")!
+        await WKWebsiteDataStore(forIdentifier: personal.storeID).httpCookieStore
+            .setCookie(cookie("user_session", "own1", "github.com", expires: hour, secure: true))
+        config.markPendingAdoption("personal", providers: ["github"])
+        let p = await sync.attach(personal)
+        await settle()
+        let kept = config.space("personal")?.bindings["github"]
+        check(kept != nil && kept != config.shared["github"], "Space's own GitHub sign-in becomes a separate account")
+        check(await value(p, "user_session") == "own1", "Its own sign-in is not replaced")
+        check(await value(m, "user_session") == "g1", "The shared GitHub sign-in is untouched")
+
         // An older per-space config moves to shared sign-ins, keeping the most-used sessions.
         let old = AppPaths.dir.appendingPathComponent("migrate-test.json")
         let v1 = """
@@ -197,8 +222,12 @@ struct SelfTest {
           {"id":"d","name":"D","color":3,"storeID":"6F1C2A40-0000-4000-9000-0000000000A4","bindings":{"google":"google-newtro"},"home":""}]}
         """
         try? v1.data(using: .utf8)!.write(to: old)
-        let migrated = Config(fileURL: old)
-        check(migrated.spaces.allSatisfy { $0.bindings.isEmpty }, "Migration puts every space on the shared sign-ins")
+        let migrated = Config(fileURL: old, hasSession: { ["ms-contoso", "ms-fabrikam", "google-personal"].contains($0) })
+        check(migrated.space("b")?.bindings == ["microsoft": "ms-fabrikam"], "Migration keeps a second signed-in account as separate")
+        check(migrated.space("d")?.bindings.isEmpty == true, "Migration moves an account with no session to the shared one")
+        check(migrated.pendingAdoption["a"] == ["microsoft-personal", "github"],
+              "Providers a space already shared aren't re-checked on first open")
+        check(migrated.pendingAdoption["d"]?.contains("google") == true, "A no-session account's cookies are checked on first open")
         check(migrated.shared["microsoft"] == "ms-contoso" && migrated.shared["google"] == "google-personal",
               "Migration keeps the most-used sessions as the shared ones")
         try? FileManager.default.removeItem(at: old)

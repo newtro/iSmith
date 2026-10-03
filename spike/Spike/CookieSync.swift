@@ -29,9 +29,15 @@ final class CookieSync: ObservableObject {
     private var attachTasks: [String: Task<WKWebsiteDataStore, Never>] = [:]
     private var pendingScan: [String: Task<Void, Never>] = [:]
     private var scanSince: [String: Date] = [:]
+    /// When each space's cookies last changed; the newest change wins when two spaces change the
+    /// same sign-in cookie before a sync.
+    private var lastChange: [String: Date] = [:]
     /// Space id → provider id → the provider cookies that space had right after its last sync.
     private var baseline: [String: [String: [String: CookieRecord]]] = [:]
     private var tail: Task<Void, Never>?
+
+    /// Lets the browser refresh a space's state when sync changes its bindings.
+    var bindingChanged: ((SpaceDef) -> Void)?
 
     init(vault: Vault, config: Config) {
         self.vault = vault
@@ -144,16 +150,41 @@ final class CookieSync: ObservableObject {
         // A space deleted while its first open was queued gets a throwaway store, never attached.
         guard let space = config.space(spaceID) else { return .nonPersistent() }
         let store = WKWebsiteDataStore(forIdentifier: space.storeID)
-        for (provider, account) in config.bound(space) {
+        if let providers = config.pendingAdoption[space.id] { await keepOwnSignIns(space, store, providers: providers) }
+        for (provider, account) in config.bound(config.space(spaceID) ?? space) {
             await seed(store, spaceName: space.name, provider: provider, account: account, adoptIfNew: true)
                 .map { baseline[space.id, default: [:]][provider.id] = $0 }
         }
-        let observer = StoreObserver { [weak self] in self?.scheduleScan(spaceID) }
+        let observer = StoreObserver { [weak self] in
+            self?.lastChange[spaceID] = Date()
+            self?.scheduleScan(spaceID)
+        }
         observers[space.id] = observer
         store.httpCookieStore.add(observer)
         stores[space.id] = store
         attached.insert(space.id)
         return store
+    }
+
+    /// First open after migration: a sign-in this space holds that differs from the shared one
+    /// becomes a separate account for this space instead of being replaced.
+    private func keepOwnSignIns(_ space: SpaceDef, _ store: WKWebsiteDataStore, providers: [String]) async {
+        let cookies = await store.httpCookieStore.allCookies()
+        var def = space
+        for provider in config.providers where def.bindings[provider.id] == nil && providers.contains(provider.id) {
+            let local = records(in: cookies, for: provider)
+            let mine = provider.session(local)
+            guard !mine.isEmpty, let sharedID = config.shared[provider.id] else { continue }
+            let theirs = provider.session(vault.records(for: sharedID) ?? [])
+            guard !theirs.isEmpty, theirs != mine else { continue }
+            let account = config.addAccount(providerID: provider.id, name: space.name)
+            vault.set(local, for: account.id)
+            def.bindings[provider.id] = account.id
+            note("\(space.name): kept its own \(provider.name) sign-in as \(config.label(account))")
+        }
+        if def != space { config.upsert(def) }
+        config.finishAdoption(space.id)
+        bindingChanged?(def)
     }
 
     /// Makes the store's cookies for the provider match the account's vault entry, and returns the
@@ -210,7 +241,9 @@ final class CookieSync: ObservableObject {
         var changedIn: [String] = []
         var currents: [String: [String: CookieRecord]] = [:]
 
-        for space in members {
+        // Oldest change first, so when two spaces changed the same cookie the newest one wins.
+        let ordered = members.sorted { (lastChange[$0.id] ?? .distantPast) < (lastChange[$1.id] ?? .distantPast) }
+        for space in ordered {
             let current = keyed(records(in: await stores[space.id]!.httpCookieStore.allCookies(), for: provider))
             currents[space.id] = current
             let base = baseline[space.id]?[provider.id] ?? [:]

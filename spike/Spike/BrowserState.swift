@@ -90,8 +90,12 @@ final class BrowserState: NSObject, ObservableObject {
     }()
 
     override init() {
-        let config = Config()
         let vault = Vault()
+        let config = Config(hasSession: { [vault] id in
+            guard let records = vault.records(for: id) else { return false }
+            let names: Set<String> = ["ESTSAUTH", "ESTSAUTHPERSISTENT", "SID", "__Secure-1PSID", "user_session", "MSPAuth", "WLSSC"]
+            return records.contains { names.contains($0.name) }
+        })
         self.config = config
         self.vault = vault
         sync = CookieSync(vault: vault, config: config)
@@ -99,6 +103,9 @@ final class BrowserState: NSObject, ObservableObject {
         activeID = config.spaces.first?.id
         super.init()
         AppDelegate.flush = { [sync] in await sync.flush() }
+        sync.bindingChanged = { [weak self] def in
+            self?.spaces.first { $0.id == def.id }?.def = def
+        }
     }
 
     var active: SpaceState? { spaces.first { $0.id == activeID } ?? spaces.first }
@@ -233,6 +240,14 @@ final class BrowserState: NSObject, ObservableObject {
 
     func removeAccount(_ id: String) {
         guard config.spaces(using: id).isEmpty else { return }
+        if let records = vault.records(for: id), !records.isEmpty {
+            let alert = NSAlert()
+            alert.messageText = "Remove \(config.account(id).map(config.label) ?? "this account")?"
+            alert.informativeText = "Its saved sign-in is deleted. You'd have to sign in again to use it."
+            alert.addButton(withTitle: "Remove")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
         config.removeAccount(id)
         vault.remove(id)
     }
