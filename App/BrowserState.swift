@@ -157,8 +157,9 @@ final class BrowserState: NSObject, ObservableObject {
 
     // MARK: - Launch and windows
 
-    /// Restores the saved windows, or opens one on the first space.
-    func start() {
+    /// Restores the saved windows, or opens one on the first space, then opens `links` (from
+    /// another app, handed over before the browser started).
+    func start(links: [URL] = []) {
         let poster = SystemNotificationPoster()
         poster.onClick = { [weak self] id, tab in
             // The page gets its click event if it's still open; the tab comes forward either way.
@@ -169,7 +170,8 @@ final class BrowserState: NSObject, ObservableObject {
         notifications.poster = poster
         let saved = session.load().map { SessionStore.pruned($0, spaces: Set(config.spaces.map(\.id))) }
         for record in saved?.windows ?? [] { restoreWindow(record) }
-        if windows.isEmpty { newWindow() }
+        if windows.isEmpty, !links.contains(where: Self.opensIncoming) { newWindow() }
+        openIncoming(links)
         refresh()
         hibernationTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
@@ -200,14 +202,15 @@ final class BrowserState: NSObject, ObservableObject {
     /// ⌘N. With no browser window open, the last closed one comes back instead, so its tabs
     /// aren't replaced in the saved session by an empty window.
     @discardableResult
-    func newWindow(space spaceID: String? = nil) -> WindowState {
+    func newWindow(space spaceID: String? = nil, openHome: Bool = true) -> WindowState {
         if windows.isEmpty, spaceID == nil, let restored = reopenLastWindow() { return restored }
         let id = spaceID ?? currentWindow?.activeSpaceID ?? spaces.first?.id
         let window = WindowState()
         windows.append(window)
         presentWindow?(window)
         if let id, let space = space(id) {
-            select(space, in: window)
+            // A window made for a link from another app shows the link alone, not the home page too.
+            if openHome { select(space, in: window) } else { window.activeSpaceID = space.id }
         }
         scheduleRefresh()
         return window
@@ -706,8 +709,11 @@ final class BrowserState: NSObject, ObservableObject {
         let targetTabs = target.window.tabs(for: target.space)
         hook(targetTabs)
         let sameSpace = source.space == target.space
+        // A link from another app that ended up elsewhere (a sign-in redirect, an error page)
+        // loads the link again in its new space, rather than replaying the old space's redirect.
+        let fresh = sameSpace ? nil : linkToReload(tab)
         // A tab leaving its space closes its web view: the target space's store loads it again.
-        let state = sameSpace ? nil : tab.history
+        let state = sameSpace || fresh != nil ? nil : tab.history
         if !sameSpace {
             tab.unload()
             tabMovedToSpace(tab, space: target.space, window: target.window)
@@ -719,7 +725,9 @@ final class BrowserState: NSObject, ObservableObject {
         if select || targetTabs.layout.selected == nil { targetTabs.update { $0.select(id) } }
         if !sameSpace {
             // Back/forward history comes along; the page itself reloads in the new space's store.
-            Task { await buildWebView(for: tab, space: target.space, state: state, load: state == nil ? tab.url.map { URLRequest(url: $0) } : nil) }
+            // Building counts from now, so showing the space next doesn't build a second web view.
+            let load = fresh ?? (state == nil ? tab.url : nil)
+            scheduleBuild(tab, space: target.space, state: state, load: load.map { URLRequest(url: $0) })
         } else if visible, targetTabs.layout.selected == id {
             ensureLoaded(tab, space: target.space)
         }

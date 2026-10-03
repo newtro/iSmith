@@ -27,6 +27,8 @@ final class URLPatternTests: XCTestCase {
             ("https://dev.azure.com/contoso-dev/", "https://dev.azure.com/contoso-dev/a", true),
             ("example.com/a/b", "https://example.com/a/b/c", true),
             ("example.com/a/b", "https://example.com/a/c", false),
+            ("dev.azure.com/contoso-dev", "https://dev.azure.com/contoso-dev/../other", false),
+            ("dev.azure.com/other", "https://dev.azure.com/contoso-dev/../other/x", true),
             ("example.com/with%20space", "https://example.com/with%20space/x", true),
             // Wildcard subdomains: the domain itself and every subdomain.
             ("*.fabrikam.com", "https://fabrikam.com/", true),
@@ -139,6 +141,24 @@ final class RouterTests: XCTestCase {
         XCTAssertEqual(s.route(outlook, spaces: ["personal", "fabrikam"])?.reason, .defaultSpace)
     }
 
+    /// One site, several hosts: using Outlook at outlook.cloud.microsoft routes outlook.office.com
+    /// links too. Etsy (two shops, the same addresses) works the same way.
+    func testSharedAddressFamilies() {
+        var s = RoutingState()
+        let spaces = ["personal", "contoso", "fabrikam", "newtro"]
+        s.noteUse(url("https://outlook.cloud.microsoft/mail/"), space: "fabrikam")
+        XCTAssertEqual(s.route(url("https://outlook.office.com/mail/inbox/id/1"), spaces: spaces), Route(space: "fabrikam", reason: .lastUsed))
+        XCTAssertEqual(s.route(url("https://outlook.office365.com/owa/"), spaces: spaces)?.space, "fabrikam")
+        XCTAssertEqual(s.route(url("https://teams.microsoft.com/l/x"), spaces: spaces)?.reason, .defaultSpace, "Teams is its own site")
+        XCTAssertEqual(s.route(url("https://www.office.com/"), spaces: spaces)?.reason, .defaultSpace, "and so is the Microsoft 365 home")
+        s.noteUse(url("https://teams.cloud.microsoft/"), space: "contoso")
+        XCTAssertEqual(s.route(url("https://teams.microsoft.com/l/meetup-join/1"), spaces: spaces)?.space, "contoso")
+        s.noteUse(url("https://www.etsy.com/your/shops/me/dashboard"), space: "newtro")
+        XCTAssertEqual(s.route(url("https://www.etsy.com/your/orders/sold"), spaces: spaces)?.space, "newtro")
+        XCTAssertEqual(s.lastUsed, ["outlook": "fabrikam", "teams": "contoso", "etsy": "newtro"])
+        XCTAssertEqual(SharedAddressHosts.name(for: "outlook"), "Outlook")
+    }
+
     func testSharedAddressHostList() {
         for u in ["https://outlook.office.com/mail", "https://outlook.office365.com/owa", "https://teams.microsoft.com/",
                   "https://www.office.com/", "https://m365.cloud.microsoft/", "https://mail.google.com/"] {
@@ -159,6 +179,38 @@ final class RouterTests: XCTestCase {
         XCTAssertNil(s.defaultSpace)
         XCTAssertTrue(s.lastUsed.isEmpty)
         XCTAssertTrue(s.moves.isEmpty)
+    }
+}
+
+final class LinkTargetTests: XCTestCase {
+    let safe = "https://nam12.safelinks.protection.outlook.com/?url=https%3A%2F%2Fdev.azure.com%2Fcontoso-dev%2FStorefront%2F_workitems%2Fedit%2F12&data=05%7C02&reserved=0"
+
+    func testWrappedLinksRouteByTheLinkInside() {
+        XCTAssertEqual(LinkTarget.unwrap(url(safe)).absoluteString, "https://dev.azure.com/contoso-dev/Storefront/_workitems/edit/12")
+        XCTAssertEqual(LinkTarget.unwrap(url("https://statics.teams.cdn.office.net/evergreen-assets/safelinks/1/atp-safelinks.html?url=https%3A%2F%2Fgithub.com%2Fx&locale=en")).host, "github.com")
+        XCTAssertEqual(LinkTarget.unwrap(url("https://www.google.com/url?q=https://etsy.com/listing/1&sa=D")).host, "etsy.com")
+        XCTAssertEqual(LinkTarget.unwrap(url("https://example.com/?url=https://other.com")).host, "example.com", "only known wrappers")
+        XCTAssertEqual(LinkTarget.unwrap(url("https://nam12.safelinks.protection.outlook.com/?url=javascript:alert(1)")).host,
+                       "nam12.safelinks.protection.outlook.com", "only web addresses come out")
+        var s = RoutingState()
+        s.rules = [RoutingRule(pattern: pattern("dev.azure.com/contoso-dev"), space: "contoso")]
+        XCTAssertEqual(s.route(url(safe), spaces: ["personal", "contoso"])?.space, "contoso")
+        s.noteUse(url("https://nam12.safelinks.protection.outlook.com/?url=https%3A%2F%2Foutlook.office.com%2Fmail"), space: "contoso")
+        XCTAssertEqual(s.lastUsed, ["outlook": "contoso"])
+    }
+
+    func testWrappersAndShortenersAreNotLearned() {
+        var s = RoutingState()
+        let spaces = ["personal", "contoso"]
+        _ = s.recordMove(link: UUID(), url: url(safe), to: "contoso", spaces: spaces)
+        XCTAssertEqual(s.recordMove(link: UUID(), url: url(safe.replacingOccurrences(of: "edit%2F12", with: "edit%2F13")), to: "contoso", spaces: spaces),
+                       RuleSuggestion(pattern: pattern("dev.azure.com/contoso-dev"), space: "contoso"), "learned from the link inside")
+        var t = RoutingState()
+        for _ in 0..<3 {
+            XCTAssertNil(t.recordMove(link: UUID(), url: url("https://aka.ms/something"), to: "contoso", spaces: spaces))
+            XCTAssertNil(t.recordMove(link: UUID(), url: url("https://nam12.safelinks.protection.outlook.com/?data=1"), to: "contoso", spaces: spaces))
+        }
+        XCTAssertTrue(t.moves.isEmpty)
     }
 }
 
@@ -207,9 +259,9 @@ final class LearningTests: XCTestCase {
 
     func testRootLinksOfferTheHost() {
         var s = RoutingState()
-        _ = s.recordMove(link: UUID(), url: url("https://www.etsy.com/"), to: "fabrikam", spaces: spaces)
-        XCTAssertEqual(s.recordMove(link: UUID(), url: url("https://etsy.com"), to: "fabrikam", spaces: spaces),
-                       RuleSuggestion(pattern: pattern("etsy.com"), space: "fabrikam"))
+        _ = s.recordMove(link: UUID(), url: url("https://www.example.com/"), to: "fabrikam", spaces: spaces)
+        XCTAssertEqual(s.recordMove(link: UUID(), url: url("https://example.com"), to: "fabrikam", spaces: spaces),
+                       RuleSuggestion(pattern: pattern("example.com"), space: "fabrikam"))
     }
 
     func testSharedAddressHostsAreNotLearned() {
@@ -294,14 +346,14 @@ final class RoutingStoreTests: XCTestCase {
         XCTAssertEqual(reopened.state.rules.map(\.id), [a.id, edited.id, c.id])
         XCTAssertEqual(reopened.state.rules[1].space, "personal")
         XCTAssertEqual(reopened.state.defaultSpace, "contoso")
-        XCTAssertEqual(reopened.state.lastUsed, ["outlook.office.com": "fabrikam"])
+        XCTAssertEqual(reopened.state.lastUsed, ["outlook": "fabrikam"])
         XCTAssertEqual(reopened.state.moves.count, 1)
         XCTAssertEqual(reopened.state.neverSuggest, [pattern("example.com")])
         XCTAssertTrue(reopened.state.defaultBrowserOffered)
 
         reopened.removeRule(a.id)
         reopened.allowSuggestions(pattern("example.com"))
-        reopened.forgetLastUsed(host: "outlook.office.com")
+        reopened.forgetLastUsed(host: "outlook")
         let third = RoutingStore(fileURL: file)
         XCTAssertEqual(third.state.rules.map(\.id), [edited.id, c.id])
         XCTAssertTrue(third.state.neverSuggest.isEmpty)

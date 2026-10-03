@@ -66,7 +66,7 @@ struct LinkSettings: View {
                 Section("Last used") {
                     ForEach(store.state.lastUsed.sorted { $0.key < $1.key }, id: \.key) { host, space in
                         HStack {
-                            Text(host)
+                            Text(SharedAddressHosts.name(for: host))
                             Spacer()
                             Text(name(of: space)).foregroundStyle(.secondary)
                             Button { store.forgetLastUsed(host: host) } label: { Image(systemName: "minus.circle") }

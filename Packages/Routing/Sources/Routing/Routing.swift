@@ -12,19 +12,77 @@ public struct RoutingRule: Codable, Hashable, Identifiable, Sendable {
     }
 }
 
-/// Hosts whose address is the same for every tenant or account, so the URL alone can't say which
-/// space a link belongs to (an Outlook link from Teams is just `outlook.office.com/mail/…`). With
-/// no rule, these open in the space where you last used that host.
+/// Sites whose addresses are the same for every tenant or account, so the URL alone can't say
+/// which space a link belongs to (an Outlook link from Teams is just `outlook.office.com/mail/…`;
+/// both Etsy shops are `etsy.com/your/…`). With no rule, these open in the space where you last
+/// used that site. A site is a family of hosts: Outlook is `outlook.office.com`,
+/// `outlook.office365.com` and `outlook.cloud.microsoft`, so using one counts for the others.
 public enum SharedAddressHosts {
-    public static let patterns: [URLPattern] = [
-        "outlook.office.com", "outlook.office365.com", "*.office.com",
-        "teams.microsoft.com", "*.cloud.microsoft", "mail.google.com",
-    ].map { try! URLPattern(parsing: $0) }
+    /// Key → its hosts. The first family that matches wins, so Outlook comes before the rest of
+    /// `*.office.com`.
+    public static let families: [(key: String, name: String, patterns: [URLPattern])] = [
+        ("outlook", "Outlook", ["outlook.office.com", "outlook.office365.com", "outlook.cloud.microsoft"]),
+        ("outlook-personal", "Outlook (personal)", ["outlook.live.com"]),
+        ("teams", "Teams", ["teams.microsoft.com", "teams.cloud.microsoft"]),
+        ("teams-personal", "Teams (personal)", ["teams.live.com"]),
+        ("office", "Microsoft 365", ["*.office.com", "*.cloud.microsoft"]),
+        ("gmail", "Gmail", ["mail.google.com"]),
+        ("etsy", "Etsy", ["*.etsy.com"]),
+    ].map { ($0.0, $0.1, $0.2.map { try! URLPattern(parsing: $0) }) }
 
-    /// The key "last used" is kept under: the normalized host, if `url` is one of these hosts.
+    /// The key "last used" is kept under, if `url` (unwrapped) is one of these sites.
     public static func key(for url: URL) -> String? {
-        guard let host = url.host, patterns.contains(where: { $0.matches(url) }) else { return nil }
-        return URLPattern.normalizedHost(host)
+        let target = LinkTarget.unwrap(url)
+        return families.first { $0.patterns.contains { $0.matches(target) } }?.key
+    }
+
+    /// "Outlook", "Teams", … for a key (the key itself if unknown).
+    public static func name(for key: String) -> String {
+        families.first { $0.key == key }?.name ?? key
+    }
+}
+
+/// Links that wrap another link. Routing and learning look at where a link really goes; the
+/// wrapper itself is what opens, so a click-time safety check still runs.
+public enum LinkTarget {
+    /// The address inside Microsoft Defender Safe Links (`*.safelinks.protection.outlook.com/?url=`
+    /// and Teams' Safe Links page) and Google's redirect (`google.com/url?q=`). Anything else, or a
+    /// wrapper without a web address inside, is returned as it is.
+    public static func unwrap(_ url: URL) -> URL {
+        var current = url
+        for _ in 0..<3 {
+            guard let inner = wrapped(in: current) else { break }
+            current = inner
+        }
+        return current
+    }
+
+    private static func wrapped(in url: URL) -> URL? {
+        guard let host = url.host.map(URLPattern.normalizedHost),
+              let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems else { return nil }
+        func param(_ name: String) -> URL? {
+            guard let value = items.first(where: { $0.name.lowercased() == name })?.value,
+                  let inner = URL(string: value), let scheme = inner.scheme?.lowercased(),
+                  scheme == "http" || scheme == "https", inner.host?.isEmpty == false else { return nil }
+            return inner
+        }
+        if host.hasSuffix("safelinks.protection.outlook.com") { return param("url") }
+        if host == "statics.teams.cdn.office.net", url.path.lowercased().contains("safelinks") { return param("url") }
+        if host == "google.com" || host.hasPrefix("google."), url.path == "/url" { return param("q") ?? param("url") }
+        return nil
+    }
+
+    /// Shorteners, redirectors and wrappers whose host says nothing about where a link leads.
+    /// They're never learned as rules.
+    public static let redirectorHosts: Set<String> = [
+        "aka.ms", "go.microsoft.com", "t.co", "bit.ly", "lnkd.in", "tinyurl.com", "ow.ly", "goo.gl",
+        "buff.ly", "urldefense.com", "urldefense.proofpoint.com", "l.facebook.com", "click.linksynergy.com",
+    ]
+
+    public static func isRedirector(_ url: URL) -> Bool {
+        guard let host = url.host.map(URLPattern.normalizedHost) else { return false }
+        return redirectorHosts.contains(host) || host.hasSuffix("safelinks.protection.outlook.com")
+            || host == "statics.teams.cdn.office.net" || ((host == "google.com" || host.hasPrefix("google.")) && url.path == "/url")
     }
 }
 
@@ -93,6 +151,7 @@ public struct RoutingState: Codable, Equatable, Sendable {
     /// point at a deleted space are skipped. nil only when `spaces` is empty.
     /// - Parameter spaces: the spaces that exist, in rail order.
     public func route(_ url: URL, spaces: [String]) -> Route? {
+        let url = LinkTarget.unwrap(url)
         if let rule = matchingRule(for: url, spaces: spaces) {
             return Route(space: rule.space, reason: .rule(rule.id))
         }
@@ -103,7 +162,8 @@ public struct RoutingState: Codable, Equatable, Sendable {
     }
 
     public func matchingRule(for url: URL, spaces: [String]) -> RoutingRule? {
-        rules.first { spaces.contains($0.space) && $0.pattern.matches(url) }
+        let url = LinkTarget.unwrap(url)
+        return rules.first { spaces.contains($0.space) && $0.pattern.matches(url) }
     }
 
     public func effectiveDefaultSpace(in spaces: [String]) -> String? {
@@ -127,11 +187,13 @@ public struct RoutingState: Codable, Equatable, Sendable {
     /// Returns a rule to offer once the same kind of link has been moved there twice:
     /// - the same host and first path segment twice → `host/segment` (`dev.azure.com/contoso-dev`);
     /// - the same host twice with different first segments, and never to another space → `host`.
-    /// Shared-address hosts are never learned (the last-used space covers them), and nothing is
+    /// Wrapped links (Safe Links) count as the link inside; shorteners and redirectors aren't
+    /// learned. Shared-address hosts are never learned (the last-used space covers them), and nothing is
     /// offered that an existing rule already does, or that was answered "Never".
     public mutating func recordMove(link: UUID, url: URL, to space: String, spaces: [String],
                                     at now: Date = Date()) -> RuleSuggestion? {
-        guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https",
+        let url = LinkTarget.unwrap(url)
+        guard !LinkTarget.isRedirector(url), let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https",
               let rawHost = url.host, !rawHost.isEmpty, SharedAddressHosts.key(for: url) == nil else { return nil }
         let host = URLPattern.normalizedHost(rawHost)
         let segment = Self.firstSegment(of: url)

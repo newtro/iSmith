@@ -102,7 +102,8 @@ public struct URLPattern: Hashable, Codable, CustomStringConvertible, Sendable {
         if let port {
             guard (url.port ?? (scheme == "https" ? 443 : 80)) == port else { return false }
         }
-        return Self.path(Self.normalizedPath(url.path), isUnder: pathPrefix)
+        // `/contoso-dev/../other` is `/other`.
+        return Self.path(Self.normalizedPath(url.standardized.path), isUnder: pathPrefix)
     }
 
     static func path(_ path: String, isUnder prefix: String) -> Bool {

@@ -21,7 +21,12 @@ public final class RoutingStore: ObservableObject {
     }
 
     private func load() {
-        guard let data = try? Data(contentsOf: fileURL) else { return }
+        guard FileManager.default.fileExists(atPath: fileURL.path) else { return }
+        guard let data = try? Data(contentsOf: fileURL) else {
+            // There but unreadable (permissions): never written over.
+            canSave = false
+            return
+        }
         if let decoded = try? JSONDecoder.routing.decode(RoutingState.self, from: data) {
             state = decoded
             return

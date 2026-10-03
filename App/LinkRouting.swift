@@ -102,7 +102,7 @@ final class LinkRouter: ObservableObject {
             } catch {
                 // Refused in macOS's question, or LaunchServices failed.
                 let code = (error as NSError).code
-                if code != NSUserCancelledError { lastError = error.localizedDescription }
+                if code != NSUserCancelledError, code != -128 /* userCanceledErr */ { lastError = error.localizedDescription }
             }
             refreshDefaultBrowser()
         }
@@ -144,21 +144,32 @@ extension BrowserState {
     /// there is one (else the current window, switched to it), and brings that window forward.
     @discardableResult
     func openIncoming(_ url: URL) -> (window: WindowState, tab: Tab)? {
-        let scheme = url.scheme?.lowercased()
-        guard scheme == "http" || scheme == "https" || url.isFileURL else { return nil }
+        guard Self.opensIncoming(url) else { return nil }
         let ids = spaces.map(\.id)
         // Files have no host for rules to match: they open in the Default space.
         let target = url.isFileURL ? routing.store.state.effectiveDefaultSpace(in: ids) : routing.store.route(url, spaces: ids)?.space
         guard let target, let space = space(target) else { return nil }
-        let window = Self.incomingWindow(for: target, windows: windowsFrontToBack, current: currentWindow) ?? newWindow()
+        let window = Self.incomingWindow(for: target, windows: windowsFrontToBack, current: currentWindow)
+            ?? newWindow(space: target, openHome: false)
+        // Outlook, Teams and Gmail are kept alive automatically. A link to one in a space that
+        // already has it kept alive opens as an ordinary tab, so links don't pile up copies of
+        // the whole app that are never throttled or unloaded.
+        let family = SharedAddressHosts.key(for: url)
+        let alive = family != nil && tabs(inSpace: target).contains { $0.keepAlive && $0.url.flatMap(SharedAddressHosts.key) == family }
         // The tab is added before the space is shown, so showing an empty space doesn't also open
         // its home page.
-        let tab = openTab(in: window, space: target, url: url)
+        let tab = openTab(in: window, space: target, url: url, keepAlive: alive ? false : nil)
         routing.linkArrived(tab.id, url: url, openTabs: Set(windows.flatMap(\.allTabs).map(\.id)))
         if window.activeSpaceID != target { select(space, in: window) }
         NSApp.activate(ignoringOtherApps: true)
         window.window?.makeKeyAndOrderFront(nil)
         return (window, tab)
+    }
+
+    /// Web addresses and files (HTML documents from Finder); other schemes aren't taken.
+    static func opensIncoming(_ url: URL) -> Bool {
+        let scheme = url.scheme?.lowercased()
+        return scheme == "http" || scheme == "https" || url.isFileURL
     }
 
     /// The window a link for `space` opens in: the current window if it shows that space, else
@@ -181,16 +192,31 @@ extension BrowserState {
     /// Teams and Gmail remember this space; a tab that came from another app counts toward a rule.
     func tabMovedToSpace(_ tab: Tab, space spaceID: String, window: WindowState) {
         if let url = tab.url { routing.store.noteUse(url, space: spaceID) }
+        // The link itself too: a mis-routed Outlook link usually sits on a sign-in page by now.
+        if let link = routing.incoming[tab.id] { routing.store.noteUse(link, space: spaceID) }
         guard let url = routing.incoming[tab.id],
               let suggestion = routing.store.recordMove(link: tab.id, url: url, to: spaceID, spaces: spaces.map(\.id)) else { return }
         routing.offer = LinkRouter.Offer(suggestion: suggestion, window: window.id)
     }
 
-    /// A page committed in a tab: if it's the tab on screen, a shared-address host (Outlook)
-    /// remembers this space as last used. Background tabs refreshing themselves don't count.
+    /// A page committed in a tab: if it's the tab you're using (on screen in the key window of
+    /// the active app), a shared-address site (Outlook) remembers this space as last used.
+    /// Background tabs and windows refreshing themselves don't count.
     func noteVisibleUse(of url: URL, tab: Tab, space spaceID: String) {
-        guard let (window, tabs) = owner(of: tab), window.activeSpaceID == spaceID, tabs.layout.selected == tab.id else { return }
+        guard NSApp?.isActive == true, let (window, tabs) = owner(of: tab), window.window?.isKeyWindow == true,
+              window.activeSpaceID == spaceID, tabs.layout.selected == tab.id else { return }
         routing.store.noteUse(url, space: spaceID)
+    }
+
+    /// What a tab moved to another space loads there: the link it came from, if it came from
+    /// another app and has since left that link's site (a sign-in redirect or error page whose
+    /// state belongs to the old space). nil keeps the tab's own history.
+    func linkToReload(_ tab: Tab) -> URL? {
+        guard let link = routing.incoming[tab.id] else { return nil }
+        let target = LinkTarget.unwrap(link)
+        guard let now = tab.url?.host.map(URLPattern.normalizedHost),
+              let wanted = target.host.map(URLPattern.normalizedHost) else { return link }
+        return now == wanted ? nil : link
     }
 
     // MARK: - Dock menu

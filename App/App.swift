@@ -62,8 +62,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak commands] event in
             commands?.handleTabSwitchKey(event) == true ? nil : event
         }
-        browser.start()
-        browser.openIncoming(pendingLinks)
+        browser.start(links: pendingLinks)
         pendingLinks = []
         browser.routing.offerDefaultBrowserIfNeeded()
         NSApp.activate(ignoringOtherApps: true)

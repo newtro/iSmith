@@ -147,6 +147,69 @@ final class LinkRoutingTests: XCTestCase {
         closeEverything()
     }
 
+    /// With no window open, a link gets a new window showing it alone (no home page tab).
+    func testLinkWithNoWindowOpensAWindowWithJustTheLink() throws {
+        browser.routing.store.addRule(RoutingRule(pattern: try URLPattern(parsing: "dev.azure.com/contoso-dev"), space: contoso))
+        XCTAssertTrue(browser.windows.isEmpty)
+        let link = url("https://dev.azure.com/contoso-dev/x")
+        let opened = try XCTUnwrap(browser.openIncoming(link))
+        XCTAssertEqual(browser.windows.count, 1)
+        XCTAssertEqual(opened.window.activeSpaceID, contoso)
+        XCTAssertEqual(opened.window.allTabs.map(\.url), [link])
+        closeEverything()
+    }
+
+    /// A second Outlook link into a space that already keeps Outlook alive opens as an ordinary
+    /// tab; the first one in a space is kept alive as usual.
+    func testOutlookLinksDontPileUpKeptAliveCopies() throws {
+        let window = browser.newWindow(space: personal)
+        browser.lastActiveWindow = window
+        let first = try XCTUnwrap(browser.openIncoming(url("https://outlook.office.com/mail/inbox/id/1"))).tab
+        XCTAssertNil(first.keepAliveSetting)
+        XCTAssertTrue(first.keepAlive)
+        let second = try XCTUnwrap(browser.openIncoming(url("https://outlook.office.com/mail/inbox/id/2"))).tab
+        XCTAssertEqual(second.keepAliveSetting, false)
+        XCTAssertFalse(second.keepAlive)
+        closeEverything()
+    }
+
+    /// Safe Links: routed by the link inside; the wrapper is what opens.
+    func testSafeLinksRouteByTheLinkInside() throws {
+        browser.routing.store.addRule(RoutingRule(pattern: try URLPattern(parsing: "dev.azure.com/contoso-dev"), space: contoso))
+        let window = browser.newWindow(space: personal)
+        browser.lastActiveWindow = window
+        let wrapped = url("https://nam12.safelinks.protection.outlook.com/?url=https%3A%2F%2Fdev.azure.com%2Fcontoso-dev%2Fx&data=1")
+        let opened = try XCTUnwrap(browser.openIncoming(wrapped))
+        XCTAssertEqual(window.activeSpaceID, contoso)
+        XCTAssertEqual(opened.tab.url, wrapped)
+        closeEverything()
+    }
+
+    /// A link that ended on a sign-in page is loaded again when moved; one still on its site keeps
+    /// its history.
+    func testMovedLinkReloadsTheLinkNotTheRedirect() throws {
+        let window = browser.newWindow(space: personal)
+        browser.lastActiveWindow = window
+        let link = url("https://dev.azure.com/contoso-dev/x")
+        let opened = try XCTUnwrap(browser.openIncoming(link))
+        XCTAssertNil(browser.linkToReload(opened.tab), "still on the link's site")
+        let redirected = Tab(url: url("https://login.microsoftonline.com/common/oauth2/authorize?state=abc"))
+        browser.routing.linkArrived(redirected.id, url: link, openTabs: [opened.tab.id])
+        XCTAssertEqual(browser.linkToReload(redirected), link)
+        XCTAssertNil(browser.linkToReload(Tab(url: link)), "not from another app")
+        closeEverything()
+    }
+
+    /// Only the tab you're using marks Outlook's space: a page committing in a window that isn't
+    /// key (here, none is) doesn't.
+    func testBackgroundCommitsDontChangeLastUsed() throws {
+        let window = browser.newWindow(space: fabrikam)
+        let outlook = browser.openTab(in: window, space: fabrikam, url: nil)
+        browser.noteVisibleUse(of: url("https://outlook.office.com/mail/"), tab: outlook, space: fabrikam)
+        XCTAssertTrue(browser.routing.store.state.lastUsed.isEmpty)
+        closeEverything()
+    }
+
     // MARK: - Learning
 
     func testMovingTwoLinksOffersARule() throws {
@@ -240,6 +303,7 @@ final class LinkRoutingTests: XCTestCase {
         XCTAssertEqual(window.activeSpaceID, fabrikam, "the window shows the tab's new space")
         XCTAssertEqual(tabs(window, fabrikam).map(\.id), [tab.id])
         XCTAssertEqual(window.spaces[fabrikam]?.layout.selected, tab.id)
+        XCTAssertTrue(tab.isBuilding, "one web view on its way, so showing the space didn't start a second")
         XCTAssertTrue(tabs(window, personal).isEmpty)
         closeEverything()
     }
