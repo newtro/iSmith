@@ -1,0 +1,14 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Clobbered</title></head>
+<body>
+<!-- Named elements that shadow built-in properties in every world: form.elements,
+     document.body and document.forms. The login form must still be recognized. -->
+<img name="body" alt="">
+<img name="forms" alt="">
+<form id="login" onsubmit="event.preventDefault()">
+  <input type="hidden" name="elements" value="x">
+  <input id="username" type="text" autocomplete="username">
+  <input id="password" type="password">
+  <button type="submit" name="form">Sign in</button>
+</form>
+</body></html>

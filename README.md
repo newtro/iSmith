@@ -29,6 +29,9 @@ See [DESIGN.md](DESIGN.md) for the model and [BUILD_PLAN.md](BUILD_PLAN.md) for 
   EasyPrivacy become WebKit content-rule lists, refreshed weekly, with a per-site allowlist.
   `Packages/Blocking/INTEGRATION.md` lists the app's hook points.
 - `Tools/update-blocking-snapshot.sh`: refreshes the filter lists bundled for first launch.
+- `Packages/Passwords/`: the password store and autofill core, with no UI: encrypted logins in
+  SQLite, origin matching, the capture and fill script, and the `PasswordAutofill` controller.
+  [INTEGRATION.md](Packages/Passwords/INTEGRATION.md) lists the app's hook points.
 - `AppTests/`: tests that run inside the signed app.
 - `project.yml`: the XcodeGen spec. `iSmith.xcodeproj` is generated from it and not committed.
 
@@ -38,7 +41,7 @@ Needs Xcode and XcodeGen (`brew install xcodegen`).
 
 ```bash
 make build   # generate the project and build Debug into build/
-make test    # package tests (SignInSync, Blocking; swift test), then the app-hosted tests
+make test    # package tests (SignInSync, BraveImport, Blocking, Passwords; swift test), then the app-hosted tests
 make run     # build and open the app
 ```
 

@@ -1,0 +1,38 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Hiding tricks</title>
+<style>
+  form { margin: 4px 0; }
+  .covered { position: relative; }
+  .covered .cover { position: absolute; left: 0; top: 0; width: 600px; height: 40px; background: white; }
+</style></head>
+<body>
+<!-- Each form hides its fields from the user in a way the page can still read them. None may get
+     a popover or a fill. -->
+<form id="f1" style="clip-path: inset(49.9%)"><input id="u1" autocomplete="username"><input id="p1" type="password"></form>
+<div style="width: 0; height: 0; overflow: hidden"><form id="f2"><input id="u2" autocomplete="username"><input id="p2" type="password"></form></div>
+<form id="f3" style="position: absolute; clip: rect(0 0 0 0)"><input id="u3" autocomplete="username"><input id="p3" type="password"></form>
+<form id="f4" class="covered"><input id="u4" autocomplete="username"><input id="p4" type="password"><div class="cover"></div></form>
+<form id="f5"><input id="u5" autocomplete="username" style="color: transparent; background: transparent; border: 0"><input id="p5" type="password" style="color: transparent; background: transparent; border: 0"></form>
+<form id="f6" style="position: absolute; left: 99999px"><input id="u6" autocomplete="username"><input id="p6" type="password"></form>
+<form id="f7" style="position: absolute; top: 100000px"><input id="u7" autocomplete="username"><input id="p7" type="password"></form>
+<form id="f8" style="filter: opacity(0)"><input id="u8" autocomplete="username"><input id="p8" type="password"></form>
+<div style="opacity: 0.3"><div style="opacity: 0.3"><form id="f9"><input id="u9" autocomplete="username"><input id="p9" type="password"></form></div></div>
+<form id="f10" style="-webkit-mask-image: linear-gradient(transparent, transparent)"><input id="u10" autocomplete="username"><input id="p10" type="password"></form>
+<form id="f11"><input id="u11" autocomplete="username" style="width: 2px; height: 2px; padding: 0; border: 0"><input id="p11" type="password" style="width: 2px; height: 2px; padding: 0; border: 0"></form>
+
+<!-- A newsletter box with a tiny, faint password field beside it: focusing the email must never
+     put a password into the hidden field. -->
+<form id="news" onsubmit="event.preventDefault()">
+  <input id="news-email" type="email" name="email" placeholder="Email">
+  <input id="news-pass" type="password" style="width: 2px; height: 2px; padding: 0; border: 0; opacity: 0.1">
+</form>
+
+<!-- A visible username with a password field narrowed to a 2px strip, and one blurred out: the
+     username may be filled, the password never. -->
+<form id="f12" onsubmit="event.preventDefault()"><input id="u12" autocomplete="username"><input id="p12" type="password" style="clip-path: inset(0 calc(50% - 1px))"></form>
+<form id="f13" onsubmit="event.preventDefault()"><input id="u13" autocomplete="username"><input id="p13" type="password" style="filter: blur(30px) brightness(3)"></form>
+
+<!-- A normal form whose focused field the page moves into another form before the fill. -->
+<form id="real" onsubmit="event.preventDefault()"><input id="ru" autocomplete="username"><input id="rp" type="password"></form>
+<form id="trap" onsubmit="event.preventDefault()"><input id="tu" autocomplete="username"></form>
+</body></html>

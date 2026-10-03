@@ -164,10 +164,14 @@ public struct KeychainKeyStore: KeyStore {
 
     public let service: String
     public let account: String
+    /// The name Keychain Access shows for the item.
+    public let label: String
 
-    public init(service: String = KeychainKeyStore.vaultService, account: String = "vault") {
+    public init(service: String = KeychainKeyStore.vaultService, account: String = "vault",
+                label: String = "iSmith vault key") {
         self.service = service
         self.account = account
+        self.label = label
     }
 
     public struct Failure: Error, CustomStringConvertible {
@@ -202,7 +206,7 @@ public struct KeychainKeyStore: KeyStore {
     public func saveKey(_ key: SymmetricKey) throws {
         var add = query
         add[kSecValueData as String] = key.withUnsafeBytes { Data($0) }.base64EncodedData()
-        add[kSecAttrLabel as String] = "iSmith vault key"
+        add[kSecAttrLabel as String] = label
         let status = SecItemAdd(add as CFDictionary, nil)
         guard status == errSecSuccess else { throw Failure(status: status) }
     }

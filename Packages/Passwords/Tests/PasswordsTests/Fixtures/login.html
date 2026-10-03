@@ -1,0 +1,18 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Sign in</title></head>
+<body>
+<h1>Sign in</h1>
+<!-- A single-page login. The page counts input events, as a framework would see typing. -->
+<form id="login" action="/done.html" method="post" onsubmit="event.preventDefault(); window.submitted = (window.submitted || 0) + 1;">
+  <label>Email <input id="username" name="username" type="text" autocomplete="username"></label>
+  <label>Password <input id="password" name="password" type="password" autocomplete="current-password"></label>
+  <button id="signin" type="submit">Sign in</button>
+</form>
+<form role="search" onsubmit="event.preventDefault()"><input id="search" type="search" name="q"></form>
+<script>
+  window.inputEvents = { username: 0, password: 0 };
+  for (const id of ["username", "password"]) {
+    document.getElementById(id).addEventListener("input", () => window.inputEvents[id]++);
+  }
+</script>
+</body></html>

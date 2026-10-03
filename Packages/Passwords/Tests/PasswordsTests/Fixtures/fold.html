@@ -1,0 +1,16 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Long sign-in page</title>
+<style>
+  #banner { position: fixed; left: 0; right: 0; bottom: 0; height: 120px; background: #333; color: white; display: none; }
+  body.banner #banner { display: block; }
+</style></head>
+<body>
+<!-- A username field near the top and its password field below the fold. With the banner on, a
+     fixed cookie banner covers the password field wherever it scrolls to. -->
+<form id="login" onsubmit="event.preventDefault()">
+  <input id="username" autocomplete="username">
+  <div id="spacer" style="height: 900px"></div>
+  <input id="password" type="password">
+</form>
+<div id="banner">We use cookies.</div>
+</body></html>
