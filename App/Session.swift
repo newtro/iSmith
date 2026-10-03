@@ -12,9 +12,9 @@ import SignInSync
 /// Each tab also keeps its back/forward history: WebKit's `interactionState`, an opaque blob that
 /// can hold form posts (a sign-in's code or password). It's sealed with AES-GCM under a key
 /// derived from the vault key (`HistorySealer`) and stored base64 in the JSON. Crash safety: the
-/// file is written atomically a second after a navigation or a change to the tabs (a few seconds
-/// after a title-only change), so a crash loses at most that. Fields added later decode with
-/// defaults, so older files still load.
+/// file is written atomically a second after a navigation or a change to the tabs (title-only
+/// changes ride along with the next write), so a crash loses at most that. Fields added later
+/// decode with defaults, so older files still load.
 struct SessionFile: Codable, Equatable {
     /// 1: P1 (no histories). 2: histories sealed with `HistorySealer`.
     var version = 2
