@@ -41,7 +41,7 @@ final class AppTests: XCTestCase {
             .write(to: spike.appendingPathComponent("vault.json"))
 
         let paths = AppPaths(dataDir: dir.appendingPathComponent("iSmith", isDirectory: true), spikeDir: spike)
-        let browser = BrowserState(paths: paths, keyStore: InMemoryKeyStore(), passwordsKeyStore: InMemoryKeyStore())
+        let browser = BrowserState(paths: paths, keyStore: InMemoryKeyStore(), passwordsKeyStore: InMemoryKeyStore(), blocking: { _ in nil })
         XCTAssertEqual(browser.spaces.map(\.def.name), ["Contoso", "Fabrikam"])
         XCTAssertEqual(browser.vault.records(for: "shared-google")?.first?.value, "v1")
         XCTAssertTrue(FileManager.default.fileExists(atPath: paths.configURL.path))

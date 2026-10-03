@@ -313,9 +313,14 @@ final class ImportFromBraveModel: ObservableObject {
             }.value
             switch read {
             case .success(let result):
-                do {
-                    passwordSummary = try BraveImporter.importPasswords(result, into: store)
-                } catch {
+                // Hundreds of logins, one transaction each: off the main thread too.
+                let saved = await Task.detached(priority: .userInitiated) { () -> Result<PasswordImportSummary, Error> in
+                    Result { try BraveImporter.importPasswords(result, into: store) }
+                }.value
+                switch saved {
+                case .success(let summary):
+                    passwordSummary = summary
+                case .failure(let error):
                     passwordProblem = "The passwords couldn't be saved: \((error as? PasswordStoreError)?.description ?? error.localizedDescription)"
                 }
             case .failure(BraveAccessError.permissionDenied):
@@ -448,7 +453,7 @@ struct ImportFromBraveView: View {
             Text("iSmith reads a private copy of Brave's password files, decrypts them on this Mac and saves them in its own encrypted store. Nothing is sent anywhere, and Brave isn't changed.")
                 .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             buttons {
-                Button("Back") { model.profileChanged(); model.backToChoose() }
+                Button("Back") { model.backToChoose() }
                 Button("Continue") { Task { await model.run(passwords: true) } }.keyboardShortcut(.defaultAction)
             }
         }

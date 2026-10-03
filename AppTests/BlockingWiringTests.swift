@@ -76,6 +76,10 @@ final class BlockingWiringTests: XCTestCase {
         // Another site in another tab, and a second tab on the same site.
         let other = try await wired.open(url("localhost"))
         let sameSite = try await wired.open(url("127.0.0.1", "/other.html"))
+        // A Keep alive tab of the site (Outlook, a Teams call) isn't reloaded under the user.
+        let keptAlive = try await wired.open(url("127.0.0.1", "/other.html"))
+        keptAlive.keepAliveSetting = true
+        _ = try await keptAlive.webView?.evaluateJavaScript("window.__iSmithOldPage = true; 1")
 
         // The shield: off for 127.0.0.1. Both of that site's tabs reload unblocked; localhost doesn't.
         try await wired.waitForNewPage(tab, path: "/page.html") { browser.toggleBlocking(for: tab) }
@@ -87,6 +91,11 @@ final class BlockingWiringTests: XCTestCase {
         XCTAssertTrue(reloadedSameSite, "the site's other tab reloaded without blocking")
         let untouched = try await state(other)
         XCTAssertEqual(untouched, blocked, "another site keeps blocking")
+        let notReloaded = try await keptAlive.webView?.evaluateJavaScript("window.__iSmithOldPage === true") as? Bool
+        XCTAssertEqual(notReloaded, true, "the Keep alive tab wasn't reloaded")
+        try await wired.waitForNewPage(keptAlive, path: "/other.html") { keptAlive.webView?.reload() }
+        let keptAliveState = try await state(keptAlive)
+        XCTAssertEqual(keptAliveState, allowed, "it has the new setting from its next load")
 
         // Navigating that tab to the blocked site applies the destination's setting.
         try await wired.waitForNewPage(other, path: "/page.html") { other.webView?.load(URLRequest(url: url("127.0.0.1"))) }

@@ -182,6 +182,39 @@ final class PasswordWiringTests: XCTestCase {
         XCTAssertTrue(filled)
     }
 
+    /// The Passwords window: revealing needs authentication, which lasts while unlocked and only
+    /// counts when the window is key; locking hides the password again.
+    func testManagerRevealNeedsAuthenticationAndLocks() async throws {
+        let login = try store().add(origin: origin, username: "scott@example.com", password: "Reveal-Me-1")
+        let model = PasswordsModel(store: try store(), problem: nil)
+        var asked = 0
+        var answer = false
+        model.authenticate = { _ in asked += 1; return answer }
+
+        await model.reveal(login.id)
+        XCTAssertNil(model.revealed, "refused authentication shows nothing")
+        answer = true
+        await model.reveal(login.id)
+        XCTAssertEqual(model.revealed?.password, "Reveal-Me-1")
+        XCTAssertEqual(asked, 2)
+        await model.reveal(login.id) // hide
+        await model.reveal(login.id) // show again within the unlock: no new prompt
+        XCTAssertEqual(asked, 2)
+        XCTAssertEqual(model.revealed?.password, "Reveal-Me-1")
+        model.lock()
+        XCTAssertNil(model.revealed)
+        XCTAssertFalse(model.isUnlocked)
+
+        // A window that isn't key (the user went elsewhere during the prompt) gets nothing.
+        let window = NSWindow(contentRect: NSRect(x: -4000, y: -4000, width: 10, height: 10), styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        model.watch(window)
+        await model.reveal(login.id)
+        XCTAssertNil(model.revealed)
+        XCTAssertFalse(model.isUnlocked)
+        XCTAssertEqual(model.rows.map(\.id), [login.id], "the list holds summaries")
+    }
+
     /// Agent-driven tabs (after v1) get no popover, no fill and no save bar.
     func testAgentTabsGetNoAutofill() async throws {
         try store().add(origin: origin, username: "scott@example.com", password: "Saved-Secret-1")

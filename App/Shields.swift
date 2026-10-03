@@ -17,6 +17,8 @@ final class Shields: ObservableObject {
     @Published private(set) var enabled: Bool
     /// Bumped when the allowlist or the lists change, so shields redraw.
     @Published private(set) var revision = 0
+    /// The web view whose shield was just clicked: it reloads whatever else is going on in it.
+    weak var toggledWebView: WKWebView?
     private var observers: [NSObjectProtocol] = []
 
     init(controller: BlockingController?, defaults: UserDefaults = .standard) {
@@ -159,18 +161,29 @@ extension BrowserState {
         let allowlist = center.addObserver(forName: BlockingController.allowlistDidChange, object: controller, queue: .main) { [weak self] note in
             MainActor.assumeIsolated {
                 guard let self, let site = note.userInfo?["site"] as? String else { return }
+                let clicked = self.shields.toggledWebView
+                self.shields.toggledWebView = nil
                 for webView in self.openWebViews {
                     guard let host = webView.url?.host, BlockingController.site(for: host) ?? host == site else { continue }
                     controller.applyIfLoaded(to: webView.configuration.userContentController, host: host)
-                    webView.reload()
+                    // Other tabs of the site reload only when nothing would be lost: not a Keep
+                    // alive tab (Outlook, a Teams call), a popup or its opener mid-sign-in, or a
+                    // page with unsaved edits. Those get the new setting on their next load.
+                    if webView === clicked || self.canReloadForShield(webView) { webView.reload() }
                 }
             }
         }
         return [lists, allowlist]
     }
 
+    func canReloadForShield(_ webView: WKWebView) -> Bool {
+        guard let (_, _, tab) = owner(of: webView), !tab.keepAlive, !isLinked(tab), tab.passwordOffer == nil else { return false }
+        return (webView as? BrowserWebView)?.editedSinceLoad != true
+    }
+
     /// The shield button's action for a tab.
     func toggleBlocking(for tab: Tab) {
+        shields.toggledWebView = tab.webView
         do {
             try shields.toggle(for: tab.webView?.url ?? tab.url)
         } catch {

@@ -87,8 +87,12 @@ final class PasswordsModel: ObservableObject {
         }
     }
 
+    /// The window the unlock belongs to (nil in tests).
+    private weak var window: NSWindow?
+
     /// Locks when the window stops being key.
     func watch(_ window: NSWindow) {
+        self.window = window
         observers.append(NotificationCenter.default.addObserver(forName: NSWindow.didResignKeyNotification, object: window, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.lock() }
         })
@@ -141,13 +145,23 @@ final class PasswordsModel: ObservableObject {
 
     /// Touch ID or the Mac password, unless unlocked in the last minute.
     func unlock(_ reason: String) async -> Bool {
-        if isUnlocked { return true }
+        if isUnlocked, window?.isKeyWindow != false { return true }
         guard await authenticate(reason) else { return false }
+        // The unlock holds only while this window is key. macOS's prompt takes the focus while
+        // it's up; if the user went to another window meanwhile, nothing is shown.
+        if let window {
+            let deadline = Date().addingTimeInterval(1.5)
+            while !window.isKeyWindow, Date() < deadline { try? await Task.sleep(nanoseconds: 50_000_000) }
+            guard window.isKeyWindow else { return false }
+        }
         unlockedUntil = Date().addingTimeInterval(Self.unlockDuration)
         relock?.invalidate()
-        relock = Timer.scheduledTimer(withTimeInterval: Self.unlockDuration, repeats: false) { [weak self] _ in
+        let timer = Timer(timeInterval: Self.unlockDuration, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated { self?.lock() }
         }
+        // Also while scrolling or tracking a menu.
+        RunLoop.main.add(timer, forMode: .common)
+        relock = timer
         return true
     }
 
@@ -401,7 +415,8 @@ private struct LoginDetail: View {
                 LabeledContent("Password") {
                     HStack {
                         if let revealed = model.revealed, revealed.id == id {
-                            Text(revealed.password).font(.system(.body, design: .monospaced)).textSelection(.enabled)
+                            // Not selectable: the copy button (SecretPasteboard) is the only way out.
+                            Text(revealed.password).font(.system(.body, design: .monospaced))
                         } else {
                             Text("••••••••••").foregroundStyle(.secondary)
                         }
@@ -453,8 +468,8 @@ private struct DraftEditor: View {
             Section(title) {
                 TextField("Website", text: draftBinding(\.site))
                 TextField("Username", text: draftBinding(\.username))
-                TextField("Password", text: draftBinding(\.password))
-                    .font(.system(.body, design: .monospaced))
+                // A secure field: its text can't be copied onto the ordinary pasteboard.
+                SecureField("Password", text: draftBinding(\.password))
                 Button("Generate a Strong Password") { model.draft?.password = PasswordGenerator.generate() }
                     .buttonStyle(.link)
             }

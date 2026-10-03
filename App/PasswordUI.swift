@@ -303,6 +303,7 @@ final class PasswordUI: NSObject, PasswordAutofillDelegate, NSPopoverDelegate {
     }
 
     private func present(_ model: AutofillPopoverModel, in webView: WKWebView, at rect: NSRect) {
+        close()
         let popover = NSPopover()
         popover.behavior = .transient
         popover.animates = false

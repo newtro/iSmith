@@ -281,7 +281,11 @@ final class Commands: NSObject, NSMenuDelegate, NSMenuItemValidation {
     @objc func importFromBrave() { app?.showImport() }
 
     /// ⌘\: fills the saved login into the field last clicked on the page.
-    @objc func fillPassword() { browser.passwordUI.fillShortcut(in: tab?.webView) }
+    @objc func fillPassword() {
+        // Only into the browser window in front, never one behind Settings or Passwords.
+        guard otherKeyWindow == nil else { return NSSound.beep() }
+        browser.passwordUI.fillShortcut(in: tab?.webView)
+    }
     @objc func showBookmarks() { app?.showBookmarks() }
 
     @objc func bookmarkPage() {
