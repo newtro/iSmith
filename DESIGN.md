@@ -4,7 +4,9 @@ A macOS browser for people who work across several organizations at once (consul
 contractors) and who use AI agents in the browser. Goal: never sign in again just to check an
 email or open a work item, and let agents work safely in the right identity.
 
-Status: design. No code yet.
+Status: sign-in spike proven (2026-10-02). In `spike/`, Scott's real accounts work: two
+Microsoft tenants (Contoso, Fabrikam) side by side, and two Etsy shops via two Google
+accounts, with one shared sign-in session per provider. Next: build plan.
 
 ## Decisions
 
@@ -45,7 +47,7 @@ new space. The model now separates two things:
   domain (e.g. Okta, AWS); it is shared by default like the rest. Providers may not overlap.
 - **Mechanism (WKWebView)**: one `WKWebsiteDataStore(forIdentifier:)` per space. Provider
   cookies are synced through a vault on one serial queue with per-space baselines (see
-  `spike/`). Proven by automated tests and Scott's sign-ins.
+  `spike/`). Proven by automated tests and Scott's sign-ins (2 Microsoft tenants, 2 Etsy shops).
 - **Limits**: company sign-in-frequency policies and device-based Conditional Access still
   apply.
 
