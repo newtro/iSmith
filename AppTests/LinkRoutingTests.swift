@@ -99,6 +99,8 @@ final class LinkRoutingTests: XCTestCase {
     }
 
     func testOutlookLinksGoWhereOutlookWasLastUsed() throws {
+        // The window counts as the one in use (the test host has no key window).
+        browser.routing.isInUse = { _ in true }
         let window = browser.newWindow(space: personal)
         browser.lastActiveWindow = window
         let mail = url("https://outlook.office.com/mail/inbox/id/AAQkAG")
@@ -170,6 +172,23 @@ final class LinkRoutingTests: XCTestCase {
         let second = try XCTUnwrap(browser.openIncoming(url("https://outlook.office.com/mail/inbox/id/2"))).tab
         XCTAssertEqual(second.keepAliveSetting, false)
         XCTAssertFalse(second.keepAlive)
+        XCTAssertNil(second.record(group: nil).keepAlive, "routing's choice isn't saved")
+        // Teams links (meetings) always stay kept alive.
+        _ = browser.openIncoming(url("https://teams.microsoft.com/l/chat/1"))
+        let meeting = try XCTUnwrap(browser.openIncoming(url("https://teams.microsoft.com/l/meetup-join/19%3ameeting"))).tab
+        XCTAssertTrue(meeting.keepAlive)
+        // Closing the kept-alive Outlook gives the other one Keep alive back.
+        let third = try XCTUnwrap(browser.openIncoming(url("https://outlook.office.com/mail/inbox/id/3"))).tab
+        XCTAssertFalse(third.keepAlive)
+        browser.closeTab(first.id, in: try XCTUnwrap(window.spaces[personal]))
+        XCTAssertTrue(second.keepAlive)
+        XCTAssertTrue(third.keepAlive)
+        // Moving a lowered tab to another space: it follows its page there.
+        let fourth = try XCTUnwrap(browser.openIncoming(url("https://outlook.office.com/mail/inbox/id/4"))).tab
+        XCTAssertFalse(fourth.keepAlive)
+        browser.moveTabs([fourth.id], from: try XCTUnwrap(window.spaces[personal]), in: window, toSpace: fabrikam)
+        XCTAssertTrue(fourth.keepAlive)
+        XCTAssertNil(fourth.keepAliveSetting)
         closeEverything()
     }
 
@@ -192,21 +211,33 @@ final class LinkRoutingTests: XCTestCase {
         browser.lastActiveWindow = window
         let link = url("https://dev.azure.com/contoso-dev/x")
         let opened = try XCTUnwrap(browser.openIncoming(link))
-        XCTAssertNil(browser.linkToReload(opened.tab), "still on the link's site")
+        XCTAssertEqual(browser.linkToReload(opened.tab), link, "still the link: it loads again in its new space")
         let redirected = Tab(url: url("https://login.microsoftonline.com/common/oauth2/authorize?state=abc"))
         browser.routing.linkArrived(redirected.id, url: link, openTabs: [opened.tab.id])
         XCTAssertEqual(browser.linkToReload(redirected), link)
         XCTAssertNil(browser.linkToReload(Tab(url: link)), "not from another app")
+        browser.routing.forget(opened.tab.id) // a link followed in the page
+        XCTAssertNil(browser.linkToReload(opened.tab), "moved on: keeps its own history")
         closeEverything()
     }
 
     /// Only the tab you're using marks Outlook's space: a page committing in a window that isn't
     /// key (here, none is) doesn't.
     func testBackgroundCommitsDontChangeLastUsed() throws {
+        var inUse = false
+        browser.routing.isInUse = { _ in inUse }
         let window = browser.newWindow(space: fabrikam)
         let outlook = browser.openTab(in: window, space: fabrikam, url: nil)
-        browser.noteVisibleUse(of: url("https://outlook.office.com/mail/"), tab: outlook, space: fabrikam)
-        XCTAssertTrue(browser.routing.store.state.lastUsed.isEmpty)
+        let mail = url("https://outlook.office.com/mail/")
+        browser.noteVisibleUse(of: mail, tab: outlook, space: fabrikam)
+        browser.select(try XCTUnwrap(browser.space(fabrikam)), in: window)
+        XCTAssertTrue(browser.routing.store.state.lastUsed.isEmpty, "a window you aren't using (or a restore at launch)")
+        inUse = true
+        let other = browser.openTab(in: window, space: fabrikam, url: nil, select: false)
+        browser.noteVisibleUse(of: mail, tab: other, space: fabrikam)
+        XCTAssertTrue(browser.routing.store.state.lastUsed.isEmpty, "a background tab")
+        browser.noteVisibleUse(of: mail, tab: outlook, space: fabrikam)
+        XCTAssertEqual(browser.routing.store.state.lastUsed, ["outlook": fabrikam], "the tab on screen in the window in use")
         closeEverything()
     }
 

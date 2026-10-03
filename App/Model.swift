@@ -19,6 +19,10 @@ final class Tab: ObservableObject, Identifiable {
     @Published private(set) var canGoForward = false
     /// The tab's own Keep alive setting; nil follows the automatic rule (Outlook, Teams, Gmail).
     @Published var keepAliveSetting: Bool?
+    /// Keep alive was turned off by link routing (a second Outlook in a space that already keeps
+    /// one alive), not by you: it isn't saved, and it's undone when the tab moves or the kept-alive
+    /// one closes.
+    var keepAliveLowered = false
     /// The policy the current web view was created with. WebKit reads
     /// `inactiveSchedulingPolicy` when a web view is created, so changing it means a new web view.
     private(set) var appliedKeepAlive: Bool?
@@ -182,7 +186,7 @@ final class Tab: ObservableObject, Identifiable {
 
     /// The tab as saved in session.json.
     func record(group: UUID?) -> TabRecord {
-        TabRecord(id: id, url: url, title: title, group: group, keepAlive: keepAliveSetting, history: history)
+        TabRecord(id: id, url: url, title: title, group: group, keepAlive: keepAliveLowered ? nil : keepAliveSetting, history: history)
     }
 }
 

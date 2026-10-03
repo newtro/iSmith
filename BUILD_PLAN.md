@@ -722,6 +722,142 @@ bookmarks into a space, move passwords into the P4 store, and build the import s
 Acceptance: links from Teams and Outlook to dev.azure.com/contoso-dev, Fabrikam SharePoint
 and Etsy each land in the right space.
 
+#### P6 notes (2026-10-03)
+
+Built and tested with injected links and a scratch data folder. The acceptance run (clicking real
+Teams and Outlook links with iSmith as the default browser) is still to do. It needs Scott to confirm
+macOS's "change your default web browser?" question.
+
+- **Registration**: Info.plist declares `CFBundleURLTypes` for http and https, and
+  `CFBundleDocumentTypes` for `public.html`, `public.xhtml` and `com.apple.webarchive`. The document
+  types rank Alternate, so installing iSmith never takes over .html files on its own. Checked
+  read-only on this Mac: `LSCopyAllHandlersForURLScheme("https")` lists
+  `com.scottsmith.ismith.debug`, and `NSWorkspace.urlsForApplications(toOpen:)` lists the Debug
+  app for https links and for `public.html`. The real default browser was never changed (it's still
+  Brave).
+- **Packages/Routing** (no UI, no dependencies) is saved in `routing.json` (owner-only, written
+  through a temporary file and a rename).
+  - **Patterns**: a host (`github.com`), a host and path prefix on segment boundaries
+    (`dev.azure.com/contoso-dev`, which matches `/contoso-dev/Storefront/…` but not
+    `/contoso-dev2`), or `*.fabrikam.com` (the domain and every subdomain). Matching ignores
+    case and `www.`. A port, if given, must match. A pasted scheme or trailing `/*` is dropped.
+    Only http and https links match. The editor rejects a misplaced `*`, a bad host or a bad port,
+    with a message.
+  - **Rules** are an ordered list; the first match wins. A rule for a deleted space is skipped,
+    and deleting a space removes its rules.
+  - **Shared-address sites**: Outlook, Teams, Microsoft 365, Gmail, and Etsy (both shops use the
+    same addresses). Each is a family of hosts, so Outlook at `outlook.cloud.microsoft` counts for
+    `outlook.office.com` links. With no rule, they open in the space the site was last used in.
+    "Used" means on screen in the key window of the active app, or moved into a space. A
+    background tab refreshing itself doesn't count, and neither does a window restored at launch.
+  - **Default space**: a Settings dropdown. Unset, or set to a deleted space, means the first
+    space in the rail.
+  - **Wrapped links**: Defender Safe Links (`*.safelinks.protection.outlook.com/?url=` and Teams'
+    Safe Links page) and Google's `google.<tld>/url?q=` are routed and learned by the link inside.
+    The wrapper is what opens, so the click-time check still runs.
+- **Incoming links** (`application(_:open:)`):
+  - Links that arrive before the browser starts are queued. A first launch from a link opens only
+    that link, with no home page tab (checked with a cold `open -a` on a fresh data folder).
+  - The link opens in a new tab of the routed space. It goes in the current window if that window
+    shows the space, else in the frontmost window that does, else the current window switches to
+    the space. With no window open it goes into the last closed window, else a new one. The window
+    comes forward.
+  - HTML files open in the Default space through `loadFileURL`, with read access to their folder.
+    They load afresh after a relaunch rather than from saved history.
+  - In a space that already keeps Outlook or Gmail alive, a further Outlook or Gmail link opens
+    without Keep alive, so links don't pile up copies that are never unloaded. That setting isn't
+    saved, and it's undone when the tab moves or the kept-alive tab closes. Teams links (meetings)
+    always stay kept alive.
+- **Learned rules**: a tab that came from another app and is moved to another space (dragged to the
+  rail, "Move to Space", the Dock) records its link's host and first path segment.
+  - When to offer: two moves of the same host and segment to one space offer `host/segment`.
+    Two moves of one host with different segments, all to one space, offer the host.
+  - What's never learned: shared-address sites, redirectors (aka.ms, t.co, bit.ly, …), wrappers,
+    and anything an existing rule already does.
+  - What counts once: a link moved again counts once. A link stops counting once you type an
+    address or follow a link in its tab.
+  - The bar: "Always open github.com/contoso-dev in Contoso?" with Always Open in Contoso / Not
+    Now / Never, in the window where the move happened.
+    - Accept puts the rule ahead of the first rule that would otherwise catch those links.
+    - Not Now needs two more moves before the rule is offered again.
+    - Never is listed in Settings, where it can be undone.
+  - A moved incoming tab loads its link again in the new space instead of replaying a sign-in
+    redirect or rewritten page that belongs to the old space.
+- **Dock menu**: "Open in Space ▸" lists the other spaces under the front tab's title. It moves that
+  tab, reloading it as the new space's accounts, and switches its window there. The link context
+  menu's "Open Link in Space ▸" came with P2.
+- **Default browser**: a first-run bar ("Make iSmith your default browser?", Make Default / Not
+  Now), shown once until answered (`defaultBrowserOffered` in routing.json), and a button in
+  Settings ▸ Links. Both call `NSWorkspace.setDefaultApplication(at:toOpenURLsWithScheme:)` for
+  http first, then https only if it still isn't iSmith's, and macOS asks the user to confirm. A
+  refusal (3072 or -128) isn't shown as an error. The LaunchServices calls sit behind the
+  `DefaultBrowser` seam, so tests use a fake.
+- **Settings ▸ Links**: default-browser status and button, the Default space dropdown, the rule list
+  (up/down, edit, delete, a space dropdown per rule, and Add Rule… in a sheet that checks the
+  pattern as you type), last-used sites, and suggestions turned off with "Never".
+- **Fixed on the way**: `openTab` and `ensureLoaded` now mark a tab as building as soon as its web
+  view is scheduled. Before, opening a tab in another space and then showing that space built and
+  loaded two web views (this also affected P2's "Open Link in Space").
+- **App hooks** (kept small for merging): `BrowserState` gained a `routing` property, the
+  last-used and learning calls in `shown`, `recordVisit` and `moveTab`, `routing.forget` on a
+  typed address or a followed link, `removeSpace`, `closeTab` (Keep alive back) and
+  `start(links:)`. `AppDelegate` gained `application(_:open:)`, `applicationDockMenu` and
+  `applicationDidBecomeActive`. `SpaceView` gained the bar, `SettingsView` the tab, and `Tab` the
+  `keepAliveLowered` flag. Everything else is in `LinkRouting.swift` and `LinkSettings.swift`.
+- **Smoke test** (scratch `ISMITH_DATA_DIR` with Personal, Contoso and Fabrikam; links sent with
+  `open -a <Debug app path>`; driven only through the Debug app's own pid with accessibility
+  actions; screenshots with `screencapture -l`):
+  - the first-run bar;
+  - `dev.azure.com/contoso-dev/…` opening in Contoso as a single tab, with no extra home tab;
+  - an unmatched GitHub link opening in Personal;
+  - two GitHub links moved to Contoso through the tab menu, which showed the suggestion bar.
+    Accepting saved the rule, and the third link went straight to Contoso;
+  - Settings ▸ Links, and the rule sheet's error and explanation;
+  - a cold launch from a `*.fabrikam.com` link opening in Fabrikam;
+  - a cold first launch from a link opening only that link.
+  The Dock menu wasn't clicked, because that would mean sending input to the Dock; the app tests
+  cover it.
+- **Tests**: `make test` is green.
+  - Routing: 26 tests. The pattern table and parsing, rules, Default space, deleted spaces,
+    families and last used, Safe Links and Google unwrapping (including a spoofed host),
+    learning, Not now and Never, rule placement, the moves cap, persistence across a relaunch, the
+    owner-only file, an unreadable file kept aside, a bad rule dropped rather than the file, and
+    unknown keys.
+  - App: 64 tests, 15 of them new in `LinkRoutingTests`. Dispatch to a space and window,
+    last-used from Outlook use and moves, window choice, no window, Safe Links, keep-alive copies,
+    reloading a moved link, background commits, learning end to end, Not now and Never, deleting
+    a space, the Dock menu, the default-browser seam and first-run offer with a fake
+    LaunchServices, and Info.plist plus LaunchServices registration.
+  - The app tests are synchronous, so their tabs close before any web view loads a real site.
+    tearDown deletes the WebKit stores they made.
+- **Review**: two adversarial rounds.
+  - Round 1 found two highs and six real-use mediums, all fixed:
+    - the highs: last used was keyed per host, so Outlook at `outlook.cloud.microsoft` didn't count
+      for `outlook.office.com` links; and Safe Links wrappers defeated rules and trained a rule
+      for the Safe Links host;
+    - the mediums: the Dock move built two web views; a moved link replayed a stale sign-in
+      redirect; background windows changed last used; Outlook links piled up kept-alive copies;
+      Etsy couldn't be routed; a link with no window also opened a home tab.
+  - Round 2 found no critical or high issues. Its four real-use mediums are fixed:
+    - a moved link now always reloads the link until you follow a link or type in the tab;
+    - restoring windows at launch no longer sets last used;
+    - Teams links keep Keep alive;
+    - a lowered Keep alive isn't saved and comes back on a move or when the kept-alive tab closes.
+  - Round 2's cheap lows are fixed too: a spoofable Google check, a link with only Settings open
+    losing the last window's tabs, blank file tabs after a relaunch, and stale last-used keys.
+- **Deferred** (low or hypothetical today):
+  - `buildWebView`'s `defer` can clear `isBuilding` for an older build that gave up while a newer
+    one is still running. This predates P6. A build generation would fix it.
+  - Learned rules are placed using host plus prefix, not the real links. A more specific rule
+    already in the list can still shadow one you accept.
+  - Learned patterns keep their path decoded, so a `%3F` in a path reloads as a broader rule.
+  - Very broad patterns (`*.com`) are accepted.
+  - "Not Now" on the first-run bar is final; Settings ▸ Links keeps the button.
+  - A group of incoming tabs moved together counts as several moves.
+  - The frontmost-window order isn't covered by tests, since test windows have no `NSWindow`.
+  - The refusal error codes and whether macOS changes https along with http are unverified until
+    Scott answers the real prompt. If https stays unchanged, iSmith asks for it separately.
+
 ### P7. Distribution (M)
 
 - **License (decided 2026-10-03)**: the ad-block converter (SafariConverterLib) is GPL-3.0 and is

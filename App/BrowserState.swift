@@ -203,7 +203,9 @@ final class BrowserState: NSObject, ObservableObject {
     /// aren't replaced in the saved session by an empty window.
     @discardableResult
     func newWindow(space spaceID: String? = nil, openHome: Bool = true) -> WindowState {
-        if windows.isEmpty, spaceID == nil, let restored = reopenLastWindow() { return restored }
+        // A link with no window open (Settings still open) goes into the window that was closed
+        // last, so its tabs aren't dropped from the saved session.
+        if windows.isEmpty, spaceID == nil || !openHome, let restored = reopenLastWindow() { return restored }
         let id = spaceID ?? currentWindow?.activeSpaceID ?? spaces.first?.id
         let window = WindowState()
         windows.append(window)
@@ -312,7 +314,8 @@ final class BrowserState: NSObject, ObservableObject {
     /// A tab came on screen: it loads (or reloads after a crash), and dialogs it was holding show.
     private func shown(_ tab: Tab, space spaceID: String) {
         tab.lastShown = Date()
-        if let url = tab.url { routing.store.noteUse(url, space: spaceID) }
+        // Only a tab you're looking at; restoring windows at launch doesn't count.
+        if let url = tab.url { noteVisibleUse(of: url, tab: tab, space: spaceID) }
         if tab.crashed, tab.crashTimes.count <= Self.maxAutomaticReloads { reloadAfterCrash(tab) }
         ensureLoaded(tab, space: spaceID)
         showPendingDialogs(of: tab)
@@ -541,7 +544,8 @@ final class BrowserState: NSObject, ObservableObject {
         #if DEBUG
         NSLog("iSmith: web view for \(request?.url?.host ?? tab.url?.host ?? "empty tab") in \(spaceID), keep alive \(keepAlive)")
         #endif
-        if let state { webView.interactionState = state }
+        // A file page's history would load it without read access (blank): files load afresh.
+        if let state, tab.url?.isFileURL != true { webView.interactionState = state }
         if let request {
             Self.load(request, in: webView)
         } else if state != nil, webView.url == nil, let url = tab.url {
@@ -588,6 +592,7 @@ final class BrowserState: NSObject, ObservableObject {
     /// stored as "automatic", so the tab keeps following its page. A loaded tab gets a new web view
     /// with the new policy right away, keeping its history.
     func setKeepAlive(_ on: Bool, for tab: Tab, in tabs: SpaceTabs) {
+        tab.keepAliveLowered = false
         tab.keepAliveSetting = on == KeepAlive.isAutomatic(tab.url) ? nil : on
         if tab.webView != nil, tab.appliedKeepAlive != tab.keepAlive {
             let state = tab.webView?.interactionState
@@ -630,6 +635,7 @@ final class BrowserState: NSObject, ObservableObject {
         if let webView = tab.webView { notifications.forget(webView) }
         tab.unload()
         tabs.take(id)
+        keepAliveClosed(tab, space: tabs.spaceID)
         if let returnTo {
             tabs.update { $0.select(returnTo) }
         }

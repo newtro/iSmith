@@ -190,6 +190,11 @@ final class LinkTargetTests: XCTestCase {
         XCTAssertEqual(LinkTarget.unwrap(url("https://statics.teams.cdn.office.net/evergreen-assets/safelinks/1/atp-safelinks.html?url=https%3A%2F%2Fgithub.com%2Fx&locale=en")).host, "github.com")
         XCTAssertEqual(LinkTarget.unwrap(url("https://www.google.com/url?q=https://etsy.com/listing/1&sa=D")).host, "etsy.com")
         XCTAssertEqual(LinkTarget.unwrap(url("https://example.com/?url=https://other.com")).host, "example.com", "only known wrappers")
+        XCTAssertEqual(LinkTarget.unwrap(url("https://www.google.co.uk/url?q=https://etsy.com/x")).host, "etsy.com")
+        XCTAssertEqual(LinkTarget.unwrap(url("https://google.evil.com/url?q=https://dev.azure.com/contoso-dev")).host,
+                       "google.evil.com", "not Google")
+        XCTAssertFalse(LinkTarget.isGoogle("google.evil.com"))
+        XCTAssertTrue(LinkTarget.isGoogle("google.com.au"))
         XCTAssertEqual(LinkTarget.unwrap(url("https://nam12.safelinks.protection.outlook.com/?url=javascript:alert(1)")).host,
                        "nam12.safelinks.protection.outlook.com", "only web addresses come out")
         var s = RoutingState()
@@ -381,6 +386,13 @@ final class RoutingStoreTests: XCTestCase {
         XCTAssertEqual(try String(contentsOf: store.movedAside!, encoding: .utf8), "{ not json")
         store.setDefaultSpace("x")
         XCTAssertEqual(RoutingStore(fileURL: file).state.defaultSpace, "x")
+    }
+
+    func testUnknownLastUsedKeysAreDropped() throws {
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let json = "{\"version\": 1, \"lastUsed\": {\"outlook.office.com\": \"a\", \"outlook\": \"b\"}}"
+        try Data(json.utf8).write(to: file)
+        XCTAssertEqual(RoutingStore(fileURL: file).state.lastUsed, ["outlook": "b"])
     }
 
     func testABadRuleIsDroppedNotTheFile() throws {

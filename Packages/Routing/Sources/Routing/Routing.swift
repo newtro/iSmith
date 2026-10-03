@@ -68,7 +68,7 @@ public enum LinkTarget {
         }
         if host.hasSuffix("safelinks.protection.outlook.com") { return param("url") }
         if host == "statics.teams.cdn.office.net", url.path.lowercased().contains("safelinks") { return param("url") }
-        if host == "google.com" || host.hasPrefix("google."), url.path == "/url" { return param("q") ?? param("url") }
+        if isGoogle(host), url.path == "/url" { return param("q") ?? param("url") }
         return nil
     }
 
@@ -82,7 +82,15 @@ public enum LinkTarget {
     public static func isRedirector(_ url: URL) -> Bool {
         guard let host = url.host.map(URLPattern.normalizedHost) else { return false }
         return redirectorHosts.contains(host) || host.hasSuffix("safelinks.protection.outlook.com")
-            || host == "statics.teams.cdn.office.net" || ((host == "google.com" || host.hasPrefix("google.")) && url.path == "/url")
+            || host == "statics.teams.cdn.office.net" || (isGoogle(host) && url.path == "/url")
+    }
+
+    /// google.com, google.de, google.co.uk, google.com.au; not google.evil.com.
+    static func isGoogle(_ host: String) -> Bool {
+        let labels = host.split(separator: ".")
+        guard labels.first == "google", (2...3).contains(labels.count) else { return false }
+        if labels.count == 2 { return labels[1].count <= 3 }
+        return ["co", "com"].contains(labels[1]) && labels[2].count == 2
     }
 }
 
@@ -282,7 +290,9 @@ public struct RoutingState: Codable, Equatable, Sendable {
         version = try c.decodeIfPresent(Int.self, forKey: .version) ?? Self.currentVersion
         rules = (try c.decodeIfPresent([Lossy<RoutingRule>].self, forKey: .rules) ?? []).compactMap(\.value)
         defaultSpace = try c.decodeIfPresent(String.self, forKey: .defaultSpace)
-        lastUsed = try c.decodeIfPresent([String: String].self, forKey: .lastUsed) ?? [:]
+        // Only sites iSmith knows (an older key is dropped rather than kept forever).
+        let known = Set(SharedAddressHosts.families.map(\.key))
+        lastUsed = (try c.decodeIfPresent([String: String].self, forKey: .lastUsed) ?? [:]).filter { known.contains($0.key) }
         moves = (try c.decodeIfPresent([Lossy<LearnedMove>].self, forKey: .moves) ?? []).compactMap(\.value)
         neverSuggest = (try c.decodeIfPresent([Lossy<URLPattern>].self, forKey: .neverSuggest) ?? []).compactMap(\.value)
         defaultBrowserOffered = try c.decodeIfPresent(Bool.self, forKey: .defaultBrowserOffered) ?? false
