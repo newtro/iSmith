@@ -51,11 +51,7 @@ final class Vault: ObservableObject {
     let fileURL: URL
 
     init() {
-        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent(Seed.isSelfTest ? "iSmithSpike-selftest" : "iSmithSpike", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true,
-                                                 attributes: [.posixPermissions: 0o700])
-        fileURL = dir.appendingPathComponent("vault.json")
+        fileURL = AppPaths.dir.appendingPathComponent("vault.json")
         if let data = try? Data(contentsOf: fileURL),
            let saved = try? JSONDecoder().decode([String: Entry].self, from: data) {
             entries = saved
@@ -67,6 +63,11 @@ final class Vault: ObservableObject {
 
     func set(_ records: [CookieRecord], for accountID: String) {
         entries[accountID] = Entry(cookies: records.sorted { $0.key < $1.key }, updated: Date())
+        save()
+    }
+
+    func remove(_ accountID: String) {
+        entries[accountID] = nil
         save()
     }
 

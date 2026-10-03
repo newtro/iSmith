@@ -1,18 +1,20 @@
 import SwiftUI
 
-/// An identity provider whose sign-in cookies belong to an account rather than a space.
-struct Provider: Hashable, Identifiable {
-    let id: String
-    /// Cookie domains owned by the provider. A cookie belongs to the provider when its domain
-    /// equals one of these or is a subdomain of one.
-    let domains: [String]
-    /// When set, only these cookie names are shared. Google sets many fast-changing app and
-    /// tracking cookies on google.com; only the sign-in session set needs to follow the account.
-    var names: Set<String>? = nil
-
-    func tracks(_ cookie: HTTPCookie) -> Bool {
-        owns(cookieDomain: cookie.domain) && (names?.contains(cookie.name) ?? true)
-    }
+/// A sign-in service whose cookies belong to an account rather than a space: an identity
+/// provider (Microsoft, Google) or any site you want one sign-in for across spaces.
+struct ProviderDef: Codable, Hashable, Identifiable {
+    var id: String
+    var name: String
+    /// Cookie domains owned by the provider: a cookie belongs to it when its domain equals one of
+    /// these or is a subdomain of one.
+    var domains: [String]
+    /// When set, only these cookie names are shared. Google sets many fast-changing tracking
+    /// cookies on google.com; only its sign-in set needs to follow the account.
+    var names: [String]?
+    /// Cookies that mean "signed in". When one appears in a space that has no account for this
+    /// provider, the app offers to save the sign-in as an account. Empty means never offer.
+    var sessionNames: [String]?
+    var builtIn = false
 
     func owns(cookieDomain: String) -> Bool {
         var host = cookieDomain.lowercased()
@@ -20,82 +22,221 @@ struct Provider: Hashable, Identifiable {
         return domains.contains { host == $0 || host.hasSuffix("." + $0) }
     }
 
-    static let microsoft = Provider(id: "Microsoft", domains: [
-        "login.microsoftonline.com", "login.microsoft.com", "login.windows.net", "login.live.com",
-    ])
-    static let google = Provider(id: "Google", domains: ["google.com"], names: [
-        "SID", "HSID", "SSID", "APISID", "SAPISID",
-        "__Secure-1PSID", "__Secure-3PSID", "__Secure-1PAPISID", "__Secure-3PAPISID",
-        "__Secure-1PSIDTS", "__Secure-3PSIDTS",
-        "LSID", "__Host-1PLSID", "__Host-3PLSID", "__Host-GAPS", "ACCOUNT_CHOOSER",
-    ])
-    static let github = Provider(id: "GitHub", domains: ["github.com"])
+    func tracks(_ cookie: HTTPCookie) -> Bool {
+        owns(cookieDomain: cookie.domain) && (names.map { $0.contains(cookie.name) } ?? true)
+    }
+
+    func indicatesSignIn(_ cookie: HTTPCookie) -> Bool {
+        guard let sessionNames, !sessionNames.isEmpty else { return false }
+        return tracks(cookie) && sessionNames.contains(cookie.name)
+    }
+
+    static let builtIns: [ProviderDef] = [
+        ProviderDef(id: "microsoft", name: "Microsoft",
+                    domains: ["login.microsoftonline.com", "login.microsoft.com", "login.windows.net"],
+                    sessionNames: ["ESTSAUTH", "ESTSAUTHPERSISTENT"], builtIn: true),
+        ProviderDef(id: "microsoft-personal", name: "Microsoft personal", domains: ["live.com"],
+                    sessionNames: ["MSPAuth", "WLSSC"], builtIn: true),
+        ProviderDef(id: "google", name: "Google", domains: ["google.com"], names: [
+            "SID", "HSID", "SSID", "APISID", "SAPISID",
+            "__Secure-1PSID", "__Secure-3PSID", "__Secure-1PAPISID", "__Secure-3PAPISID",
+            "__Secure-1PSIDTS", "__Secure-3PSIDTS",
+            "LSID", "__Host-1PLSID", "__Host-3PLSID", "__Host-GAPS", "ACCOUNT_CHOOSER",
+        ], sessionNames: ["SID", "__Secure-1PSID"], builtIn: true),
+        ProviderDef(id: "github", name: "GitHub", domains: ["github.com"],
+                    names: ["user_session", "__Host-user_session_same_site", "logged_in", "dotcom_user"],
+                    sessionNames: ["user_session"], builtIn: true),
+    ]
 }
 
 /// One sign-in at one provider. Its provider cookies live in the vault and are shared by every
 /// space bound to it.
-struct Account: Hashable, Identifiable {
-    let id: String
-    let provider: Provider
-    let name: String
-    var label: String { "\(provider.id): \(name)" }
+struct AccountDef: Codable, Hashable, Identifiable {
+    var id: String
+    var providerID: String
+    var name: String
 }
 
 /// A workspace with its own WebKit data store, bound to at most one account per provider.
-struct Space: Hashable, Identifiable {
-    let id: String
-    let name: String
-    let initials: String
-    let color: Color
-    let storeID: UUID
-    let accounts: [Account]
-    let home: URL
+struct SpaceDef: Codable, Hashable, Identifiable {
+    var id: String
+    var name: String
+    var color: Int
+    var storeID: UUID
+    /// Provider id → account id.
+    var bindings: [String: String]
+    var home: String
+    /// Providers whose sign-ins stay in this space only; the app won't offer to save them.
+    var localProviders: [String] = []
+
+    var initials: String {
+        let words = name.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).prefix(2)
+        let letters = words.compactMap(\.first).map { String($0).uppercased() }.joined()
+        return letters.isEmpty ? "?" : letters
+    }
+}
+
+enum Palette {
+    static let names = ["Blue", "Green", "Purple", "Amber", "Crimson", "Teal", "Pink", "Slate"]
+    private static let rgb: [(Double, Double, Double)] = [
+        (0.15, 0.39, 0.92), (0.08, 0.54, 0.35), (0.49, 0.23, 0.93), (0.76, 0.42, 0.02),
+        (0.75, 0.07, 0.24), (0.06, 0.46, 0.43), (0.86, 0.15, 0.55), (0.39, 0.45, 0.55),
+    ]
+    static func color(_ index: Int) -> Color {
+        let c = rgb[((index % rgb.count) + rgb.count) % rgb.count]
+        return Color(red: c.0, green: c.1, blue: c.2)
+    }
+}
+
+enum AppPaths {
+    /// `--selftest` uses its own folder and stores so real sign-ins are untouched.
+    static let isSelfTest = CommandLine.arguments.contains("--selftest")
+
+    static let dir: URL = {
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent(isSelfTest ? "iSmithSpike-selftest" : "iSmithSpike", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true,
+                                                 attributes: [.posixPermissions: 0o700])
+        return dir
+    }()
+}
+
+/// Providers, accounts and spaces, saved to config.json. Everything is editable in the app.
+@MainActor
+final class Config: ObservableObject {
+    struct File: Codable {
+        var providers: [ProviderDef]
+        var accounts: [AccountDef]
+        var spaces: [SpaceDef]
+    }
+
+    @Published private(set) var providers: [ProviderDef] = []
+    @Published private(set) var accounts: [AccountDef] = []
+    @Published private(set) var spaces: [SpaceDef] = []
+    private let fileURL = AppPaths.dir.appendingPathComponent("config.json")
+
+    init() {
+        if let data = try? Data(contentsOf: fileURL), let file = try? JSONDecoder().decode(File.self, from: data) {
+            providers = file.providers
+            accounts = file.accounts
+            spaces = file.spaces
+        } else {
+            (accounts, spaces) = Self.starter()
+        }
+        // Built-in provider definitions always come from the app, so fixes reach existing configs.
+        providers = ProviderDef.builtIns + providers.filter { !$0.builtIn }
+        save()
+    }
+
+    func provider(_ id: String) -> ProviderDef? { providers.first { $0.id == id } }
+    func account(_ id: String) -> AccountDef? { accounts.first { $0.id == id } }
+    func space(_ id: String) -> SpaceDef? { spaces.first { $0.id == id } }
+    func accounts(for providerID: String) -> [AccountDef] { accounts.filter { $0.providerID == providerID } }
+
+    /// The space's accounts in provider order.
+    func bound(_ space: SpaceDef) -> [(provider: ProviderDef, account: AccountDef)] {
+        providers.compactMap { p in space.bindings[p.id].flatMap(account).map { (p, $0) } }
+    }
+
+    func spaces(using accountID: String) -> [SpaceDef] {
+        spaces.filter { $0.bindings.values.contains(accountID) }
+    }
+
+    func label(_ account: AccountDef) -> String {
+        "\(provider(account.providerID)?.name ?? account.providerID): \(account.name)"
+    }
+
+    func upsert(_ space: SpaceDef) {
+        if let i = spaces.firstIndex(where: { $0.id == space.id }) { spaces[i] = space } else { spaces.append(space) }
+        save()
+    }
+
+    func removeSpace(_ id: String) {
+        spaces.removeAll { $0.id == id }
+        save()
+    }
+
+    @discardableResult
+    func addAccount(providerID: String, name: String) -> AccountDef {
+        let account = AccountDef(id: "acct-" + UUID().uuidString.prefix(8).lowercased(), providerID: providerID, name: name)
+        accounts.append(account)
+        save()
+        return account
+    }
+
+    func renameAccount(_ id: String, to name: String) {
+        guard let i = accounts.firstIndex(where: { $0.id == id }), !name.isEmpty else { return }
+        accounts[i].name = name
+        save()
+    }
+
+    func removeAccount(_ id: String) {
+        guard spaces(using: id).isEmpty else { return }
+        accounts.removeAll { $0.id == id }
+        save()
+    }
+
+    func addProvider(name: String, domains: [String], sessionNames: [String]) {
+        let id = "custom-" + UUID().uuidString.prefix(8).lowercased()
+        providers.append(ProviderDef(id: id, name: name, domains: domains,
+                                     sessionNames: sessionNames.isEmpty ? nil : sessionNames))
+        save()
+    }
+
+    func removeProvider(_ id: String) {
+        guard provider(id)?.builtIn == false, accounts(for: id).isEmpty else { return }
+        providers.removeAll { $0.id == id }
+        save()
+    }
+
+    private func save() {
+        do {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            try encoder.encode(File(providers: providers, accounts: accounts, spaces: spaces))
+                .write(to: fileURL, options: .atomic)
+        } catch {
+            NSLog("iSmith config save failed: \(error)")
+        }
+    }
+
+    /// First-run setup. Account ids and store ids match the earlier hard-coded spike, so sign-ins
+    /// made with it carry over.
+    private static func starter() -> ([AccountDef], [SpaceDef]) {
+        let accounts = [
+            AccountDef(id: "ms-contoso", providerID: "microsoft", name: "Contoso"),
+            AccountDef(id: "ms-fabrikam", providerID: "microsoft", name: "Fabrikam"),
+            AccountDef(id: "google-personal", providerID: "google", name: "personal"),
+            AccountDef(id: "google-newtro", providerID: "google", name: "Newtro Studios"),
+            AccountDef(id: "github-personal", providerID: "github", name: "personal"),
+        ]
+        func store(_ n: Int) -> UUID {
+            let base = "6F1C2A40-0000-4000-8000-00000000000\(n)"
+            return UUID(uuidString: AppPaths.isSelfTest ? base.replacingOccurrences(of: "-8000-", with: "-9000-") : base)!
+        }
+        let outlook = "https://outlook.office.com/mail/"
+        let spaces = [
+            SpaceDef(id: "contoso", name: "Contoso", color: 0, storeID: store(1),
+                     bindings: ["microsoft": "ms-contoso", "google": "google-personal", "github": "github-personal"], home: outlook),
+            SpaceDef(id: "fabrikam", name: "Fabrikam", color: 1, storeID: store(2),
+                     bindings: ["microsoft": "ms-fabrikam", "google": "google-personal", "github": "github-personal"], home: outlook),
+            SpaceDef(id: "contoso-b", name: "Contoso (second space)", color: 2, storeID: store(3),
+                     bindings: ["microsoft": "ms-contoso"], home: outlook),
+            SpaceDef(id: "personal", name: "Personal", color: 3, storeID: store(4),
+                     bindings: ["google": "google-personal", "github": "github-personal"], home: "https://mail.google.com/"),
+            SpaceDef(id: "newtro", name: "Newtro Studios", color: 4, storeID: store(5),
+                     bindings: ["google": "google-newtro"], home: "https://www.etsy.com/your/shops/me/dashboard"),
+        ]
+        return (accounts, spaces)
+    }
 }
 
 struct QuickLink: Identifiable {
     let name: String
     let url: URL
     var id: String { name }
-}
 
-enum Seed {
-    /// `--selftest` runs against separate stores and a separate vault so real sign-ins are untouched.
-    static let isSelfTest = CommandLine.arguments.contains("--selftest")
-    static let msContoso = Account(id: "ms-contoso", provider: .microsoft, name: "Contoso")
-    static let msFabrikam = Account(id: "ms-fabrikam", provider: .microsoft, name: "Fabrikam")
-    static let googlePersonal = Account(id: "google-personal", provider: .google, name: "personal")
-    static let googleNewtro = Account(id: "google-newtro", provider: .google, name: "Newtro Studios")
-    static let githubPersonal = Account(id: "github-personal", provider: .github, name: "personal")
-    static let accounts = [msContoso, msFabrikam, googlePersonal, googleNewtro, githubPersonal]
-
-    static let outlook = URL(string: "https://outlook.office.com/mail/")!
-    static let gmail = URL(string: "https://mail.google.com/")!
-    static let etsy = URL(string: "https://www.etsy.com/your/shops/me/dashboard")!
-
-    // Store identifiers are fixed so each space reopens the same WebKit store on every launch.
-    static let spaces: [Space] = [
-        Space(id: "contoso", name: "Contoso", initials: "M", color: Color(red: 0.15, green: 0.39, blue: 0.92),
-              storeID: storeID("6F1C2A40-0000-4000-8000-000000000001"),
-              accounts: [msContoso, googlePersonal, githubPersonal], home: outlook),
-        Space(id: "fabrikam", name: "Fabrikam", initials: "TP", color: Color(red: 0.08, green: 0.54, blue: 0.35),
-              storeID: storeID("6F1C2A40-0000-4000-8000-000000000002"),
-              accounts: [msFabrikam, googlePersonal, githubPersonal], home: outlook),
-        Space(id: "contoso-b", name: "Contoso (second space)", initials: "M2", color: Color(red: 0.49, green: 0.23, blue: 0.93),
-              storeID: storeID("6F1C2A40-0000-4000-8000-000000000003"),
-              accounts: [msContoso], home: outlook),
-        Space(id: "personal", name: "Personal", initials: "P", color: Color(red: 0.76, green: 0.42, blue: 0.02),
-              storeID: storeID("6F1C2A40-0000-4000-8000-000000000004"),
-              accounts: [googlePersonal, githubPersonal], home: gmail),
-        Space(id: "newtro", name: "Newtro Studios", initials: "NS", color: Color(red: 0.75, green: 0.07, blue: 0.24),
-              storeID: storeID("6F1C2A40-0000-4000-8000-000000000005"),
-              accounts: [googleNewtro], home: etsy),
-    ]
-
-    private static func storeID(_ base: String) -> UUID {
-        UUID(uuidString: isSelfTest ? base.replacingOccurrences(of: "-8000-", with: "-9000-") : base)!
-    }
-
-    static let quickLinks: [QuickLink] = [
+    static let all: [QuickLink] = [
         ("Outlook", "https://outlook.office.com/mail/"),
         ("Azure DevOps", "https://dev.azure.com/contoso-dev"),
         ("Azure portal", "https://portal.azure.com"),

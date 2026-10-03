@@ -11,13 +11,14 @@ struct SelfTest {
     func run() async {
         if CommandLine.arguments.contains("--phase=write") { return await writePhase() }
         if CommandLine.arguments.contains("--phase=read") { return await readPhase() }
+        if CommandLine.arguments.contains("--phase=config") { return await configPhase() }
         var failures: [String] = []
         func check(_ ok: Bool, _ what: String) {
             print((ok ? "PASS  " : "FAIL  ") + what)
             if !ok { failures.append(what) }
         }
 
-        let byID = Dictionary(uniqueKeysWithValues: Seed.spaces.map { ($0.id, $0) })
+        let byID = Dictionary(uniqueKeysWithValues: browser.config.spaces.map { ($0.id, $0) })
         let m = await sync.attach(byID["contoso"]!)
         let t = await sync.attach(byID["fabrikam"]!)
         let b = await sync.attach(byID["contoso-b"]!)
@@ -85,7 +86,7 @@ struct SelfTest {
 
     /// Relaunch test, part 1: sign-in cookies (one session-only) appear in Contoso, then the app quits.
     private func writePhase() async {
-        let m = await sync.attach(Seed.spaces.first { $0.id == "contoso" }!)
+        let m = await sync.attach(browser.config.space("contoso")!)
         await m.httpCookieStore.setCookie(cookie("LSID", "s1", "accounts.google.com", expires: nil, secure: true))
         await m.httpCookieStore.setCookie(cookie("ismith_relaunch_ms", "m1", "login.microsoftonline.com",
                                                  expires: Date().addingTimeInterval(3600), secure: true))
@@ -102,8 +103,8 @@ struct SelfTest {
             print((ok ? "PASS  " : "FAIL  ") + what)
             if !ok { failures.append(what) }
         }
-        let t = await sync.attach(Seed.spaces.first { $0.id == "fabrikam" }!)
-        let b = await sync.attach(Seed.spaces.first { $0.id == "contoso-b" }!)
+        let t = await sync.attach(browser.config.space("fabrikam")!)
+        let b = await sync.attach(browser.config.space("contoso-b")!)
         check(await value(t, "LSID") == "s1", "After relaunch, Google session cookie is in Fabrikam")
         check(await value(b, "ismith_relaunch_ms") == "m1", "After relaunch, Contoso Microsoft cookie is in the second Contoso space")
         check(await value(t, "ismith_relaunch_ms") == nil, "After relaunch, Contoso Microsoft cookie is still not in Fabrikam")
@@ -112,6 +113,80 @@ struct SelfTest {
         await settle()
         print(failures.isEmpty ? "RELAUNCH OK" : "RELAUNCH FAILED: \(failures.count)")
         exit(failures.isEmpty ? 0 : 1)
+    }
+
+    /// Space and account management without code: saving a noticed sign-in, creating spaces with
+    /// existing and new accounts, switching a space to another account, and unbinding.
+    private func configPhase() async {
+        var failures: [String] = []
+        func check(_ ok: Bool, _ what: String) {
+            print((ok ? "PASS  " : "FAIL  ") + what)
+            if !ok { failures.append(what) }
+        }
+        let config = browser.config
+        let hour = Date().addingTimeInterval(3600)
+        let m = await sync.attach(config.space("contoso")!)
+        let b = await sync.attach(config.space("contoso-b")!)
+        let t = await sync.attach(config.space("fabrikam")!)
+        await m.httpCookieStore.setCookie(cookie("SID", "c1", ".google.com", expires: hour))
+        await settle()
+
+        // A Google sign-in in a space with no Google account is noticed, then saved as the shared one.
+        await b.httpCookieStore.setCookie(cookie("SID", "d1", ".google.com", expires: hour))
+        await settle()
+        check(sync.detected["contoso-b"]?.contains("google") == true, "Google sign-in noticed in a space with no Google account")
+        browser.saveDetected(spaceID: "contoso-b", providerID: "google", choice: .existing("google-personal"), newName: "")
+        await settle()
+        check(config.space("contoso-b")?.bindings["google"] == "google-personal", "Saved sign-in binds the space to the chosen account")
+        check(await value(m, "SID") == "d1", "Saved sign-in is shared with other spaces using that account")
+        check(sync.detected["contoso-b"]?.contains("google") != true, "Offer disappears after saving")
+
+        // New space with an existing account starts signed in; with a new account, starts empty.
+        browser.createSpace(name: "Fresh", color: 5, home: "", choices: ["google": .existing("google-personal")], newNames: [:])
+        let fresh = config.spaces.first { $0.name == "Fresh" }!
+        let f = await sync.attach(fresh)
+        check(await value(f, "SID") == "d1", "New space using an existing account is signed in immediately")
+        browser.createSpace(name: "Brand New", color: 6, home: "", choices: ["google": .new], newNames: ["google": "Test Google"])
+        let brand = config.spaces.first { $0.name == "Brand New" }!
+        let n = await sync.attach(brand)
+        check(config.accounts(for: "google").contains { $0.name == "Test Google" }, "New account is created from the space editor")
+        check(await value(n, "SID") == nil, "New space with a new account starts signed out")
+        await n.httpCookieStore.setCookie(cookie("SID", "n1", ".google.com", expires: hour))
+        await settle()
+        let testAccount = config.accounts(for: "google").first { $0.name == "Test Google" }!
+        check(browser.vault.records(for: testAccount.id)?.first { $0.name == "SID" }?.value == "n1", "Signing in to a new account saves it")
+        check(await value(m, "SID") == "d1", "A different Google account does not leak into other spaces")
+
+        // Switching a space to another Microsoft account replaces its sign-in with that account's.
+        await m.httpCookieStore.setCookie(cookie("ismith_probe_ms", "m1", "login.microsoftonline.com", expires: hour, secure: true))
+        await t.httpCookieStore.setCookie(cookie("ismith_probe_ms", "t1", "login.microsoftonline.com", expires: hour, secure: true))
+        await settle()
+        update("fabrikam") { $0["microsoft"] = .existing("ms-contoso") }
+        await settle()
+        check(await value(t, "ismith_probe_ms") == "m1", "Switching a space to another account loads that account's sign-in")
+        check(browser.vault.records(for: "ms-fabrikam")?.first { $0.name == "ismith_probe_ms" }?.value == "t1", "The old account keeps its own sign-in")
+
+        // Unbinding: the space keeps its cookies but stops sharing them.
+        update("fabrikam") { $0["google"] = AccountChoice.none }
+        await settle()
+        await t.httpCookieStore.setCookie(cookie("SID", "z9", ".google.com", expires: hour))
+        await settle()
+        check(await value(m, "SID") == "d1", "After unbinding, the space's Google changes stay local")
+        check(sync.detected["fabrikam"]?.contains("google") == true, "Unbound sign-in is offered for saving")
+        browser.keepLocal(spaceID: "fabrikam", providerID: "google")
+        sync.rescanAll()
+        await settle()
+        check(sync.detected["fabrikam"]?.contains("google") != true, "Keep in this space only stops the offer")
+
+        print(failures.isEmpty ? "CONFIG OK" : "CONFIG FAILED: \(failures.count)")
+        exit(failures.isEmpty ? 0 : 1)
+    }
+
+    private func update(_ spaceID: String, _ change: (inout [String: AccountChoice]) -> Void) {
+        let def = browser.config.space(spaceID)!
+        var choices = def.bindings.mapValues { AccountChoice.existing($0) }
+        change(&choices)
+        browser.updateSpace(spaceID, name: def.name, color: def.color, home: def.home, choices: choices, newNames: [:])
     }
 
     private func settle() async {

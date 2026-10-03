@@ -11,20 +11,28 @@ struct ISmithSpikeApp: App {
                 .environmentObject(browser)
                 .environmentObject(browser.vault)
                 .environmentObject(browser.sync)
+                .environmentObject(browser.config)
                 .frame(minWidth: 1100, minHeight: 700)
         }
         .commands {
             CommandGroup(replacing: .newItem) {
                 Button("New Tab") { browser.newTabInActive() }
                     .keyboardShortcut("t")
+                Button("New Space…") { browser.editing = EditorRequest(spaceID: nil) }
+                    .keyboardShortcut("n", modifiers: [.command, .shift])
                 Button("Close Tab") { browser.closeSelectedTab() }
                     .keyboardShortcut("w")
             }
             CommandMenu("Spaces") {
-                ForEach(Array(Seed.spaces.enumerated()), id: \.element.id) { index, space in
-                    Button(space.name) { browser.select(index: index) }
+                ForEach(0..<9, id: \.self) { index in
+                    Button("Space \(index + 1)") { browser.select(index: index) }
                         .keyboardShortcut(KeyEquivalent(Character(String(index + 1))), modifiers: .command)
                 }
+                Divider()
+                Button("Edit Current Space…") {
+                    if let id = browser.active?.id { browser.editing = EditorRequest(spaceID: id) }
+                }
+                .keyboardShortcut(",", modifiers: [.command, .shift])
             }
         }
     }

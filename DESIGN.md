@@ -39,8 +39,16 @@ Status: design. No code yet.
   accounts) are not providers: their cookies stay in the space and use the space's account.
   Two shops = two spaces (Personal with Google: personal, Newtro Studios with Google: Newtro
   Studios), both signed in at once.
-- **Discovery**: signing in as an account the browser doesn't know offers to save it as a new
-  account.
+- **Providers are data, not code.** Built-ins: Microsoft (work/school), Microsoft personal,
+  Google (sign-in cookie allowlist), GitHub. Any other site can be added as a provider in the app
+  (name, cookie domains, optional signed-in cookie names), e.g. Okta, AWS, or Etsy if one Etsy
+  sign-in should follow you across spaces.
+- **Discovery**: when a signed-in cookie for a provider appears in a space with no account for
+  it, a banner offers "Save as new account / an existing account / Keep in this space only".
+- **Editing**: spaces are created, edited (name, color, home page, one account per provider,
+  or "New account…") and deleted in the app. Switching a space to another account signs it out
+  of the old one and loads the new one's sign-in. Accounts can be renamed, signed out
+  everywhere, or removed once unused.
 - **Mechanism (WKWebView)**: one `WKWebsiteDataStore(forIdentifier:)` per space. Provider cookies
   are copied from the vault into the space store; `WKHTTPCookieStoreObserver` writes changes back.
   **Risk**: unproven. Spike: two MS tenants side by side + shared Google OAuth.

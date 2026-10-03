@@ -5,50 +5,64 @@ struct ContentView: View {
     @EnvironmentObject private var browser: BrowserState
 
     var body: some View {
-        let space = browser.active
         HStack(spacing: 0) {
             Rail()
-            SpaceView(space: space)
-                .id(space.id)
-            if browser.showVault {
+            if let space = browser.active {
+                SpaceView(space: space)
+                    .id(space.id)
+                    // Tinted chrome: the frame reshades to the active space's color.
+                    .background(space.color.opacity(0.16))
+            } else {
+                VStack(spacing: 12) {
+                    Text("No spaces yet").font(.title3)
+                    Button("New Space…") { browser.editing = EditorRequest(spaceID: nil) }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            if browser.showAccounts {
                 Divider()
-                VaultPanel()
-                    .frame(width: 340)
+                AccountsPanel()
+                    .frame(width: 360)
             }
         }
-        // Tinted chrome: the whole frame reshades to the active space's color.
-        .background(space.space.color.opacity(0.16))
         .background(Color(nsColor: .windowBackgroundColor))
         .animation(.easeInOut(duration: 0.25), value: browser.activeID)
+        .sheet(item: $browser.editing) { request in
+            SpaceEditor(request: request)
+        }
         .onAppear { browser.start() }
     }
 }
+
+// MARK: - Rail
 
 private struct Rail: View {
     @EnvironmentObject private var browser: BrowserState
 
     var body: some View {
         VStack(spacing: 10) {
-            ForEach(Array(browser.spaces.enumerated()), id: \.element.id) { index, state in
-                let active = state.id == browser.activeID
-                Button { browser.select(state) } label: {
-                    Text(state.space.initials)
-                        .font(.system(size: 12, weight: .bold))
-                        .frame(width: 40, height: 40)
-                        .background(RoundedRectangle(cornerRadius: 11)
-                            .fill(active ? state.space.color : state.space.color.opacity(0.18)))
-                        .foregroundStyle(active ? Color.white : state.space.color)
+            ScrollView(showsIndicators: false) {
+                VStack(spacing: 10) {
+                    ForEach(Array(browser.spaces.enumerated()), id: \.element.id) { index, state in
+                        RailItem(state: state, index: index)
+                    }
+                    Button { browser.editing = EditorRequest(spaceID: nil) } label: {
+                        Image(systemName: "plus")
+                            .frame(width: 40, height: 40)
+                            .overlay(RoundedRectangle(cornerRadius: 11).strokeBorder(style: StrokeStyle(lineWidth: 1.5, dash: [4])))
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("New space  ⇧⌘N")
                 }
-                .buttonStyle(.plain)
-                .help("\(state.space.name)  ⌘\(index + 1)")
+                .padding(.vertical, 2)
             }
-            Spacer()
-            Button { browser.showVault.toggle() } label: {
-                Image(systemName: "key.horizontal")
+            Button { browser.showAccounts.toggle() } label: {
+                Image(systemName: "person.2.badge.key")
                     .frame(width: 40, height: 40)
             }
             .buttonStyle(.plain)
-            .help("Show or hide the vault panel")
+            .help("Accounts and sign-ins")
         }
         .padding(.vertical, 12)
         .frame(width: 64)
@@ -56,12 +70,42 @@ private struct Rail: View {
     }
 }
 
+private struct RailItem: View {
+    @EnvironmentObject private var browser: BrowserState
+    @ObservedObject var state: SpaceState
+    let index: Int
+
+    var body: some View {
+        let active = state.id == browser.activeID
+        Button { browser.select(state) } label: {
+            Text(state.def.initials)
+                .font(.system(size: 12, weight: .bold))
+                .frame(width: 40, height: 40)
+                .background(RoundedRectangle(cornerRadius: 11).fill(active ? state.color : state.color.opacity(0.18)))
+                .foregroundStyle(active ? Color.white : state.color)
+        }
+        .buttonStyle(.plain)
+        .help(state.def.name + (index < 9 ? "  ⌘\(index + 1)" : ""))
+        .contextMenu {
+            Button("Edit Space…") { browser.editing = EditorRequest(spaceID: state.id) }
+            Divider()
+            Button("Delete Space…", role: .destructive) { browser.deleteSpace(state.id) }
+        }
+    }
+}
+
+// MARK: - Space
+
 private struct SpaceView: View {
     @EnvironmentObject private var browser: BrowserState
+    @EnvironmentObject private var sync: CookieSync
     @ObservedObject var space: SpaceState
 
     var body: some View {
         VStack(spacing: 0) {
+            ForEach(Array(sync.detected[space.id] ?? []).sorted(), id: \.self) { providerID in
+                SignInBanner(space: space, providerID: providerID)
+            }
             TabStrip(space: space)
             if let tab = space.selected {
                 Toolbar(space: space, tab: tab)
@@ -69,14 +113,54 @@ private struct SpaceView: View {
                 WebViewHost(webView: tab.webView)
                     .id(tab.id)
                     .clipShape(RoundedRectangle(cornerRadius: 8))
-                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(space.space.color.opacity(0.6), lineWidth: 1.5))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(space.color.opacity(0.6), lineWidth: 1.5))
                     .padding([.horizontal, .bottom], 8)
             } else {
                 Spacer()
-                Text("Opening \(space.space.name)…").foregroundStyle(.secondary)
+                Text("Opening \(space.def.name)…").foregroundStyle(.secondary)
                 Spacer()
             }
         }
+    }
+}
+
+/// Offered when someone signs in to a provider in a space that has no account for it.
+private struct SignInBanner: View {
+    @EnvironmentObject private var browser: BrowserState
+    @EnvironmentObject private var config: Config
+    @ObservedObject var space: SpaceState
+    let providerID: String
+    @State private var choice: AccountChoice = .new
+    @State private var newName = ""
+
+    var body: some View {
+        let provider = config.provider(providerID)
+        HStack(spacing: 10) {
+            Image(systemName: "person.crop.circle.badge.plus").foregroundStyle(space.color)
+            Text("You signed in to \(provider?.name ?? providerID) in this space.")
+            Picker("Save as", selection: $choice) {
+                Text("New account…").tag(AccountChoice.new)
+                ForEach(config.accounts(for: providerID)) { account in
+                    Text(account.name).tag(AccountChoice.existing(account.id))
+                }
+            }
+            .fixedSize()
+            if choice == .new {
+                TextField("Account name", text: $newName)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 160)
+            }
+            Button("Save") {
+                browser.saveDetected(spaceID: space.id, providerID: providerID, choice: choice, newName: newName)
+            }
+            .buttonStyle(.borderedProminent)
+            Button("Keep in this space only") { browser.keepLocal(spaceID: space.id, providerID: providerID) }
+            Spacer()
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(space.color.opacity(0.12))
+        .onAppear { if newName.isEmpty { newName = space.def.name } }
     }
 }
 
@@ -87,8 +171,8 @@ private struct TabStrip: View {
     var body: some View {
         HStack(spacing: 6) {
             HStack(spacing: 6) {
-                RoundedRectangle(cornerRadius: 3).fill(space.space.color).frame(width: 10, height: 10)
-                Text(space.space.name).fontWeight(.semibold)
+                RoundedRectangle(cornerRadius: 3).fill(space.color).frame(width: 10, height: 10)
+                Text(space.def.name).fontWeight(.semibold)
             }
             .padding(.trailing, 6)
             ScrollView(.horizontal, showsIndicators: false) {
@@ -133,6 +217,7 @@ private struct TabButton: View {
 }
 
 private struct Toolbar: View {
+    @EnvironmentObject private var config: Config
     @ObservedObject var space: SpaceState
     @ObservedObject var tab: Tab
     @State private var address = ""
@@ -151,18 +236,18 @@ private struct Toolbar: View {
                 .focused($addressFocused)
                 .onSubmit(go)
             Menu("Go") {
-                ForEach(Seed.quickLinks) { link in
+                ForEach(QuickLink.all) { link in
                     Button(link.name) { tab.webView.load(URLRequest(url: link.url)) }
                 }
             }
             .fixedSize()
             HStack(spacing: 4) {
-                ForEach(space.space.accounts) { account in
-                    Text(account.label)
+                ForEach(config.bound(space.def), id: \.account.id) { pair in
+                    Text("\(pair.provider.name): \(pair.account.name)")
                         .font(.caption)
                         .padding(.horizontal, 7).padding(.vertical, 2)
-                        .background(Capsule().fill(space.space.color.opacity(0.18)))
-                        .overlay(Capsule().stroke(space.space.color.opacity(0.5)))
+                        .background(Capsule().fill(space.color.opacity(0.18)))
+                        .overlay(Capsule().stroke(space.color.opacity(0.5)))
                 }
             }
         }
@@ -196,25 +281,173 @@ private struct Toolbar: View {
     }
 }
 
-private struct VaultPanel: View {
+// MARK: - Space editor
+
+private struct SpaceEditor: View {
     @EnvironmentObject private var browser: BrowserState
-    @EnvironmentObject private var vault: Vault
+    @EnvironmentObject private var config: Config
+    @Environment(\.dismiss) private var dismiss
+    let request: EditorRequest
+
+    @State private var name = ""
+    @State private var color = 0
+    @State private var home = ""
+    @State private var choices: [String: AccountChoice] = [:]
+    @State private var newNames: [String: String] = [:]
+    @State private var loaded = false
+
+    private var existing: SpaceDef? { request.spaceID.flatMap(config.space) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text(existing == nil ? "New Space" : "Edit \(existing!.name)")
+                .font(.headline)
+                .padding([.horizontal, .top], 20)
+            Form {
+                TextField("Name", text: $name)
+                Picker("Color", selection: $color) {
+                    ForEach(Palette.names.indices, id: \.self) { i in
+                        Label { Text(Palette.names[i]) } icon: {
+                            Image(systemName: "circle.fill").foregroundStyle(Palette.color(i))
+                        }
+                        .tag(i)
+                    }
+                }
+                TextField("Home page", text: $home, prompt: Text("https://… (optional)"))
+                Section {
+                    ForEach(config.providers) { provider in
+                        providerRow(provider)
+                    }
+                } header: {
+                    Text("Accounts")
+                } footer: {
+                    Text("One account per provider. Spaces that use the same account share its sign-in. Switching an existing space to a different account signs it out of the old one.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            .formStyle(.grouped)
+            HStack {
+                if let existing {
+                    Button("Delete Space…", role: .destructive) {
+                        dismiss()
+                        browser.deleteSpace(existing.id)
+                    }
+                }
+                Spacer()
+                Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button(existing == nil ? "Create Space" : "Save") { save() }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+            .padding(20)
+        }
+        .frame(width: 560, height: 620)
+        .onAppear(perform: load)
+    }
+
+    @ViewBuilder
+    private func providerRow(_ provider: ProviderDef) -> some View {
+        let binding = Binding<AccountChoice>(
+            get: { choices[provider.id] ?? .none },
+            set: { choices[provider.id] = $0 })
+        VStack(alignment: .leading, spacing: 4) {
+            Picker(provider.name, selection: binding) {
+                Text("None").tag(AccountChoice.none)
+                ForEach(config.accounts(for: provider.id)) { account in
+                    Text(account.name).tag(AccountChoice.existing(account.id))
+                }
+                Text("New account…").tag(AccountChoice.new)
+            }
+            if binding.wrappedValue == .new {
+                TextField("New account name", text: Binding(
+                    get: { newNames[provider.id] ?? "" },
+                    set: { newNames[provider.id] = $0 }),
+                          prompt: Text(name.isEmpty ? "Account name" : name))
+                Text("Sign in to \(provider.name) in this space after saving.")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else if case .existing(let id) = binding.wrappedValue {
+                let others = config.spaces(using: id).filter { $0.id != existing?.id }.map(\.name)
+                if !others.isEmpty {
+                    Text("Shared with \(others.joined(separator: ", "))")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    private func load() {
+        guard !loaded else { return }
+        loaded = true
+        if let existing {
+            name = existing.name
+            color = existing.color
+            home = existing.home
+            choices = existing.bindings.mapValues { AccountChoice.existing($0) }
+        } else {
+            color = config.spaces.count % Palette.names.count
+        }
+    }
+
+    private func save() {
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        var homeURL = home.trimmingCharacters(in: .whitespaces)
+        if !homeURL.isEmpty, !homeURL.contains("://") { homeURL = "https://" + homeURL }
+        if let existing {
+            browser.updateSpace(existing.id, name: trimmed, color: color, home: homeURL, choices: choices, newNames: newNames)
+        } else {
+            browser.createSpace(name: trimmed, color: color, home: homeURL, choices: choices, newNames: newNames)
+        }
+        dismiss()
+    }
+}
+
+// MARK: - Accounts panel
+
+private struct AccountsPanel: View {
+    @EnvironmentObject private var browser: BrowserState
+    @EnvironmentObject private var config: Config
     @EnvironmentObject private var sync: CookieSync
+    @State private var showAddProvider = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
-                Text("Vault").font(.headline)
+                Text("Accounts").font(.headline)
                 Spacer()
                 Button("Rescan") { sync.rescanAll() }
             }
             .padding(12)
             Divider()
             ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
-                    ForEach(Seed.accounts) { account in
-                        AccountRow(account: account, entry: vault.entries[account.id])
+                VStack(alignment: .leading, spacing: 14) {
+                    ForEach(config.providers) { provider in
+                        let accounts = config.accounts(for: provider.id)
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Text(provider.name).font(.subheadline.weight(.semibold))
+                                Spacer()
+                                if !provider.builtIn {
+                                    Button("Remove") { config.removeProvider(provider.id) }
+                                        .buttonStyle(.borderless)
+                                        .disabled(!accounts.isEmpty)
+                                        .help(accounts.isEmpty ? "Remove this provider" : "Remove its accounts first")
+                                }
+                            }
+                            Text(provider.domains.joined(separator: ", "))
+                                .font(.caption2.monospaced()).foregroundStyle(.secondary)
+                            if accounts.isEmpty {
+                                Text("No accounts").font(.caption).foregroundStyle(.secondary)
+                            }
+                            ForEach(accounts) { account in
+                                AccountRow(account: account)
+                            }
+                        }
                     }
+                    DisclosureGroup("Add a provider", isExpanded: $showAddProvider) {
+                        AddProviderForm { showAddProvider = false }
+                    }
+                    .font(.subheadline)
                     Divider()
                     Text("Sync log").font(.subheadline.weight(.semibold))
                     ForEach(sync.log.reversed()) { line in
@@ -234,37 +467,86 @@ private struct VaultPanel: View {
 
 private struct AccountRow: View {
     @EnvironmentObject private var browser: BrowserState
+    @EnvironmentObject private var config: Config
+    @EnvironmentObject private var vault: Vault
     @EnvironmentObject private var sync: CookieSync
-    let account: Account
-    let entry: Vault.Entry?
+    let account: AccountDef
+    @State private var name = ""
 
     var body: some View {
-        let users = browser.spaces.filter { $0.space.accounts.contains(account) }
+        let users = config.spaces(using: account.id)
+        let entry = vault.entries[account.id]
         VStack(alignment: .leading, spacing: 4) {
             HStack {
-                Text(account.label).fontWeight(.semibold)
+                TextField("Name", text: $name)
+                    .textFieldStyle(.plain)
+                    .fontWeight(.medium)
+                    .onSubmit { config.renameAccount(account.id, to: name) }
                 Spacer()
-                Text(entry.map { "\($0.cookies.count) cookies" } ?? "not seen")
+                Text(entry.map { $0.cookies.isEmpty ? "signed out" : "\($0.cookies.count) cookies" } ?? "not signed in")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            Text(users.map { $0.space.name + (sync.attached.contains($0.id) ? "" : " (not open)") }.joined(separator: " · "))
+            Text(users.isEmpty ? "Not used by any space"
+                 : users.map { $0.name + (sync.attached.contains($0.id) ? "" : " (closed)") }.joined(separator: " · "))
                 .font(.caption).foregroundStyle(.secondary)
-            if let entry, !entry.cookies.isEmpty {
-                DisclosureGroup("Cookie names") {
-                    VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 12) {
+                Button("Sign out everywhere") { browser.signOutEverywhere(account.id) }
+                    .disabled(entry?.cookies.isEmpty ?? true)
+                Button("Remove") { browser.removeAccount(account.id) }
+                    .disabled(!users.isEmpty)
+                    .help(users.isEmpty ? "Remove this account" : "Switch the spaces using it to another account first")
+                if let entry, !entry.cookies.isEmpty {
+                    Menu("Cookies") {
                         ForEach(entry.cookies, id: \.key) { cookie in
-                            Text("\(cookie.name)  ·  \(cookie.domain)\(cookie.expires == nil ? "  · session" : "")")
-                                .font(.caption2.monospaced())
-                                .textSelection(.enabled)
+                            Text("\(cookie.name) · \(cookie.domain)\(cookie.expires == nil ? " · session" : "")")
                         }
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .fixedSize()
                 }
-                .font(.caption)
-                Text("Updated \(entry.updated.formatted(date: .omitted, time: .standard))")
-                    .font(.caption2).foregroundStyle(.secondary)
+            }
+            .buttonStyle(.borderless)
+            .font(.caption)
+        }
+        .padding(8)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor)))
+        .onAppear { name = account.name }
+        .onChange(of: account.name) { _, new in name = new }
+    }
+}
+
+private struct AddProviderForm: View {
+    @EnvironmentObject private var config: Config
+    let done: () -> Void
+    @State private var name = ""
+    @State private var domains = ""
+    @State private var sessionNames = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Any site you want one sign-in for across spaces, such as Okta, Etsy or AWS.")
+                .font(.caption).foregroundStyle(.secondary)
+            TextField("Name (e.g. Okta)", text: $name)
+            TextField("Cookie domains, comma separated (e.g. okta.com)", text: $domains)
+            TextField("Signed-in cookie names (optional)", text: $sessionNames)
+            Text("With signed-in cookie names, the app offers to save a sign-in it notices. Without them, pick the account in the space settings.")
+                .font(.caption2).foregroundStyle(.secondary)
+            HStack {
+                Spacer()
+                Button("Add Provider") {
+                    config.addProvider(name: name.trimmingCharacters(in: .whitespaces),
+                                       domains: list(domains).map { $0.lowercased() }, sessionNames: list(sessionNames))
+                    name = ""; domains = ""; sessionNames = ""
+                    done()
+                }
+                .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty || list(domains).isEmpty)
             }
         }
+        .textFieldStyle(.roundedBorder)
+        .padding(.top, 6)
+    }
+
+    private func list(_ text: String) -> [String] {
+        text.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
     }
 }
 

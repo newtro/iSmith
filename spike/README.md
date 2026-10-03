@@ -4,9 +4,17 @@ Proves the one unproven mechanism in DESIGN.md: copying an account's sign-in coo
 per-space WebKit stores, so you sign in once per account and every space bound to it stays
 signed in.
 
-Spaces: Contoso (Microsoft: Contoso, Google: personal, GitHub), Fabrikam (Microsoft:
-Fabrikam, Google: personal, GitHub), Contoso (second space) (Microsoft: Contoso only),
-Personal (Google: personal, GitHub), Newtro Studios (Google: Newtro Studios).
+Nothing is hard-coded: spaces, accounts and providers are managed in the app and saved to
+`~/Library/Application Support/iSmithSpike/config.json`. First launch starts with Contoso,
+Fabrikam, a second Contoso space, Personal and Newtro Studios.
+
+- **New space**: + in the rail (⇧⌘N). Pick an account per provider, or "New account…".
+- **Edit or delete a space**: right-click it in the rail (⇧⌘, edits the current one).
+- **Accounts panel** (button at the bottom of the rail): rename accounts, sign out everywhere,
+  remove unused accounts, add your own provider (any site, by cookie domain), and see the sync
+  log.
+- **Signed in somewhere new?** If you sign in to a provider in a space that has no account for
+  it, a banner offers to save that sign-in as a new or existing account, or keep it local.
 
 ## Build and run
 
@@ -21,6 +29,7 @@ open build/Build/Products/Debug/iSmithSpike.app
 build/Build/Products/Debug/iSmithSpike.app/Contents/MacOS/iSmithSpike --selftest
 build/Build/Products/Debug/iSmithSpike.app/Contents/MacOS/iSmithSpike --selftest --phase=write
 build/Build/Products/Debug/iSmithSpike.app/Contents/MacOS/iSmithSpike --selftest --phase=read
+build/Build/Products/Debug/iSmithSpike.app/Contents/MacOS/iSmithSpike --selftest --phase=config
 ```
 
 ## Manual acceptance test
@@ -53,4 +62,4 @@ Known risks outside the code:
   site rejects them.
 
 Spike limits: the vault is plain JSON with owner-only permissions (the real one encrypts with a
-Keychain key), password autofill isn't available, and spaces are hard-coded.
+Keychain key), and password autofill isn't available.
