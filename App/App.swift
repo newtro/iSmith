@@ -44,7 +44,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         guard !testing else { return }
+        #if !DEBUG
+        // "iSmith Dev" never updates itself from the release feed.
         updater = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
+        #endif
         let browser = BrowserState()
         self.browser = browser
         browser.presentWindow = { [weak self] state in self?.present(state) }

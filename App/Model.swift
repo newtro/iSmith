@@ -257,9 +257,10 @@ struct ClosedTab {
 
 extension UTType {
     /// A tab being dragged within iSmith (declared in Info.plist).
-    static let ismithTab = UTType(exportedAs: "com.scottsmith.ismith.tab")
+    /// Named after the bundle id, so the Debug and installed apps never take each other's drags.
+    static let ismithTab = UTType(exportedAs: AppIdentity.bundleID + ".tab")
     /// A space being dragged in the rail.
-    static let ismithSpace = UTType(exportedAs: "com.scottsmith.ismith.space")
+    static let ismithSpace = UTType(exportedAs: AppIdentity.bundleID + ".space")
 }
 
 extension NSPasteboard.PasteboardType {

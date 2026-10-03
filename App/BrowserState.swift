@@ -52,7 +52,7 @@ final class BrowserState: NSObject, ObservableObject {
     static let maxClosedTabs = 25
     static let maxClosedWindows = 5
 
-    init(paths: AppPaths = .standard, keyStore: KeyStore = KeychainKeyStore()) {
+    init(paths: AppPaths = .standard, keyStore: KeyStore = AppIdentity.vaultKeyStore()) {
         var vault = Vault(fileURL: paths.vaultURL, keyStore: keyStore)
         while !vault.canSave {
             // Running on would let the saved vault roll back, on the next launch, any sign-in or

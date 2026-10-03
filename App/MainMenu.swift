@@ -8,8 +8,9 @@ enum MainMenu {
     static func build(commands: Commands, updater: SPUStandardUpdaterController?) -> NSMenu {
         let main = NSMenu()
 
-        let app = submenu(main, "iSmith")
-        app.addItem(withTitle: "About iSmith", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        let name = AppIdentity.displayName
+        let app = submenu(main, name)
+        app.addItem(withTitle: "About \(name)", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
         if let updater {
             let check = NSMenuItem(title: "Check for Updates…", action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)), keyEquivalent: "")
             check.target = updater
@@ -23,12 +24,12 @@ enum MainMenu {
         NSApp.servicesMenu = services.submenu
         app.addItem(services)
         app.addItem(.separator())
-        app.addItem(withTitle: "Hide iSmith", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        app.addItem(withTitle: "Hide \(name)", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         app.addItem(withTitle: "Hide Others", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
             .keyEquivalentModifierMask = [.command, .option]
         app.addItem(withTitle: "Show All", action: #selector(NSApplication.unhideAllApplications(_:)), keyEquivalent: "")
         app.addItem(.separator())
-        app.addItem(withTitle: "Quit iSmith", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        app.addItem(withTitle: "Quit \(name)", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
 
         let file = submenu(main, "File")
         file.addItem(item("New Tab", #selector(Commands.newTab), "t", commands))

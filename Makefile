@@ -1,19 +1,26 @@
 # iSmith: build, test and run from the command line.
 # The Xcode project is generated from project.yml (XcodeGen) and not committed.
+#
+# Debug builds are "iSmith Dev" (bundle id com.scottsmith.ismith.debug, data in
+# ~/Library/Application Support/iSmith Dev, their own Keychain items). Release is the installed
+# "iSmith" (com.scottsmith.ismith).
 
 PROJECT := iSmith.xcodeproj
 DERIVED := build
 XCODEBUILD := xcodebuild -project $(PROJECT) -scheme iSmith -configuration Debug -derivedDataPath $(DERIVED)
+XCODEBUILD_RELEASE := xcodebuild -project $(PROJECT) -scheme iSmith -configuration Release -derivedDataPath $(DERIVED)
 APP := $(DERIVED)/Build/Products/Debug/iSmith.app
+RELEASE_APP := $(DERIVED)/Build/Products/Release/iSmith.app
+INSTALLED := /Applications/iSmith.app
 
-.PHONY: build test test-package test-app run project clean
+.PHONY: build test test-package test-app run release install project clean
 
 build: project
 	$(XCODEBUILD) build
 
 # The package tests (SignInSync: sync, vault and config; BraveImport: Brave profiles, bookmarks
-# and passwords; Blocking: ad and tracker blocking; Passwords: store, matching, autofill), then the
-# app-hosted tests.
+# and passwords; Blocking: ad and tracker blocking; Passwords: store, matching, autofill), then
+# the app-hosted tests.
 test: test-package test-app
 
 test-package:
@@ -25,8 +32,23 @@ test-package:
 test-app: project
 	$(XCODEBUILD) test
 
+# Builds and opens the Debug app, "iSmith Dev". It never touches the installed iSmith's data.
 run: build
 	open $(APP)
+
+release: project
+	$(XCODEBUILD_RELEASE) build
+
+# Builds Release and installs it as /Applications/iSmith.app. Quit iSmith first: replacing a
+# running app's bundle can crash it.
+install: release
+	@if pgrep -f '$(INSTALLED)/Contents/MacOS/iSmith' >/dev/null; then \
+		echo "iSmith is running. Quit it, then run make install again."; exit 1; fi
+	rm -rf '$(INSTALLED).installing'
+	ditto '$(RELEASE_APP)' '$(INSTALLED).installing'
+	rm -rf '$(INSTALLED)'
+	mv '$(INSTALLED).installing' '$(INSTALLED)'
+	@echo "Installed $(INSTALLED)"
 
 project: $(PROJECT)
 

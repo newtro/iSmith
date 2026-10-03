@@ -1,10 +1,55 @@
 import AppKit
 import Foundation
+import SignInSync
 import SwiftUI
+
+/// Which build this is. Debug builds are "iSmith Dev" (`com.scottsmith.ismith.debug`): their own
+/// data folder, WebKit stores, Keychain items and notification settings, so a development run can
+/// never read, prompt for or change the installed app's data. Release is `com.scottsmith.ismith`.
+enum AppIdentity {
+    static let releaseBundleID = "com.scottsmith.ismith"
+
+    /// The running app's bundle id (the app-hosted tests run inside the Debug app).
+    static var bundleID: String { Bundle.main.bundleIdentifier ?? releaseBundleID }
+
+    /// "iSmith" or "iSmith Dev", as the menu bar and Dock show it.
+    static var displayName: String {
+        (Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String) ?? "iSmith"
+    }
+
+    #if DEBUG
+    /// A Debug build never uses the installed app's folder, whatever its bundle id.
+    static let dataFolderName = "iSmith Dev"
+    static let importsSpike = false
+    #else
+    static let dataFolderName = "iSmith"
+    static let importsSpike = true
+    #endif
+
+    /// Keychain services follow the bundle id: `com.scottsmith.ismith.debug.vault-key` is the dev
+    /// vault key, and the installed app's `com.scottsmith.ismith.vault-key` is never read by it.
+    static var vaultKeyService: String { keychainService("vault-key") }
+    static var passwordsKeyService: String { keychainService("passwords-key") }
+
+    static func keychainService(_ name: String) -> String {
+        #if DEBUG
+        // Belt and braces: a Debug build carrying the release bundle id still stays apart.
+        let base = bundleID == releaseBundleID ? releaseBundleID + ".debug" : bundleID
+        #else
+        let base = bundleID
+        #endif
+        return "\(base).\(name)"
+    }
+
+    /// The vault key store for this build.
+    static func vaultKeyStore() -> KeychainKeyStore {
+        KeychainKeyStore(service: vaultKeyService, account: "vault", label: "\(displayName) vault key")
+    }
+}
 
 /// Where the app keeps its files.
 struct AppPaths {
-    /// config.json, vault.json and session.json.
+    /// config.json, vault.json, session.json and browser.sqlite.
     let dataDir: URL
     /// The spike's settings, imported on first launch. nil skips the import.
     let spikeDir: URL?
@@ -14,15 +59,16 @@ struct AppPaths {
     /// The open windows, spaces, groups and tabs (see `SessionFile`).
     var sessionURL: URL { dataDir.appendingPathComponent("session.json") }
 
-    /// ~/Library/Application Support/iSmith. For development, `ISMITH_DATA_DIR` points the app at
-    /// another folder; that folder starts fresh rather than importing the spike.
+    /// ~/Library/Application Support/iSmith (Release) or ~/Library/Application Support/iSmith Dev
+    /// (Debug). `ISMITH_DATA_DIR` points the app at another folder; that folder starts fresh
+    /// rather than importing the spike. Debug builds never import the spike.
     static var standard: AppPaths {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         if let dir = ProcessInfo.processInfo.environment["ISMITH_DATA_DIR"], !dir.isEmpty {
             return AppPaths(dataDir: URL(fileURLWithPath: dir, isDirectory: true), spikeDir: nil)
         }
-        return AppPaths(dataDir: support.appendingPathComponent("iSmith", isDirectory: true),
-                        spikeDir: support.appendingPathComponent("iSmithSpike", isDirectory: true))
+        return AppPaths(dataDir: support.appendingPathComponent(AppIdentity.dataFolderName, isDirectory: true),
+                        spikeDir: AppIdentity.importsSpike ? support.appendingPathComponent("iSmithSpike", isDirectory: true) : nil)
     }
 }
 

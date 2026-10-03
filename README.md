@@ -40,29 +40,39 @@ See [DESIGN.md](DESIGN.md) for the model and [BUILD_PLAN.md](BUILD_PLAN.md) for 
 Needs Xcode and XcodeGen (`brew install xcodegen`).
 
 ```bash
-make build   # generate the project and build Debug into build/
+make build   # generate the project and build Debug ("iSmith Dev") into build/
 make test    # package tests (SignInSync, BraveImport, Blocking, Passwords; swift test), then the app-hosted tests
-make run     # build and open the app
+make run     # build and open the Debug app, "iSmith Dev"
+make install # build Release and install it as /Applications/iSmith.app (quit iSmith first)
 ```
+
+**Debug and Release are separate apps.** Debug builds are "iSmith Dev", bundle id
+`com.scottsmith.ismith.debug`: their own data folder (`~/Library/Application Support/iSmith Dev`),
+WebKit stores, notification settings and Keychain items (`com.scottsmith.ismith.debug.vault-key`,
+`.passwords-key`), no spike import and no Sparkle updates. Release is `com.scottsmith.ismith`, the
+installed app. A development run never reads or prompts for the installed app's keys or data.
+Drive a test copy only through its own process (by pid, or through code); never send input to
+the installed iSmith by app name or bundle id.
 
 The package's sync tests use real WebKit stores. Each test makes its own stores and deletes them
 afterwards. A full run takes about two minutes because the tests wait for the sync to settle.
 
 ## Data
 
-- `~/Library/Application Support/iSmith/` holds `config.json`, `vault.json` and `session.json`,
-  all owner-only. The vault is encrypted with AES-GCM. Its key is in the login Keychain under
-  `com.scottsmith.ismith.vault-key`.
+- `~/Library/Application Support/iSmith/` (`iSmith Dev/` for Debug builds) holds `config.json`,
+  `vault.json` and `session.json`, all owner-only. The vault is encrypted with AES-GCM. Its key is
+  in the login Keychain under `<bundle id>.vault-key` (`com.scottsmith.ismith.vault-key` for the
+  installed app).
 - `config.json` is what each space is: name, color, accounts, and the rail's order.
 - `session.json` is what's open: windows → spaces → tab groups → tabs, with each tab's URL,
   title and Keep alive setting. It's saved a second after any change and on quit, and restored
   at launch. Restored tabs load when you select them; Keep alive tabs load at once.
-- On first launch, iSmith imports the spike's config and saved sign-ins from
+- On first launch, the Release app imports the spike's config and saved sign-ins from
   `~/Library/Application Support/iSmithSpike/`. It only reads the spike's files. The spike's
   WebKit stores don't come over, so sites ask for an account once, and a space set to "Not
   shared" signs in once.
-- For development, `ISMITH_DATA_DIR=/some/folder` starts the app on another folder with no spike
-  import:
+- For development, `ISMITH_DATA_DIR=/some/folder` starts the app on another folder (a scratch
+  folder for smoke tests):
   `ISMITH_DATA_DIR=/tmp/ismith-dev build/Build/Products/Debug/iSmith.app/Contents/MacOS/iSmith`.
 
 ## Using it

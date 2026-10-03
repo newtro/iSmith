@@ -26,7 +26,10 @@ targets:
     info:
       path: App/Info.plist
       properties:
-        CFBundleDisplayName: iSmith
+        # "iSmith" in Release, "iSmith Dev" in Debug (ISMITH_DISPLAY_NAME below), so a dev build
+        # never looks like, or shares data with, the installed app.
+        CFBundleDisplayName: $(ISMITH_DISPLAY_NAME)
+        CFBundleName: $(ISMITH_DISPLAY_NAME)
         CFBundleShortVersionString: "0.1"
         CFBundleVersion: "1"
         LSApplicationCategoryType: public.app-category.productivity
@@ -39,10 +42,10 @@ targets:
         SUPublicEDKey: Ezl8lB6Z6JnAQ08oLRWy8uOWsNpPxzlNEV4d5+xFyEU=
         # Drag types for tabs and spaces inside the app (the tab strip, the rail, other windows).
         UTExportedTypeDeclarations:
-          - UTTypeIdentifier: com.scottsmith.ismith.tab
+          - UTTypeIdentifier: $(PRODUCT_BUNDLE_IDENTIFIER).tab
             UTTypeDescription: iSmith tab
             UTTypeConformsTo: [public.data]
-          - UTTypeIdentifier: com.scottsmith.ismith.space
+          - UTTypeIdentifier: $(PRODUCT_BUNDLE_IDENTIFIER).space
             UTTypeDescription: iSmith space
             UTTypeConformsTo: [public.data]
     entitlements:
@@ -53,9 +56,18 @@ targets:
         com.apple.security.personal-information.location: true
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.scottsmith.ismith
         PRODUCT_NAME: iSmith
         ENABLE_HARDENED_RUNTIME: YES
+      # Debug is "iSmith Dev": its own bundle id, so its own WebKit stores, Keychain items
+      # (derived from the bundle id), notification settings and data folder. Release is the
+      # installed app.
+      configs:
+        Debug:
+          PRODUCT_BUNDLE_IDENTIFIER: com.scottsmith.ismith.debug
+          ISMITH_DISPLAY_NAME: iSmith Dev
+        Release:
+          PRODUCT_BUNDLE_IDENTIFIER: com.scottsmith.ismith
+          ISMITH_DISPLAY_NAME: iSmith
     scheme:
       testTargets: [iSmithTests]
   iSmithTests:
