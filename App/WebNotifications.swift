@@ -64,10 +64,11 @@ final class WebNotifications: NSObject {
     /// Adds the scripts and the handler to a configuration's content controller (once).
     func install(in controller: WKUserContentController) {
         guard !controller.userScripts.contains(where: { $0.source.contains(channel) }) else { return }
-        controller.addUserScript(WKUserScript(source: pageScript, injectionTime: .atDocumentStart,
-                                              forMainFrameOnly: false, in: .page))
+        // The bridge first, so it's listening before the page shim sends its first message.
         controller.addUserScript(WKUserScript(source: bridgeScript, injectionTime: .atDocumentStart,
                                               forMainFrameOnly: false, in: world))
+        controller.addUserScript(WKUserScript(source: pageScript, injectionTime: .atDocumentStart,
+                                              forMainFrameOnly: false, in: .page))
         controller.addScriptMessageHandler(ReplyProxy(self), contentWorld: world, name: Self.handlerName)
     }
 
@@ -205,6 +206,8 @@ final class WebNotifications: NSObject {
             if (!msg || typeof msg.type !== "string") return;
             let reply = null;
             try { reply = await window.webkit.messageHandlers.\(Self.handlerName).postMessage(msg); } catch (_) {}
+            // A request always settles, even if the app couldn't answer.
+            if (!reply && msg.type === "request") reply = { type: "requestResult", id: msg.id, permission: "default" };
             if (reply) document.dispatchEvent(new CustomEvent(ev + "-in", { detail: JSON.stringify(reply) }));
           }, true);
         })();
@@ -264,8 +267,9 @@ final class WebNotifications: NSObject {
               });
               this.onclick = null; this.onshow = null; this.onclose = null; this.onerror = null;
               live.set(id, this);
+              // The app decides; the page's copy of the permission may not have arrived yet.
               setTimeout(() => {
-                if (permission !== "granted") { fire(this, "error"); return; }
+                if (permission === "denied") { fire(this, "error"); return; }
                 send({ type: "show", id, title: this.title, body: this.body, tag: this.tag, silent: this.silent });
               }, 0);
             }
@@ -303,6 +307,8 @@ final class WebNotifications: NSObject {
             });
           }
           send({ type: "query" });
+          // In case the bridge wasn't listening yet at document start.
+          document.addEventListener("DOMContentLoaded", () => { if (permission === "default") send({ type: "query" }); }, { once: true });
         })();
         """
     }

@@ -155,6 +155,10 @@ extension BrowserState: WKNavigationDelegate {
             return
         }
         if navigationAction.shouldPerformDownload { return decisionHandler(.download) }
+        if navigationAction.targetFrame?.isMainFrame == true, let (_, _, tab) = owner(of: webView) {
+            // Going back or forward, reloading, or restoring a tab isn't a new visit in history.
+            tab.lastNavigationType = navigationAction.navigationType
+        }
         if navigationAction.navigationType == .linkActivated, navigationAction.targetFrame?.isMainFrame == true,
            Self.opensInBackground(navigationAction), let url, let (window, tabs, tab) = owner(of: webView) {
             decisionHandler(.cancel)
@@ -213,9 +217,10 @@ extension BrowserState: WKNavigationDelegate {
         for prompt in prompts { prompt.answer(.dismissed) }
         if tab.findShown { tab.findResult = nil }
         applyZoom(to: webView, tab: tab)
-        if let url = webView.url {
+        if let url = webView.url, ![.backForward, .reload].contains(tab.lastNavigationType) {
             recordVisit(url, title: webView.title, tab: tab, space: tabs.spaceID)
         }
+        tab.lastNavigationType = nil
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {

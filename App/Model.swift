@@ -43,6 +43,8 @@ final class Tab: ObservableObject, Identifiable {
     var pendingDialogs: [PendingDialog] = []
     /// One of the tab's dialogs is on screen.
     var showingDialog = false
+    /// How the main frame's current navigation started (history skips back/forward and reloads).
+    var lastNavigationType: WKNavigationType?
     /// What was last typed in the address bar and when, so the visit counts as typed in history.
     var typed: (url: URL, at: Date)?
     /// Called when the page changes its title (history keeps titles), and when it changes its
