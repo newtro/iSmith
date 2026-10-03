@@ -37,6 +37,14 @@ targets:
         SUFeedURL: https://raw.githubusercontent.com/newtro/iSmith-releases/main/appcast.xml
         SUEnableAutomaticChecks: false
         SUPublicEDKey: Ezl8lB6Z6JnAQ08oLRWy8uOWsNpPxzlNEV4d5+xFyEU=
+        # Drag types for tabs and spaces inside the app (the tab strip, the rail, other windows).
+        UTExportedTypeDeclarations:
+          - UTTypeIdentifier: com.scottsmith.ismith.tab
+            UTTypeDescription: iSmith tab
+            UTTypeConformsTo: [public.data]
+          - UTTypeIdentifier: com.scottsmith.ismith.space
+            UTTypeDescription: iSmith space
+            UTTypeConformsTo: [public.data]
     entitlements:
       path: App/iSmith.entitlements
       properties:

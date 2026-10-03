@@ -36,5 +36,28 @@
 	<string>https://raw.githubusercontent.com/newtro/iSmith-releases/main/appcast.xml</string>
 	<key>SUPublicEDKey</key>
 	<string>Ezl8lB6Z6JnAQ08oLRWy8uOWsNpPxzlNEV4d5+xFyEU=</string>
+	<key>UTExportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>iSmith tab</string>
+			<key>UTTypeIdentifier</key>
+			<string>com.scottsmith.ismith.tab</string>
+		</dict>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>iSmith space</string>
+			<key>UTTypeIdentifier</key>
+			<string>com.scottsmith.ismith.space</string>
+		</dict>
+	</array>
 </dict>
 </plist>

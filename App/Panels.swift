@@ -2,250 +2,14 @@ import SignInSync
 import SwiftUI
 import WebKit
 
-struct ContentView: View {
-    @EnvironmentObject private var browser: BrowserState
-
-    var body: some View {
-        HStack(spacing: 0) {
-            Rail()
-            if let space = browser.active {
-                SpaceView(space: space)
-                    .id(space.id)
-                    // Tinted chrome: the frame reshades to the active space's color.
-                    .background(space.color.opacity(0.16))
-            } else {
-                VStack(spacing: 12) {
-                    Text("No spaces yet").font(.title3)
-                    Button("New Space…") { browser.editing = EditorRequest(spaceID: nil) }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
-            if browser.showAccounts {
-                Divider()
-                AccountsPanel()
-                    .frame(width: 360)
-            }
-        }
-        .background(Color(nsColor: .windowBackgroundColor))
-        .animation(.easeInOut(duration: 0.25), value: browser.activeID)
-        .sheet(item: $browser.editing) { request in
-            SpaceEditor(request: request)
-        }
-        .onAppear { browser.start() }
-    }
-}
-
-// MARK: - Rail
-
-private struct Rail: View {
-    @EnvironmentObject private var browser: BrowserState
-
-    var body: some View {
-        VStack(spacing: 10) {
-            ScrollView(showsIndicators: false) {
-                VStack(spacing: 10) {
-                    ForEach(Array(browser.spaces.enumerated()), id: \.element.id) { index, state in
-                        RailItem(state: state, index: index)
-                    }
-                    Button { browser.editing = EditorRequest(spaceID: nil) } label: {
-                        Image(systemName: "plus")
-                            .frame(width: 40, height: 40)
-                            .overlay(RoundedRectangle(cornerRadius: 11).strokeBorder(style: StrokeStyle(lineWidth: 1.5, dash: [4])))
-                            .foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.plain)
-                    .help("New space  ⇧⌘N")
-                }
-                .padding(.vertical, 2)
-            }
-            Button { browser.showAccounts.toggle() } label: {
-                Image(systemName: "person.2.badge.key")
-                    .frame(width: 40, height: 40)
-            }
-            .buttonStyle(.plain)
-            .help("Accounts and sign-ins")
-        }
-        .padding(.vertical, 12)
-        .frame(width: 64)
-        .background(Color(nsColor: .underPageBackgroundColor))
-    }
-}
-
-private struct RailItem: View {
-    @EnvironmentObject private var browser: BrowserState
-    @ObservedObject var state: SpaceState
-    let index: Int
-
-    var body: some View {
-        let active = state.id == browser.activeID
-        Button { browser.select(state) } label: {
-            Text(state.def.initials)
-                .font(.system(size: 12, weight: .bold))
-                .frame(width: 40, height: 40)
-                .background(RoundedRectangle(cornerRadius: 11).fill(active ? state.color : state.color.opacity(0.18)))
-                .foregroundStyle(active ? Color.white : state.color)
-        }
-        .buttonStyle(.plain)
-        .help(state.def.name + (index < 9 ? "  ⌘\(index + 1)" : ""))
-        .contextMenu {
-            Button("Edit Space…") { browser.editing = EditorRequest(spaceID: state.id) }
-            Divider()
-            Button("Delete Space…", role: .destructive) { browser.deleteSpace(state.id) }
-        }
-    }
-}
-
-// MARK: - Space
-
-private struct SpaceView: View {
-    @EnvironmentObject private var browser: BrowserState
-    @EnvironmentObject private var sync: CookieSync
-    @ObservedObject var space: SpaceState
-
-    var body: some View {
-        VStack(spacing: 0) {
-            TabStrip(space: space)
-            if let tab = space.selected {
-                Toolbar(space: space, tab: tab)
-                    .id(tab.id)
-                WebViewHost(webView: tab.webView)
-                    .id(tab.id)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(space.color.opacity(0.6), lineWidth: 1.5))
-                    .padding([.horizontal, .bottom], 8)
-            } else {
-                Spacer()
-                Text("Opening \(space.def.name)…").foregroundStyle(.secondary)
-                Spacer()
-            }
-        }
-    }
-}
-
-private struct TabStrip: View {
-    @EnvironmentObject private var browser: BrowserState
-    @ObservedObject var space: SpaceState
-
-    var body: some View {
-        HStack(spacing: 6) {
-            HStack(spacing: 6) {
-                RoundedRectangle(cornerRadius: 3).fill(space.color).frame(width: 10, height: 10)
-                Text(space.def.name).fontWeight(.semibold)
-            }
-            .padding(.trailing, 6)
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 4) {
-                    ForEach(space.tabs) { tab in
-                        TabButton(tab: tab, selected: tab.id == space.selected?.id,
-                                  onSelect: { space.selectedID = tab.id },
-                                  onClose: { browser.close(tab, in: space) })
-                    }
-                }
-            }
-            Button { Task { await browser.newTab(in: space, url: nil) } } label: {
-                Image(systemName: "plus")
-            }
-            .buttonStyle(.borderless)
-            .help("New tab  ⌘T")
-        }
-        .padding(.horizontal, 10)
-        .frame(height: 40)
-    }
-}
-
-private struct TabButton: View {
-    @ObservedObject var tab: Tab
-    let selected: Bool
-    let onSelect: () -> Void
-    let onClose: () -> Void
-
-    var body: some View {
-        HStack(spacing: 6) {
-            if tab.isLoading { ProgressView().controlSize(.mini) }
-            Text(tab.title).lineLimit(1).truncationMode(.tail)
-            Button(action: onClose) { Image(systemName: "xmark").font(.system(size: 9, weight: .bold)) }
-                .buttonStyle(.borderless)
-        }
-        .padding(.horizontal, 10)
-        .frame(maxWidth: 200, minHeight: 28)
-        .background(RoundedRectangle(cornerRadius: 7).fill(selected ? Color(nsColor: .textBackgroundColor) : .clear))
-        .contentShape(Rectangle())
-        .onTapGesture(perform: onSelect)
-    }
-}
-
-private struct Toolbar: View {
-    @EnvironmentObject private var config: Config
-    @ObservedObject var space: SpaceState
-    @ObservedObject var tab: Tab
-    @State private var address = ""
-    @FocusState private var addressFocused: Bool
-
-    var body: some View {
-        HStack(spacing: 8) {
-            Button { tab.webView.goBack() } label: { Image(systemName: "chevron.left") }
-                .disabled(!tab.canGoBack)
-            Button { tab.webView.goForward() } label: { Image(systemName: "chevron.right") }
-                .disabled(!tab.canGoForward)
-            Button { tab.webView.reload() } label: { Image(systemName: "arrow.clockwise") }
-            TextField("Search or enter address", text: $address)
-                .textFieldStyle(.roundedBorder)
-                .font(.system(.body, design: .monospaced))
-                .focused($addressFocused)
-                .onSubmit(go)
-            Menu("Go") {
-                ForEach(QuickLink.all) { link in
-                    Button(link.name) { tab.webView.load(URLRequest(url: link.url)) }
-                }
-            }
-            .fixedSize()
-            // Only exceptions are shown; everything else uses the shared sign-ins.
-            HStack(spacing: 4) {
-                ForEach(exceptions, id: \.self) { label in
-                    Text(label)
-                        .font(.caption)
-                        .padding(.horizontal, 7).padding(.vertical, 2)
-                        .background(Capsule().fill(space.color.opacity(0.18)))
-                        .overlay(Capsule().stroke(space.color.opacity(0.5)))
-                }
-            }
-        }
-        .buttonStyle(.borderless)
-        .padding(.horizontal, 10)
-        .padding(.bottom, 8)
-        .onAppear {
-            address = tab.url?.absoluteString ?? ""
-            if tab.url == nil { addressFocused = true }
-        }
-        .onReceive(tab.$url) { url in
-            if !addressFocused { address = url?.absoluteString ?? "" }
-        }
-    }
-
-    private var exceptions: [String] {
-        config.providers.compactMap { p in
-            switch space.def.bindings[p.id] {
-            case nil: return nil
-            case SpaceDef.local: return "\(p.name): this space only"
-            case let id?: return config.account(id).map { "\(p.name): \($0.name)" }
-            }
-        }
-    }
-
-    private func go() {
-        guard let url = AddressInput.url(for: address) else { return }
-        tab.webView.load(URLRequest(url: url))
-        addressFocused = false
-    }
-}
-
 // MARK: - Space editor
 
-private struct SpaceEditor: View {
+struct SpaceEditor: View {
     @EnvironmentObject private var browser: BrowserState
     @EnvironmentObject private var config: Config
     @Environment(\.dismiss) private var dismiss
     let request: EditorRequest
+    let window: WindowState
 
     @State private var name = ""
     @State private var color = 0
@@ -355,7 +119,7 @@ private struct SpaceEditor: View {
         if let existing {
             browser.updateSpace(existing.id, name: trimmed, color: color, home: homeURL, choices: choices, newNames: newNames)
         } else {
-            browser.createSpace(name: trimmed, color: color, home: homeURL, choices: choices, newNames: newNames)
+            browser.createSpace(name: trimmed, color: color, home: homeURL, choices: choices, newNames: newNames, in: window)
         }
         dismiss()
     }
@@ -363,7 +127,7 @@ private struct SpaceEditor: View {
 
 // MARK: - Accounts panel
 
-private struct AccountsPanel: View {
+struct AccountsPanel: View {
     @EnvironmentObject private var browser: BrowserState
     @EnvironmentObject private var config: Config
     @EnvironmentObject private var sync: CookieSync
@@ -510,9 +274,3 @@ private struct AddProviderForm: View {
     }
 }
 
-struct WebViewHost: NSViewRepresentable {
-    let webView: WKWebView
-
-    func makeNSView(context: Context) -> WKWebView { webView }
-    func updateNSView(_ nsView: WKWebView, context: Context) {}
-}
