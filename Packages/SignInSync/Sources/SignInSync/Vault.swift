@@ -31,7 +31,11 @@ public final class Vault: ObservableObject {
     public let fileURL: URL
     private var key: SymmetricKey?
     /// False when the key couldn't be read or saved, or an unreadable file couldn't be backed up.
-    private var canSave = true
+    /// Nothing is written then, and the app must not run the sync on this vault: sign-ins changed
+    /// meanwhile would be rolled back by the saved vault on the next launch.
+    public private(set) var canSave = true
+    /// Why the vault can't save, for the app to show.
+    public private(set) var problem: String?
 
     public init(fileURL: URL, keyStore: KeyStore) {
         self.fileURL = fileURL
@@ -44,8 +48,7 @@ public final class Vault: ObservableObject {
             key = try keyStore.loadKey()
         } catch {
             // The key may come back (an unlocked Keychain, a later "Allow"), so nothing is replaced.
-            canSave = false
-            NSLog("iSmith vault: the key could not be read (\(error)); running without saving")
+            refuseSaving("The vault key could not be read from the Keychain (\(error)).")
             return
         }
         if FileManager.default.fileExists(atPath: fileURL.path) {
@@ -57,8 +60,7 @@ public final class Vault: ObservableObject {
                     let backup = try SecureFile.backUp(fileURL, reason: "unreadable")
                     NSLog("iSmith vault: vault.json could not be opened (\(error)); saved a copy at \(backup.path), starting empty")
                 } catch {
-                    canSave = false
-                    NSLog("iSmith vault: vault.json could not be opened or backed up (\(error)); it won't be changed")
+                    refuseSaving("vault.json could not be opened or backed up (\(error)).")
                 }
             }
         }
@@ -68,10 +70,20 @@ public final class Vault: ObservableObject {
                 try keyStore.saveKey(fresh)
                 key = fresh
             } catch {
-                canSave = false
-                NSLog("iSmith vault: the new key could not be saved (\(error)); running without saving")
+                // Another launch may have saved a key in the meantime: use it rather than replace it.
+                if let saved = try? keyStore.loadKey() {
+                    key = saved
+                } else {
+                    refuseSaving("A new vault key could not be saved to the Keychain (\(error)).")
+                }
             }
         }
+    }
+
+    private func refuseSaving(_ reason: String) {
+        canSave = false
+        problem = reason
+        NSLog("iSmith vault: \(reason) Nothing will be saved.")
     }
 
     /// nil means the account has never been seen; an empty array means it is signed out.
@@ -87,12 +99,14 @@ public final class Vault: ObservableObject {
         save()
     }
 
-    /// Adds entries saved elsewhere (the spike's vault), keeping their dates.
-    public func importEntries(_ imported: [String: Entry]) {
+    /// Adds entries saved elsewhere (the spike's vault), keeping their dates. Returns whether they
+    /// were saved to disk.
+    @discardableResult
+    public func importEntries(_ imported: [String: Entry]) -> Bool {
         for (id, entry) in imported {
             entries[id] = Entry(cookies: entry.cookies.sorted { $0.key < $1.key }, updated: entry.updated)
         }
-        save()
+        return save()
     }
 
     /// Whether the account's saved cookies include a signed-in session at a built-in provider.
@@ -103,12 +117,15 @@ public final class Vault: ObservableObject {
 
     private static let sessionNames = Set(ProviderDef.builtIns.flatMap { $0.sessionNames ?? [] })
 
-    private func save() {
-        guard canSave, let key else { return }
+    @discardableResult
+    private func save() -> Bool {
+        guard canSave, let key else { return false }
         do {
             try SecureFile.write(Self.seal(entries, key: key), to: fileURL)
+            return true
         } catch {
             NSLog("iSmith vault save failed: \(error)")
+            return false
         }
     }
 
@@ -181,15 +198,12 @@ public struct KeychainKeyStore: KeyStore {
         return SymmetricKey(data: raw)
     }
 
+    /// Adds the key. An existing key is never replaced: that would make its vault unreadable.
     public func saveKey(_ key: SymmetricKey) throws {
-        let data = key.withUnsafeBytes { Data($0) }.base64EncodedData()
         var add = query
-        add[kSecValueData as String] = data
+        add[kSecValueData as String] = key.withUnsafeBytes { Data($0) }.base64EncodedData()
         add[kSecAttrLabel as String] = "iSmith vault key"
-        var status = SecItemAdd(add as CFDictionary, nil)
-        if status == errSecDuplicateItem {
-            status = SecItemUpdate(query as CFDictionary, [kSecValueData as String: data] as CFDictionary)
-        }
+        let status = SecItemAdd(add as CFDictionary, nil)
         guard status == errSecSuccess else { throw Failure(status: status) }
     }
 

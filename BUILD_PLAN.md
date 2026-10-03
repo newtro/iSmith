@@ -123,9 +123,11 @@ iSmith/
   - `ConfigTests`: 9 tests, 28 checks.
 
   Each test uses its own temp folder and new store UUIDs, and deletes its stores when it ends.
-  The settle waits are the spike's: 3 s per sync, 2 s after the first opens. `VaultTests` adds 9
+  The settle waits are the spike's: 3 s per sync, 2 s after the first opens. `VaultTests` adds 11
   tests: encryption round trip, a wrong key, a missing key, an unreadable Keychain, the Keychain
-  key store, and the spike import. `iSmithTests` (app-hosted, 5 tests) checks the Keychain under
+  key store, two first launches saving a key at once, and the spike import (including waiting for
+  a vault that can save). `SpaceManagerTests` adds 2: deleting a space removes its WebKit store,
+  and removing accounts and providers deletes their saved sign-ins. `iSmithTests` (app-hosted, 5 tests) checks the Keychain under
   the app's own signature, first-launch import through `BrowserState`, the address bar and the
   user agent.
 - **Vault**: AES-GCM through CryptoKit. The file is `{"version": 1, "combined": "<base64 sealed
@@ -136,10 +138,23 @@ iSmith/
     `vault.unreadable-<time>.json`, and the vault starts empty. As with `config.json`, new saves
     go to `vault.json` only once that copy exists.
   - If the Keychain can't be read at all (locked, or access denied), nothing is written and no key
-    is replaced, so the old vault opens again once the Keychain does.
+    is replaced, so the old vault opens again once the Keychain does. The app stops at launch with
+    "Try Again" or "Quit" rather than syncing on a vault it can't save, because the next launch
+    would roll back any sign-in or sign-out made in between.
+  - An existing Keychain key is never replaced. If another launch saved one first, it's used.
 - **Spike import**: on first launch (no `iSmith/config.json`, but `iSmithSpike/config.json`
   exists), the spike's plaintext `vault.json` goes into the encrypted vault, then its `config.json`
-  is copied and loaded with the normal migration rules. The spike's files are only read. A dry run
+  is copied and loaded with the normal migration rules. The config is copied only once the
+  sign-ins are saved, so a launch that can't save doesn't count as a finished import. The spike's
+  files are only read.
+
+  What doesn't come over: the spike's WebKit stores, which are kept per app under
+  `~/Library/WebKit/<bundle id>`. That means each site's own sessions (Outlook, Etsy, Azure
+  DevOps), and any provider sign-in a space kept "Not shared". Shared sign-ins come from the vault,
+  so sites sign in again silently, with the account picker once per site. A space set to "Not
+  shared" needs one sign-in.
+
+  A dry run
   against the real spike data imported 5 spaces and 4 vault entries (27 cookies), with Microsoft
   (shared), Microsoft: Fabrikam and Google holding sessions. The spike's files were unchanged
   afterwards (checksums matched). `ISMITH_DATA_DIR` points a development run at another folder and
@@ -153,6 +168,8 @@ iSmith/
   `ed25519`), and the public key went into Info.plist: `SUPublicEDKey` =
   `Ezl8lB6Z6JnAQ08oLRWy8uOWsNpPxzlNEV4d5+xFyEU=`. Back up the private key with
   `generate_keys -x <file>`: losing it means shipped apps can't verify new updates.
+- **Deleting a space** retries WebKit's store removal for up to 30 seconds while the closed
+  tabs' web views go away. Before this, a store still in use was left on disk.
 - **Differs from the plan**:
   - Debug builds use Apple Development signing with no provisioning profile. Developer ID and
     notarization wait for P7.

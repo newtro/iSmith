@@ -78,7 +78,9 @@ public final class SpaceManager {
     }
 
     /// Removes the space from config at once; the returned task detaches it from the sync and
-    /// deletes its browsing data. The app closes the space's tabs first, so the store isn't in use.
+    /// deletes its browsing data. The app closes the space's tabs first. WebKit refuses to remove a
+    /// store while anything still holds it ("in use"), so removal is retried for up to 30 seconds
+    /// while the closed tabs' web views go away.
     @discardableResult
     public func deleteSpace(_ id: String) -> Task<Void, Never> {
         let storeID = config.space(id)?.storeID
@@ -86,7 +88,17 @@ public final class SpaceManager {
         return Task { [sync] in
             await sync.detach(id)
             guard let storeID else { return }
-            do { try await WKWebsiteDataStore.remove(forIdentifier: storeID) } catch { NSLog("iSmith: store removal failed: \(error)") }
+            var lastError: Error?
+            for attempt in 0..<60 {
+                do {
+                    try await WKWebsiteDataStore.remove(forIdentifier: storeID)
+                    return
+                } catch {
+                    lastError = error
+                    try? await Task.sleep(nanoseconds: attempt < 10 ? 100_000_000 : 500_000_000)
+                }
+            }
+            NSLog("iSmith: store removal failed: \(lastError.map { "\($0)" } ?? "unknown")")
         }
     }
 

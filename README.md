@@ -37,7 +37,9 @@ afterwards. A full run takes about two minutes because the tests wait for the sy
   The vault is encrypted with AES-GCM. Its key is in the login Keychain under
   `com.scottsmith.ismith.vault-key`.
 - On first launch, iSmith imports the spike's config and saved sign-ins from
-  `~/Library/Application Support/iSmithSpike/`. It only reads the spike's files.
+  `~/Library/Application Support/iSmithSpike/`. It only reads the spike's files. The spike's
+  WebKit stores don't come over, so sites ask for an account once, and a space set to "Not
+  shared" signs in once.
 - For development, `ISMITH_DATA_DIR=/some/folder` starts the app on another folder with no spike
   import:
   `ISMITH_DATA_DIR=/tmp/ismith-dev build/Build/Products/Debug/iSmith.app/Contents/MacOS/iSmith`.

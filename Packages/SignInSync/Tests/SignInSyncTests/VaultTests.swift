@@ -94,6 +94,8 @@ final class VaultTests: XCTestCase {
 
         let vault = Vault(fileURL: vaultURL, keyStore: FailingKeyStore())
         XCTAssertTrue(vault.entries.isEmpty)
+        XCTAssertFalse(vault.canSave, "the app is told, so it can stop before syncing")
+        XCTAssertNotNil(vault.problem)
         vault.set(records(), for: "shared-github")
         XCTAssertEqual(try Data(contentsOf: vaultURL), original, "nothing is written without the key")
         XCTAssertTrue(try backups().isEmpty, "no backup is needed: the file can still be opened later")
@@ -113,8 +115,21 @@ final class VaultTests: XCTestCase {
         let vault = Vault(fileURL: vaultURL, keyStore: store)
         vault.set(records(), for: "shared-google")
         XCTAssertEqual(Vault(fileURL: vaultURL, keyStore: store).records(for: "shared-google")?.count, 2)
+        XCTAssertThrowsError(try store.saveKey(SymmetricKey(size: .bits256)), "an existing key is never replaced")
+        XCTAssertEqual(try store.loadKey()?.withUnsafeBytes { Data($0) }, key.withUnsafeBytes { Data($0) })
         try store.deleteKey()
         XCTAssertNil(try store.loadKey())
+    }
+
+    func testKeySavedByAnotherLaunchIsUsedNotReplaced() throws {
+        // Two first launches at once: the other one saved its key between our read and our save.
+        let theirs = SymmetricKey(size: .bits256)
+        let keys = RacingKeyStore(theirs: theirs)
+        let vault = Vault(fileURL: vaultURL, keyStore: keys)
+        XCTAssertTrue(vault.canSave)
+        vault.set(records(), for: "shared-google")
+        XCTAssertEqual(Vault(fileURL: vaultURL, keyStore: InMemoryKeyStore(key: theirs)).records(for: "shared-google")?.count, 2,
+                       "the vault is sealed with the key that's in the Keychain")
     }
 
     // MARK: - Spike import
@@ -186,6 +201,21 @@ final class VaultTests: XCTestCase {
         XCTAssertEqual(config.space("a")?.bindings, [:])
     }
 
+    func testSpikeImportWaitsForAVaultThatCanSave() throws {
+        let spike = try writeSpike(config: #"{"version":2,"providers":[],"accounts":[],"spaces":[]}"#,
+                                   vault: ["shared-google": Vault.Entry(cookies: records(), updated: Date())])
+        let data = dir.appendingPathComponent("iSmith", isDirectory: true)
+        let configURL = data.appendingPathComponent("config.json")
+        let locked = Vault(fileURL: data.appendingPathComponent("vault.json"), keyStore: FailingKeyStore())
+        XCTAssertFalse(SpikeImport.runIfNeeded(from: spike, configURL: configURL, vault: locked))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: configURL.path), "the import isn't marked done")
+
+        let keys = InMemoryKeyStore()
+        let vault = Vault(fileURL: data.appendingPathComponent("vault.json"), keyStore: keys)
+        XCTAssertTrue(SpikeImport.runIfNeeded(from: spike, configURL: configURL, vault: vault), "a later launch imports")
+        XCTAssertEqual(Vault(fileURL: data.appendingPathComponent("vault.json"), keyStore: keys).entries.count, 1)
+    }
+
     func testSpikeImportSkipsWhenISmithHasAConfig() throws {
         let spike = try writeSpike(config: #"{"version":2,"providers":[],"accounts":[],"spaces":[]}"#,
                                    vault: ["shared-google": Vault.Entry(cookies: records(), updated: Date())])
@@ -202,6 +232,19 @@ final class VaultTests: XCTestCase {
         let vault = Vault(fileURL: data.appendingPathComponent("vault.json"), keyStore: InMemoryKeyStore())
         XCTAssertFalse(SpikeImport.runIfNeeded(from: dir.appendingPathComponent("nothing-here"),
                                                configURL: data.appendingPathComponent("config.json"), vault: vault))
+    }
+}
+
+/// A Keychain where another launch saves its key first: our save fails, and a re-read finds theirs.
+private final class RacingKeyStore: KeyStore {
+    struct Duplicate: Error {}
+    let theirs: SymmetricKey
+    private var saved = false
+    init(theirs: SymmetricKey) { self.theirs = theirs }
+    func loadKey() throws -> SymmetricKey? { saved ? theirs : nil }
+    func saveKey(_ key: SymmetricKey) throws {
+        saved = true
+        throw Duplicate()
     }
 }
 

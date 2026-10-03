@@ -18,7 +18,12 @@ public enum SpikeImport {
         if vault.entries.isEmpty, files.fileExists(atPath: spikeVault.path) {
             do {
                 let entries = try JSONDecoder().decode([String: Vault.Entry].self, from: Data(contentsOf: spikeVault))
-                vault.importEntries(entries)
+                // Without the sign-ins on disk the config must not be copied either, or the import
+                // would count as done and never run again.
+                guard vault.importEntries(entries) else {
+                    NSLog("iSmith: the spike's sign-ins could not be saved to the vault; not importing")
+                    return false
+                }
                 imported = entries.count
             } catch {
                 NSLog("iSmith: the spike's vault.json could not be read (\(error)); sign-ins start empty")

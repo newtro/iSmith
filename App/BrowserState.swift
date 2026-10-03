@@ -82,7 +82,18 @@ final class BrowserState: NSObject, ObservableObject {
     }()
 
     init(paths: AppPaths = .standard, keyStore: KeyStore = KeychainKeyStore()) {
-        let vault = Vault(fileURL: paths.vaultURL, keyStore: keyStore)
+        var vault = Vault(fileURL: paths.vaultURL, keyStore: keyStore)
+        while !vault.canSave {
+            // Running on would let the saved vault roll back, on the next launch, any sign-in or
+            // sign-out made now, and the spike import would wait. Unlocking the Keychain fixes it.
+            let alert = NSAlert()
+            alert.messageText = "iSmith can't open its saved sign-ins"
+            alert.informativeText = "\(vault.problem ?? "The vault can't be saved.") Unlock the login Keychain or allow iSmith to use it, then try again. Nothing has been changed."
+            alert.addButton(withTitle: "Try Again")
+            alert.addButton(withTitle: "Quit")
+            guard alert.runModal() == .alertFirstButtonReturn else { exit(0) }
+            vault = Vault(fileURL: paths.vaultURL, keyStore: keyStore)
+        }
         // First launch: the spike's sign-ins come over before config loads, so migration sees them.
         if let spikeDir = paths.spikeDir {
             SpikeImport.runIfNeeded(from: spikeDir, configURL: paths.configURL, vault: vault)
