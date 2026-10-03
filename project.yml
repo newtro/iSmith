@@ -68,9 +68,11 @@ targets:
         Debug:
           PRODUCT_BUNDLE_IDENTIFIER: com.scottsmith.ismith.debug
           ISMITH_DISPLAY_NAME: iSmith Dev
+          ASSETCATALOG_COMPILER_APPICON_NAME: AppIconDev
         Release:
           PRODUCT_BUNDLE_IDENTIFIER: com.scottsmith.ismith
           ISMITH_DISPLAY_NAME: iSmith
+          ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
     scheme:
       testTargets: [iSmithTests]
   iSmithTests:
