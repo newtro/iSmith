@@ -254,6 +254,13 @@ iSmith/
   owner-only file, unreadable file kept aside, older records, pruning deleted spaces, rail order
   through the browser), `PageRulesTests` (6: badge parsing and totals, keep-alive hosts, a tab's
   own setting, the scheduling policy on its own preferences) and the 5 P0 app tests.
+- **Deferred from review** (low; not hit in daily use as built):
+  - ⌘⇧T falls back to reopening a closed window when the current space has no closed tab, even if
+    a tab was just closed in another space (Chrome-like; a single time-ordered list would fix it).
+  - Keep alive isn't removed from a live tab that navigates away from Outlook; it applies the next
+    time the tab loads (by design, see above). P2's hibernation should re-check it.
+  - Real mouse drags and keystrokes weren't driven by the smoke test (see above); they're part of
+    the P1 acceptance run.
 - **Seen during the smoke test**: WebKit shows its own "Allow related Microsoft websites to share
   cookies?" prompt (Storage Access for related domains) during Microsoft sign-in. It's WebKit's
   UI, shown over the window; P2's prompts work should check it doesn't block real sign-ins.

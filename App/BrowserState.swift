@@ -36,7 +36,7 @@ final class BrowserState: NSObject, ObservableObject {
     private var closedWindows: [WindowRecord] = []
     /// Space id → its account switch in progress. Web views for that space wait for it, so a page
     /// can't load the old account's cookies and write them back after the wipe.
-    private var switching: [String: Task<Void, Never>] = [:]
+    private var switching: [String: (token: UUID, task: Task<Void, Never>)] = [:]
     private var refreshScheduled = false
     private var saveTask: Task<Void, Never>?
 
@@ -111,7 +111,7 @@ final class BrowserState: NSObject, ObservableObject {
     /// aren't replaced in the saved session by an empty window.
     @discardableResult
     func newWindow(space spaceID: String? = nil) -> WindowState {
-        if windows.isEmpty, spaceID == nil, let restored = reopenClosedWindow() { return restored }
+        if windows.isEmpty, spaceID == nil, let restored = reopenLastWindow() { return restored }
         let id = spaceID ?? currentWindow?.activeSpaceID ?? spaces.first?.id
         let window = WindowState()
         windows.append(window)
@@ -145,8 +145,21 @@ final class BrowserState: NSObject, ObservableObject {
     /// The Dock was clicked with no browser window open: the last closed one comes back.
     func reopen() {
         guard windows.isEmpty else { return }
-        if reopenClosedWindow() == nil { newWindow() }
+        if reopenLastWindow() == nil { newWindow() }
         scheduleRefresh()
+    }
+
+    /// The window closed last, when it was the only one open; older closed windows are left to
+    /// "Reopen Closed Window" and ⌘⇧T. nil (a fresh window) if it had no tabs.
+    private func reopenLastWindow() -> WindowState? {
+        guard let record = lastClosedWindow else { return nil }
+        lastClosedWindow = nil
+        if closedWindows.last?.id == record.id { closedWindows.removeLast() }
+        guard let pruned = SessionStore.pruned(SessionFile(windows: [record]), spaces: Set(spaces.map(\.id))).windows.first,
+              pruned.spaces.contains(where: { !$0.tabs.isEmpty }) else { return nil }
+        let window = restoreWindow(pruned)
+        scheduleRefresh()
+        return window
     }
 
     /// Brings back the most recently closed window with all its spaces' tabs (⌘⇧T when the
@@ -254,12 +267,18 @@ final class BrowserState: NSObject, ObservableObject {
             state.def = def
         })
         guard let switching else { return }
-        // Web views made for this space during the switch wait for it (see `buildWebView`).
-        self.switching[id] = switching
+        // Web views made for this space during the switch wait for this task (see
+        // `buildWebView`). It clears its own entry before it finishes, so nobody waiting on it
+        // can see the entry still set afterwards.
         let parked = urls
-        Task {
+        let token = UUID()
+        let done = Task {
             await switching.value
-            if self.switching[id] == switching { self.switching[id] = nil }
+            if self.switching[id]?.token == token { self.switching[id] = nil }
+        }
+        self.switching[id] = (token, done)
+        Task {
+            await done.value
             for (tab, webView, url) in parked {
                 // Only pages still showing in a tab of this space: one closed, moved or rebuilt
                 // meanwhile stays closed.
@@ -379,14 +398,14 @@ final class BrowserState: NSObject, ObservableObject {
         guard space(spaceID) != nil else { return }
         tab.isBuilding = true
         defer { tab.isBuilding = false }
-        var store: WKWebsiteDataStore
-        repeat {
-            // An account switch in this space finishes first, then seeding: a page must never
-            // load signed out, or with the account being switched away from.
-            await switching[spaceID]?.value
-            guard let def = space(spaceID)?.def else { return }
-            store = await sync.attach(def)
-        } while switching[spaceID] != nil
+        // An account switch in this space finishes first, then seeding: a page must never load
+        // signed out, or with the account being switched away from.
+        await switching[spaceID]?.task.value
+        guard let def = space(spaceID)?.def else { return }
+        let store = await sync.attach(def)
+        // A switch that started while this was waiting for the store parked every page; this one
+        // was made after, so it waits too rather than load with the old account.
+        if let started = switching[spaceID] { await started.task.value }
         guard owner(of: tab)?.1.spaceID == spaceID else { return } // closed or moved while opening
         let keepAlive = KeepAlive.isOn(setting: tab.keepAliveSetting, url: request?.url ?? tab.url)
         let configuration = WKWebViewConfiguration()
