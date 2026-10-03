@@ -99,10 +99,9 @@ final class BrowserState: NSObject, ObservableObject {
         self.sync = sync
         manager = SpaceManager(config: config, vault: vault, sync: sync)
         spaces = config.spaces.map(SpaceState.init)
-        // Tab histories in session.json are sealed with a key derived from the vault key (which
-        // exists once the vault can save).
-        let vaultKey = (try? keyStore.loadKey()) ?? nil
-        session = SessionStore(fileURL: paths.sessionURL, sealer: vaultKey.map(HistorySealer.init(vaultKey:)))
+        // Tab histories in session.json are sealed with a key derived from the vault's key.
+        session = SessionStore(fileURL: paths.sessionURL,
+                               sealer: vault.derivedKey(purpose: HistorySealer.purpose).map(HistorySealer.init(key:)))
         var data: BrowserDatabase?
         do {
             data = try BrowserDatabase(fileURL: paths.browserDataURL)
@@ -550,6 +549,7 @@ final class BrowserState: NSObject, ObservableObject {
     func navigate(_ tab: Tab, in tabs: SpaceTabs, to url: URL, typed: Bool = false) {
         if typed { tab.typed = (url, Date()) }
         tab.certificateProblem = nil
+        tab.retryURL = nil
         let request = URLRequest(url: url)
         let wanted = KeepAlive.isOn(setting: tab.keepAliveSetting, url: url)
         if let webView = tab.webView, tab.appliedKeepAlive == wanted {
@@ -767,8 +767,9 @@ final class BrowserState: NSObject, ObservableObject {
 
     func hook(_ tab: Tab) {
         tab.changed = { [weak self] in self?.scheduleRefresh() }
-        // A title flashing an unread count doesn't need the file written every second.
-        tab.titleChanged = { [weak self] in self?.scheduleRefresh(saveAfter: 5) }
+        // A title flashing an unread count updates the badges but doesn't write the file; titles
+        // are saved with the next navigation or change to the tabs, and at quit.
+        tab.titleChanged = { [weak self] in self?.scheduleRefresh(save: false) }
         tab.retitled = { [weak self, weak tab] title in
             // History keeps the title without its unread count, and only when that changes.
             let clean = UnreadBadge.stripped(title)
@@ -803,7 +804,7 @@ final class BrowserState: NSObject, ObservableObject {
 
     /// Badges update on the next turn of the run loop; the session is saved a second later, so a
     /// burst of title changes writes the file once.
-    func scheduleRefresh(saveAfter delay: TimeInterval = 1) {
+    func scheduleRefresh(save: Bool = true, saveAfter delay: TimeInterval = 1) {
         if !refreshScheduled {
             refreshScheduled = true
             DispatchQueue.main.async { [weak self] in
@@ -811,6 +812,7 @@ final class BrowserState: NSObject, ObservableObject {
                 self?.refresh()
             }
         }
+        guard save else { return }
         // A save already due as soon covers this change too. It isn't pushed back, so a page that
         // changes its title every second (Teams flashing a message) can't keep the session unsaved.
         let due = Date().addingTimeInterval(delay)
@@ -852,7 +854,11 @@ final class BrowserState: NSObject, ObservableObject {
         if snapshot != lastSaved, let bytes = session.encode(snapshot) {
             lastSaved = snapshot
             let store = session
-            sessionQueue.async { store.write(bytes) }
+            sessionQueue.async { [weak self] in
+                guard !store.write(bytes) else { return }
+                // Not written (disk full): the next save writes it even if nothing changed.
+                DispatchQueue.main.async { self?.lastSaved = nil }
+            }
         }
         if waitForDisk { sessionQueue.sync {} }
     }

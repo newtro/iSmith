@@ -14,7 +14,8 @@ extension BrowserState: WKUIDelegate {
                  for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
         guard let (window, tabs, opener) = owner(of: webView) else { return nil }
         // window.open("msteams:…") opens the app (after asking), not an empty tab.
-        if let url = navigationAction.request.url, !AppLinks.browserSchemes.contains(url.scheme?.lowercased() ?? "") {
+        if let url = navigationAction.request.url, let scheme = url.scheme?.lowercased(), !scheme.isEmpty,
+           !AppLinks.browserSchemes.contains(scheme) {
             openAppLink(url, from: webView, action: navigationAction)
             return nil
         }
@@ -163,6 +164,8 @@ extension BrowserState: WKNavigationDelegate {
         if navigationAction.targetFrame?.isMainFrame == true, let (_, _, tab) = owner(of: webView) {
             // Going back or forward, reloading, or restoring a tab isn't a new visit in history.
             tab.lastNavigationType = navigationAction.navigationType
+            // A newer navigation replaces any load waiting to be tried again.
+            tab.retryURL = nil
         }
         if navigationAction.navigationType == .linkActivated, navigationAction.targetFrame?.isMainFrame == true,
            Self.opensInBackground(navigationAction), let url, let (window, tabs, tab) = owner(of: webView) {
@@ -217,7 +220,7 @@ extension BrowserState: WKNavigationDelegate {
         guard let (_, tabs, tab) = owner(of: webView) else { return }
         tab.certificateProblem = nil
         tab.retryURL = nil
-        (webView as? BrowserWebView)?.typedSinceLoad = false
+        (webView as? BrowserWebView)?.editedSinceLoad = false
         // Questions from the page that's gone no longer apply.
         let prompts = tab.prompts
         tab.prompts = []
@@ -326,6 +329,7 @@ extension BrowserState {
             // screen shows why the page didn't open.
             let visible = owner(of: tab).map { $0.0.activeSpaceID == $0.1.spaceID && $0.1.layout.selected == tab.id } ?? false
             if visible, !tab.keepAlive {
+                tab.retryURL = nil
                 tab.certificateProblem = CertificateProblem(url: url, message: nsError.localizedDescription, trust: nil)
             } else {
                 tab.retryURL = url
@@ -407,39 +411,42 @@ extension BrowserState {
 
     // MARK: App links
 
-    /// msteams:, mailto: and other app links. A remembered "Don't Open" drops them. A remembered
-    /// "Open" opens the app at once only for a link the user clicked (or a page that opened right
-    /// after a click, such as Outlook's "Join" launcher); a page reaching for an app on its own (a
-    /// restored launcher tab, an ad) gets the question again. One question per scheme at a time,
-    /// naming the frame that asked; answering opens that one link.
+    /// msteams:, mailto: and other app links (see `AppLinks.plan`). A remembered "Don't Open" drops
+    /// them; a remembered "Open" opens the app at once only right after a real click or key press
+    /// in the page (or in the page that opened this one, such as Outlook's "Join" launcher), from
+    /// the page itself or a frame of the same site. Scripted clicks don't count. One question per
+    /// scheme at a time, naming the frame that asked; answering opens that one link.
     func openAppLink(_ url: URL, from webView: WKWebView, action: WKNavigationAction?) {
         guard let scheme = url.scheme?.lowercased(), let (_, _, tab) = owner(of: webView) else { return }
         let stored = try? data?.sites.appLinkDecision(scheme: scheme)
-        let clicked = action?.navigationType == .linkActivated || hadRecentInput(webView, tab: tab)
-        let source = (action?.sourceFrame as WKFrameInfo?)?.securityOrigin.host
+        let sourceFrame = action?.sourceFrame as WKFrameInfo?
+        let source = sourceFrame?.securityOrigin.host
+        let sameSite = sourceFrame?.isMainFrame ?? true || source?.lowercased() == webView.url?.host?.lowercased()
+        let clicked = sameSite && hadRecentInput(webView, tab: tab)
         let site = (source?.isEmpty == false ? source : nil) ?? webView.url?.host ?? "This page"
-        switch AppLinks.decide(url, stored: stored ?? nil, appFor: AppLinks.defaultApp) {
-        case .browser, .block:
+        switch AppLinks.plan(AppLinks.decide(url, stored: stored ?? nil, appFor: AppLinks.defaultApp), clicked: clicked) {
+        case .none:
             return
-        case .open where clicked:
+        case .open:
             NSWorkspace.shared.open(url)
-        case .noApp:
-            guard clicked, !tab.prompts.contains(where: { $0.key == "noapp:\(scheme)" }) else { return }
+        case .noAppNotice:
+            guard !tab.prompts.contains(where: { $0.key == "noapp:\(scheme)" }) else { return }
             ask(SitePrompt(key: "noapp:\(scheme)", symbol: "questionmark.app",
                            message: "No app on this Mac opens “\(scheme):” links.", allowTitle: "OK", denyTitle: nil) { _ in }, in: tab)
-        case .open(let app), .ask(let app, _):
+        case let .ask(_, name, remember):
             // Already asking about this scheme: later requests are dropped, not queued.
             guard !tab.prompts.contains(where: { $0.key == "app:\(scheme)" }) else { return }
-            let name = AppLinks.appName(app)
-            ask(SitePrompt(key: "app:\(scheme)", symbol: "arrow.up.forward.app",
-                           message: "\(site) wants to open \(name). iSmith will remember your answer for “\(scheme):” links you click.",
-                           allowTitle: "Open \(name)", denyTitle: "Don't Open") { [weak self] answer in
+            let message = remember
+                ? "\(site) wants to open \(name). iSmith will remember your answer for “\(scheme):” links you click."
+                : "\(site) wants to open \(name)."
+            ask(SitePrompt(key: "app:\(scheme)", symbol: "arrow.up.forward.app", message: message,
+                           allowTitle: "Open \(name)", denyTitle: remember ? "Don't Open" : "Not Now") { [weak self] answer in
                 switch answer {
                 case .allow:
-                    try? self?.data?.sites.setAppLinkDecision(.open, scheme: scheme)
+                    if remember { try? self?.data?.sites.setAppLinkDecision(.open, scheme: scheme) }
                     NSWorkspace.shared.open(url)
                 case .deny:
-                    try? self?.data?.sites.setAppLinkDecision(.block, scheme: scheme)
+                    if remember { try? self?.data?.sites.setAppLinkDecision(.block, scheme: scheme) }
                 case .dismissed:
                     break
                 }

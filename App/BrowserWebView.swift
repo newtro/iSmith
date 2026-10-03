@@ -12,8 +12,9 @@ final class BrowserWebView: WKWebView {
     /// The user's last click or key press in the page (app links honor a remembered "Open" only
     /// right after one).
     private(set) var lastUserInput: Date?
-    /// The user typed in the page since it last loaded, so it isn't hibernated (unsaved text).
-    var typedSinceLoad = false
+    /// The user edited something in the page since it last loaded (typed, pasted, dropped,
+    /// dictated), so it isn't hibernated: the text may be unsaved.
+    var editedSinceLoad = false
 
     override func mouseDown(with event: NSEvent) {
         lastUserInput = Date()
@@ -27,7 +28,6 @@ final class BrowserWebView: WKWebView {
 
     override func keyDown(with event: NSEvent) {
         lastUserInput = Date()
-        typedSinceLoad = true
         super.keyDown(with: event)
     }
     /// The element the last context menu was opened on.
@@ -112,6 +112,14 @@ final class BrowserWebView: WKWebView {
         }
         try { window.webkit.messageHandlers.ismithContext.postMessage({ link, image }); } catch (_) {}
       }, true);
+      // The first real edit in this page (typing, paste, drop, dictation) keeps the tab from
+      // hibernating until it loads again.
+      let edited = false;
+      addEventListener("input", (e) => {
+        if (edited || !e.isTrusted) return;
+        edited = true;
+        try { window.webkit.messageHandlers.ismithContext.postMessage({ edited: true }); } catch (_) {}
+      }, true);
     })();
     """
     static let contextHandler = "ismithContext"
@@ -122,6 +130,10 @@ final class ContextMenuReporter: NSObject, WKScriptMessageHandler {
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         MainActor.assumeIsolated {
             guard let webView = message.webView as? BrowserWebView, let body = message.body as? [String: Any] else { return }
+            if body["edited"] as? Bool == true {
+                webView.editedSinceLoad = true
+                return
+            }
             let url = { (key: String) -> URL? in
                 // A data: image can be megabytes; it's saved through WebKit, which has it already.
                 guard let s = body[key] as? String, s.count < 1_000_000, let url = URL(string: s), url.scheme != nil else { return nil }

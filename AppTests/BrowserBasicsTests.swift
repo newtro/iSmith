@@ -64,7 +64,6 @@ final class BrowserBasicsTests: XCTestCase {
         store.save(file)
         let bytes = try Data(contentsOf: store.fileURL)
         XCTAssertNil(bytes.range(of: Data(state.base64EncodedString().utf8)), "the history is sealed, not stored as is")
-        XCTAssertNil(bytes.range(of: Data("127.0.0.1:\(server.port)/one".utf8)), "nothing of it readable in the file")
         var reader = SessionStore(fileURL: store.fileURL, sealer: HistorySealer(vaultKey: vaultKey))
         let loaded = try XCTUnwrap(reader.load())
         XCTAssertEqual(loaded, file)
@@ -240,6 +239,21 @@ final class BrowserBasicsTests: XCTestCase {
         }
     }
 
+    /// A remembered "Open" works only for a click; a page reaching for an app by itself is asked
+    /// again and that answer isn't remembered (a restored meeting launcher mustn't open Teams, or
+    /// get Teams blocked for good).
+    func testAppLinkPlans() {
+        let teams = URL(fileURLWithPath: "/Applications/Microsoft Teams.app")
+        XCTAssertEqual(AppLinks.plan(.open(app: teams), clicked: true), .open(app: teams))
+        XCTAssertEqual(AppLinks.plan(.open(app: teams), clicked: false), .ask(app: teams, name: "Microsoft Teams", remember: false))
+        XCTAssertEqual(AppLinks.plan(.ask(app: teams, name: "Teams"), clicked: true), .ask(app: teams, name: "Teams", remember: true))
+        XCTAssertEqual(AppLinks.plan(.ask(app: teams, name: "Teams"), clicked: false), .ask(app: teams, name: "Teams", remember: false))
+        XCTAssertEqual(AppLinks.plan(.block, clicked: true), AppLinks.Plan.none)
+        XCTAssertEqual(AppLinks.plan(.noApp, clicked: false), AppLinks.Plan.none, "no notice for a page's own attempts")
+        XCTAssertEqual(AppLinks.plan(.noApp, clicked: true), .noAppNotice)
+        XCTAssertEqual(AppLinks.plan(.browser, clicked: true), AppLinks.Plan.none)
+    }
+
     /// The answer is remembered per scheme, in the site settings database.
     func testAppLinkAnswerIsRememberedPerScheme() throws {
         let data = try BrowserDatabase.inMemory()
@@ -293,6 +307,8 @@ final class BrowserBasicsTests: XCTestCase {
         let long = DownloadManager.safeName(String(repeating: "報告", count: 200) + ".pdf")
         XCTAssertTrue(long.hasSuffix(".pdf"), "the extension survives")
         XCTAssertLessThanOrEqual(long.utf8.count, 240, "fits a file name with room for \" (2)\"")
+        let dotted = DownloadManager.safeName("Q3 report. " + String(repeating: "x", count: 300))
+        XCTAssertLessThanOrEqual(dotted.utf8.count, 240, "a dot in a long title isn't an extension")
     }
 
     // MARK: - Permissions

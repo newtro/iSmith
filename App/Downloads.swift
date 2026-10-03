@@ -105,7 +105,12 @@ final class DownloadManager: NSObject, ObservableObject, WKDownloadDelegate {
             destination = await choosePlace(name, download.webView)
             // The panel confirmed replacing it; the old one goes to the Trash, not away for good.
             if let destination, FileManager.default.fileExists(atPath: destination.path) {
-                try? FileManager.default.trashItem(at: destination, resultingItemURL: nil)
+                do {
+                    try FileManager.default.trashItem(at: destination, resultingItemURL: nil)
+                } catch {
+                    // A volume without a Trash (a file share).
+                    try? FileManager.default.removeItem(at: destination)
+                }
             }
         } else {
             try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -222,7 +227,9 @@ final class DownloadManager: NSObject, ObservableObject, WKDownloadDelegate {
         name = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else { return "download" }
         // File names are limited to 255 bytes; keep the extension and leave room for " (2)".
-        let ext = (name as NSString).pathExtension
+        // A long "extension" is a dot inside a title, not a file type.
+        let found = (name as NSString).pathExtension
+        let ext = found.utf8.count <= 16 ? found : ""
         var base = ext.isEmpty ? name : (name as NSString).deletingPathExtension
         let limit = 230 - ext.utf8.count
         while base.utf8.count > max(limit, 1) { base.removeLast() }

@@ -33,6 +33,18 @@ final class VaultTests: XCTestCase {
             .filter { $0.lastPathComponent.hasPrefix("vault.unreadable-") }
     }
 
+    /// A key derived for another use (the app's session file) is stable for the same vault key,
+    /// differs by purpose, and is never the vault key itself.
+    func testDerivedKeys() throws {
+        let keys = InMemoryKeyStore()
+        let vault = Vault(fileURL: vaultURL, keyStore: keys)
+        let bytes = { (k: SymmetricKey?) in k?.withUnsafeBytes { Data($0) } }
+        let history = try XCTUnwrap(vault.derivedKey(purpose: "history"))
+        XCTAssertEqual(bytes(Vault(fileURL: vaultURL, keyStore: keys).derivedKey(purpose: "history")), bytes(history))
+        XCTAssertNotEqual(bytes(vault.derivedKey(purpose: "other")), bytes(history))
+        XCTAssertNotEqual(bytes(keys.key), bytes(history))
+    }
+
     func testRoundTripIsEncryptedOnDisk() throws {
         let keys = InMemoryKeyStore()
         let vault = Vault(fileURL: vaultURL, keyStore: keys)

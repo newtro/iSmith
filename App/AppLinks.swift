@@ -35,6 +35,28 @@ enum AppLinks {
         return .ask(app: app, name: appName(app))
     }
 
+    /// What the browser does with an app link, given whether the user just clicked (a real mouse
+    /// or key event in the page, or in the page that opened this one moments ago).
+    enum Plan: Equatable {
+        /// Nothing (a web link, a remembered "Don't Open", or no app and no click).
+        case none
+        case open(app: URL)
+        /// Ask. Only an answer to a click is remembered; a page reaching for an app by itself (a
+        /// restored meeting launcher) gets "Open" or "Not Now", and nothing is saved.
+        case ask(app: URL, name: String, remember: Bool)
+        /// Tell the user no app opens it (only after a click).
+        case noAppNotice
+    }
+
+    static func plan(_ action: Action, clicked: Bool) -> Plan {
+        switch action {
+        case .browser, .block: return .none
+        case let .open(app): return clicked ? .open(app: app) : .ask(app: app, name: appName(app), remember: false)
+        case let .ask(app, name): return .ask(app: app, name: name, remember: clicked)
+        case .noApp: return clicked ? .noAppNotice : .none
+        }
+    }
+
     static func appName(_ app: URL) -> String {
         let name = FileManager.default.displayName(atPath: app.path)
         return name.hasSuffix(".app") ? String(name.dropLast(4)) : name

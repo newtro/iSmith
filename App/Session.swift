@@ -45,10 +45,17 @@ struct SessionFile: Codable, Equatable {
 /// Seals tab histories for session.json with a key derived (HKDF-SHA256) from the vault key, so
 /// the file never holds form posts in the clear and the vault key itself has one use.
 struct HistorySealer {
+    /// The HKDF info for the history key.
+    static let purpose = "iSmith session history v1"
     private let key: SymmetricKey
 
+    /// A key already derived for this purpose (`Vault.derivedKey(purpose:)`).
+    init(key: SymmetricKey) {
+        self.key = key
+    }
+
     init(vaultKey: SymmetricKey) {
-        key = HKDF<SHA256>.deriveKey(inputKeyMaterial: vaultKey, info: Data("iSmith session history v1".utf8), outputByteCount: 32)
+        key = HKDF<SHA256>.deriveKey(inputKeyMaterial: vaultKey, info: Data(Self.purpose.utf8), outputByteCount: 32)
     }
 
     func seal(_ plain: Data) -> Data? {
@@ -194,13 +201,16 @@ struct SessionStore {
         }
     }
 
-    func write(_ data: Data) {
-        guard canSave else { return }
+    @discardableResult
+    func write(_ data: Data) -> Bool {
+        guard canSave else { return false }
         do {
             try SecureFile.prepareDirectory(fileURL.deletingLastPathComponent())
             try SecureFile.write(data, to: fileURL)
+            return true
         } catch {
             NSLog("iSmith: session save failed: \(error)")
+            return false
         }
     }
 
