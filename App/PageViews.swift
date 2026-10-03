@@ -149,36 +149,101 @@ struct PageProblemView: View {
 
 // MARK: - Bookmarks bar
 
-/// The bookmarks bar: the space's "Bookmarks Bar" folder; folders open as menus.
+/// The bookmarks bar: the space's "Bookmarks Bar" folder; folders open as menus. Only the items
+/// that fit are shown; the rest are in a » menu at the right end, as in other browsers.
 struct BookmarksBar: View {
     @EnvironmentObject private var browser: BrowserState
     @ObservedObject var window: WindowState
     let spaceID: String
     @State private var items: [BookmarkTree] = []
+    /// Each item's natural width, measured off-screen, keyed by bookmark id.
+    @State private var widths: [Int64: CGFloat] = [:]
+
+    private static let spacing: CGFloat = 2
+    private static let overflowWidth: CGFloat = 30
+    private static let sidePadding: CGFloat = 8
 
     var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 2) {
+        GeometryReader { geo in
+            // A small margin, so rounding never squeezes the last item that fits.
+            let shown = visibleCount(available: geo.size.width - Self.sidePadding * 2 - 8)
+            HStack(spacing: Self.spacing) {
                 if items.isEmpty {
                     Text("Bookmarks you add to the bar appear here (⌘D)")
                         .font(.caption).foregroundStyle(.tertiary).padding(.leading, 6)
                 }
-                ForEach(items, id: \.bookmark.id) { node in
+                ForEach(items.prefix(shown), id: \.bookmark.id) { node in
                     BookmarkBarItem(window: window, spaceID: spaceID, node: node)
+                        .fixedSize()
+                }
+                Spacer(minLength: 0)
+                if shown < items.count {
+                    Menu {
+                        BookmarkMenuContent(nodes: Array(items.dropFirst(shown))) {
+                            browser.openBookmark($0, in: window, newTab: NSEvent.modifierFlags.contains(.command))
+                        }
+                    } label: {
+                        Image(systemName: "chevron.right.2")
+                    }
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .frame(width: Self.overflowWidth)
+                    .help("\(items.count - shown) more bookmarks")
                 }
             }
-            .padding(.horizontal, 8)
+            .padding(.horizontal, Self.sidePadding)
+            .frame(width: geo.size.width, height: geo.size.height, alignment: .leading)
         }
         .frame(height: 24)
+        .background(alignment: .topLeading) { measurer }
         .padding(.bottom, 4)
         .onAppear(perform: reload)
         .onChange(of: spaceID) { _, _ in reload() }
         .onReceive(NotificationCenter.default.publisher(for: BookmarkStore.didChange)) { _ in reload() }
     }
 
+    /// Lays every item out at its natural size, invisibly, to learn its width.
+    private var measurer: some View {
+        HStack(spacing: Self.spacing) {
+            ForEach(items, id: \.bookmark.id) { node in
+                BookmarkBarItem(window: window, spaceID: spaceID, node: node)
+                    .fixedSize()
+                    .background(GeometryReader { proxy in
+                        Color.clear.preference(key: BookmarkWidths.self, value: [node.bookmark.id: proxy.size.width])
+                    })
+            }
+        }
+        .fixedSize()
+        .frame(width: 0, height: 0, alignment: .topLeading)
+        .hidden()
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+        .onPreferenceChange(BookmarkWidths.self) { widths = $0 }
+    }
+
+    /// How many items fit in `available` points. If not all of them do, room is kept for the »
+    /// button.
+    private func visibleCount(available: CGFloat) -> Int {
+        let sizes = items.map { (widths[$0.bookmark.id] ?? 120) + Self.spacing }
+        if sizes.reduce(0, +) <= available { return items.count }
+        var used: CGFloat = 0
+        for (index, size) in sizes.enumerated() {
+            if used + size + Self.overflowWidth > available { return index }
+            used += size
+        }
+        return items.count
+    }
+
     private func reload() {
         let tree = (try? browser.data?.bookmarks.tree(space: spaceID)) ?? []
         items = tree.first { $0.bookmark.root == .bar }?.children ?? []
+    }
+}
+
+private struct BookmarkWidths: PreferenceKey {
+    static var defaultValue: [Int64: CGFloat] = [:]
+    static func reduce(value: inout [Int64: CGFloat], nextValue: () -> [Int64: CGFloat]) {
+        value.merge(nextValue()) { $1 }
     }
 }
 
