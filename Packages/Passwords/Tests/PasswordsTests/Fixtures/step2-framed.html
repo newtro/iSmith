@@ -1,0 +1,11 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Sign in: step 2, with a frame</title></head>
+<body>
+<!-- The password step of a two-step sign-in, with a login form from another site in a frame.
+     Signing in inside the frame must not wipe the username remembered from step 1. -->
+<form id="step2" action="/done.html" method="post" onsubmit="event.preventDefault(); window.submitted = true;">
+  <input id="password" name="passwd" type="password" placeholder="Password">
+  <input id="signin" type="submit" value="Sign in">
+</form>
+<iframe id="other" src="http://localhost:{{PORT}}/frame-login.html" width="400" height="200"></iframe>
+</body></html>

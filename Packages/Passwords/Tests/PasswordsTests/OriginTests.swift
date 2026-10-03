@@ -104,6 +104,13 @@ final class OriginTests: XCTestCase {
             ("http://[::1]:8080", "http://[::1]:8080", .exact, "IPv6 exact"),
             ("https://login.microsoftonline.com", "https://login.live.com", nil, "Microsoft's two sign-in sites stay apart"),
             ("https://contoso.azurewebsites.net", "https://fabrikam.azurewebsites.net", nil, "apps under a private suffix"),
+            ("http://login.example.com", "http://www.example.com", nil, "no same-site matching over http"),
+            ("http://example.com", "http://example.com", .exact, "http still matches exactly"),
+            ("https://contoso-dev.okta.com", "https://evil-tenant.okta.com", nil, "Okta tenants stay apart"),
+            ("https://contoso.sharepoint.com", "https://fabrikam.sharepoint.com", nil, "SharePoint tenants stay apart"),
+            ("https://acme.atlassian.net", "https://evil.atlassian.net", nil, "Atlassian sites stay apart"),
+            ("https://acme.my.salesforce.com", "https://evil.my.salesforce.com", nil, "Salesforce orgs stay apart"),
+            ("https://acme.zendesk.com", "https://acme.zendesk.com", .exact, "a tenant still matches itself"),
         ]
         for row in table {
             XCTAssertEqual(m(row.saved, row.page), row.expected, "\(row.saved) on \(row.page): \(row.why)")

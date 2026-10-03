@@ -9,17 +9,24 @@ and the native UI the app adds on top.
 ```swift
 import Passwords
 
-let store: PasswordStore
-do {
-    store = try PasswordStore(fileURL: PasswordStore.defaultFileURL(dataDirectory: dataDir),
-                              keyStore: PasswordStore.keychainKeyStore())
-} catch PasswordStoreError.keychainUnavailable {
-    // Same handling as the vault: "Try Again" / continue without passwords. Nothing was touched.
+func openPasswords(dataDir: URL?) -> PasswordAutofill? {
+    let store: PasswordStore
+    do {
+        store = try PasswordStore(fileURL: PasswordStore.defaultFileURL(dataDirectory: dataDir),
+                                  keyStore: PasswordStore.keychainKeyStore())
+    } catch {
+        // `.keychainUnavailable`: same handling as the vault ("Try Again", or run without
+        // passwords). Nothing on disk was touched. Other errors: the folder couldn't be written.
+        return nil
+    }
+    if let aside = store.movedAside {
+        // Tell the user once: saved passwords couldn't be opened and were kept at `aside`.
+        _ = aside
+    }
+    let autofill = PasswordAutofill(store: store)   // one for the whole app; passwords are global
+    autofill.delegate = passwordUI                  // see "Delegate events" below
+    return autofill
 }
-if let aside = store.movedAside { /* tell the user once: saved passwords couldn't be opened, kept at `aside` */ }
-
-let autofill = PasswordAutofill(store: store)   // one for the whole app; passwords are global
-autofill.delegate = passwordUI                  // see "Delegate events" below
 ```
 
 - The file is `~/Library/Application Support/iSmith/passwords.sqlite` (0600, folder 0700). With
@@ -36,6 +43,9 @@ Call `autofill.attach(to: configuration)` on every `WKWebViewConfiguration` **be
 twice is a no-op. When a tab closes, `autofill.forget(webView)` drops its two-step state (it's
 also dropped automatically when the web view is deallocated).
 
+Tabs driven by an agent (after v1) call `autofill.setDisabled(true, for: webView)` when the agent
+takes them over: their focus and submit messages are ignored and `fill` refuses them.
+
 The script runs in the content world `PasswordAutofill.defaultWorldName` (`iSmith.passwords`).
 Don't run other app scripts in that world, and never register a handler named `ismithPasswords`
 in the page world.
@@ -46,7 +56,7 @@ All on the main actor.
 
 | Event | When | App does |
 |---|---|---|
-| `loginFieldFocused(focus)` | The user focuses or clicks a username or password field of a recognized form (trusted events only). | Show the **autofill popover** anchored to `focus.rectInWebView` (main frame) or to the mouse location (iframes; `rectInWebView` is nil). |
+| `loginFieldFocused(focus)` | A visible username or password field of a recognized form is focused or clicked. `focus.isUserInitiated` is true when the user clicked it or tabbed into it; a page calling `focus()` reports it false. | If `isUserInitiated`, show the **autofill popover** anchored to `focus.rectInWebView` (main frame) or the mouse location (iframes; `rectInWebView` is nil). If not, show at most a small key button in the field's corner that opens the popover on click. |
 | `captured(capture)` | A form was submitted with a new login (`.save`) or a changed password (`.update`). Unchanged logins and never-save origins aren't reported. | Show the **save bar**. |
 | `foundForms(kinds, frame)` | A frame gained login forms (sent when the set of kinds changes). | Optional: a key icon in the address bar; enables ⌘\\. |
 
@@ -56,16 +66,27 @@ Only ever call these in direct response to a user action (a click in the popover
 button). Never call `fill` on page load, on a timer, or from anything a page or an agent can
 trigger.
 
-- `try await autofill.fill(loginID, into: focus)`: fills the username (if visible) and password
-  of the focused field's form, or just the username on a first sign-in step. It re-reads the login
-  from the store, refuses (`.originMismatch`) a login that doesn't match the frame's origin,
-  refuses (`.stale`) when the frame has navigated since the focus, and refuses (`.noField`) when
-  the field or the password field is gone or hidden. It marks the login used.
+- `try await autofill.fill(loginID, into: focus, allowSameSite: row.matchKind == .sameSite)`:
+  fills the username (if visible) and password of the focused field's form, or just the username
+  on a first sign-in step. Pass `allowSameSite: true` only from a popover click on a same-site row
+  whose host was shown. It re-reads the login from the store and refuses:
+  - `.originMismatch`: the login doesn't match the frame's origin;
+  - `.sameSiteNotAllowed`: a same-site login without `allowSameSite`;
+  - `.tooSoon`: within `minimumFocusAge` (0.3 s) of the focus;
+  - `.stale` / `.frameOriginChanged`: the frame has navigated since the focus;
+  - `.noField`: the field or the password field is gone, hidden, covered, or moved to another
+    form;
+  - `.disabled`: autofill is off for the web view.
+
+  It marks the login used.
 - `try await autofill.fillGeneratedPassword(password, into: focus)`: for `focus.offersGeneratedPassword`.
   Generate with `PasswordGenerator.generate(focus.requirements)` (it honors `minlength`,
   `maxlength` and `passwordrules`).
-- ⌘\\: `if let f = autofill.lastFocus(in: webView), let best = f.suggestedLoginID ?? f.logins.first?.id { try await autofill.fill(best, into: f) }`.
-- Save bar: `autofill.save(capture)`, `autofill.neverSave(capture)` (per exact origin), or dismiss.
+- ⌘\\: `if let f = autofill.lastFocus(in: webView), let best = autofill.bestAutomaticLogin(for: f) { try await autofill.fill(best.id, into: f) } else { /* open the popover */ }`.
+  `bestAutomaticLogin` only answers for a field the user clicked or tabbed into, outside
+  cross-site frames, with an exact-origin login; everything else goes through the popover.
+- Save bar: `autofill.save(capture, username: editedUsername)`, `autofill.neverSave(capture)` (per
+  exact origin), or dismiss.
 
 ## Native UI expected
 
@@ -75,10 +96,12 @@ trigger.
   a `.sameSite` match shows its host in secondary text ("from login.example.com").
 - Preselect `focus.suggestedLoginID` (the second step of Microsoft or Google sign-in).
 - When `focus.frame.isCrossSite`, say so: "Fill your login for **accounts.example.com** in a frame
-  on this page?" The login is still matched to the frame's own origin; this is about clickjacking.
+  on this page?" The login is still matched to the frame's own origin; this is about clickjacking
+  (the frame itself may be invisible: its page can't hide it from the script inside).
 - `focus.offersGeneratedPassword`: a "Use strong password" row showing the generated password.
-- Ignore clicks in the popover for about 0.5 s after it appears, so a page that focuses a field
-  under the pointer can't turn the user's next click into a fill.
+- Ignore clicks and Return in the popover for about 0.5 s after it appears, so a page that
+  focuses a field under the pointer can't turn the user's next click or keypress into a fill
+  (`fill` itself refuses within 0.3 s of the focus).
 - Keyboard: ↑/↓, Return fills, Esc closes. Close it on navigation, scroll or tab switch.
 - Show nothing when `logins` is empty and there's no generator row.
 
@@ -101,8 +124,9 @@ trigger.
   `LAContext().evaluatePolicy(.deviceOwnerAuthentication, localizedReason: "show your saved password")`
   (Touch ID, falling back to the Mac password). Keep the unlock for about 60 seconds while the
   window stays key, and re-lock when it resigns key, the screen locks, or the Mac sleeps.
-- Copy with `SecretPasteboard.copy(_:)`: it marks the item concealed and transient for clipboard
-  managers and clears it after 60 seconds unless something else was copied.
+- Copy with `SecretPasteboard.copy(_:)`: it keeps the item on this Mac (no Universal Clipboard),
+  marks it concealed and transient for clipboard managers, and clears it after 60 seconds or at
+  quit unless something else was copied.
 - Report `store.unreadableCount()` if it's non-zero ("2 saved logins couldn't be decrypted").
 
 ## Rules the app must keep (threat model)
@@ -120,9 +144,11 @@ trigger.
 
 See `Origin.swift` for the full rules and `OriginTests` for the table. A login saved for origin S
 is offered on a frame of origin P when the scheme and effective port are equal and either the
-hosts are equal (exact) or both hosts share a registrable domain under the Public Suffix List
-(same site). IP addresses, single-label hosts and hosts that are public suffixes match exactly
-only. Opaque origins match nothing.
+hosts are equal (exact) or both are `https` hosts sharing a registrable domain under the Public
+Suffix List (same site). `http` origins, IP addresses, single-label hosts, hosts that are public
+suffixes, and hosts under multi-tenant services that aren't on the list (`Origin.exactOnlySites`:
+Okta, SharePoint, Atlassian, Salesforce, Zendesk, …) match exactly only. Opaque origins match
+nothing. Same-site matches are only filled from an explicit popover pick.
 
 The Public Suffix List ships in `Sources/Passwords/Resources/public_suffix_list.dat`. Refresh it
 from https://publicsuffix.org/list/public_suffix_list.dat before releases.
@@ -131,4 +157,5 @@ from https://publicsuffix.org/list/public_suffix_list.dat before releases.
 
 - Brave password import (P5) writes through `store.save(origin:username:password:)`.
 - Passkeys (entitlement pending).
+- Password history: "Update" replaces the old password; there's no undo yet.
 - Fields inside shadow roots are only recognized when their `<form>` is in the same shadow root.

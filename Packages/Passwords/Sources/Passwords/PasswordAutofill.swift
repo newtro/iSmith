@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import os
 import WebKit
@@ -63,6 +64,13 @@ public struct LoginFieldFocus {
     /// sign-in in this tab.
     public let suggestedLoginID: UUID?
     public let requirements: PasswordRequirements
+    /// The user clicked the field or tabbed into it. A page calling `focus()` on a field also
+    /// reports a focus, with this false: don't open the popover by itself for those, and ⌘\
+    /// (`bestAutomaticLogin`) won't fill them.
+    public let isUserInitiated: Bool
+    /// When the focus was reported. `fill` refuses until `minimumFocusAge` has passed, so a page
+    /// focusing a field just as the user clicks can't turn that click into a fill.
+    public let receivedAt: Date
 
     /// Whether to offer "Use strong password" (signup and change-password forms).
     public var offersGeneratedPassword: Bool { field == .newPassword }
@@ -94,6 +102,14 @@ public enum AutofillError: Error, Equatable {
     case originMismatch
     /// The frame navigated since the field was focused.
     case stale
+    /// The frame's document is no longer at the origin it was focused at.
+    case frameOriginChanged
+    /// The login is a same-site match (another host) and the fill didn't allow that.
+    case sameSiteNotAllowed
+    /// The fill came sooner than `minimumFocusAge` after the focus.
+    case tooSoon
+    /// Autofill is turned off for this web view (`setDisabled(_:for:)`).
+    case disabled
     /// The field, or the form's password field, is gone or hidden.
     case noField
     case scriptFailed(String)
@@ -137,20 +153,25 @@ public final class PasswordAutofill {
     /// How long a username submitted on the first step of a two-step sign-in is kept for the
     /// password step.
     public var usernameStepLifetime: TimeInterval = 600
+    /// How long after a focus event a fill is refused.
+    public var minimumFocusAge: TimeInterval = 0.3
 
     private let userScript: WKUserScript
     private lazy var messageProxy = MessageProxy(owner: self)
     private let attached = NSHashTable<WKUserContentController>.weakObjects()
     private let tabs = NSMapTable<WKWebView, TabState>.weakToStrongObjects()
+    private let disabledWebViews = NSHashTable<WKWebView>.weakObjects()
     private static let log = Logger(subsystem: "com.scottsmith.ismith", category: "autofill")
 
     final class TabState {
         var lastFocus: LoginFieldFocus?
-        /// A username from the first step of a two-step sign-in, with where and when.
-        var pendingUsername: (origin: Origin, username: String, date: Date)?
+        /// Usernames from the first step of a two-step sign-in, per site, with where and when.
+        /// Keyed by site so a frame from another site can't replace or clear one.
+        var pendingUsernames: [String: (origin: Origin, username: String, date: Date)] = [:]
         /// The login the user last filled in this tab.
         var chosen: (id: UUID, origin: Origin, date: Date)?
-        var lastCapture: (key: String, date: Date)?
+        /// A digest of the last capture (origin, username, password), never the values.
+        var lastCapture: (digest: Data, date: Date)?
     }
 
     public init(store: PasswordStore, worldName: String = PasswordAutofill.defaultWorldName) {
@@ -204,16 +225,47 @@ public final class PasswordAutofill {
         tabs.removeObject(forKey: webView)
     }
 
+    /// Turns autofill and capture off for one web view, for tabs an agent drives: their messages
+    /// are ignored and nothing is filled into them.
+    public func setDisabled(_ disabled: Bool, for webView: WKWebView) {
+        if disabled {
+            disabledWebViews.add(webView)
+            forget(webView)
+        } else {
+            disabledWebViews.remove(webView)
+        }
+    }
+
+    public func isDisabled(for webView: WKWebView) -> Bool { disabledWebViews.contains(webView) }
+
+    /// The login ⌘\ may fill without showing the popover: only for a field the user clicked or
+    /// tabbed into, in the main frame or a same-site frame, and only an exact-origin match (the
+    /// suggested one from a two-step sign-in first). Otherwise nil: show the popover instead.
+    public func bestAutomaticLogin(for focus: LoginFieldFocus) -> LoginSummary? {
+        guard focus.isUserInitiated, !focus.frame.isCrossSite else { return nil }
+        let exact = focus.logins.filter { $0.matchKind == .exact }
+        if let suggested = focus.suggestedLoginID, let login = exact.first(where: { $0.id == suggested }) { return login }
+        return exact.first
+    }
+
     // MARK: Actions (call only in response to the user)
 
     /// Fills a saved login into the form of the focused field: the username (if the form has a
     /// visible one) and the password, or just the username on a first sign-in step. The login is
     /// loaded from the store here, and must match the frame's origin; the frame must still show
-    /// the same document, and the field must still be visible.
-    public func fill(_ loginID: UUID, into focus: LoginFieldFocus) async throws {
+    /// the same document, and the fields must still be visible to the user.
+    ///
+    /// A same-site login (from another host of the site) is only filled with `allowSameSite`,
+    /// which the popover passes when the user picked that row with its host shown.
+    public func fill(_ loginID: UUID, into focus: LoginFieldFocus, allowSameSite: Bool = false) async throws {
         guard let webView = focus.frame.webView else { throw AutofillError.frameGone }
+        guard !isDisabled(for: webView) else { throw AutofillError.disabled }
+        guard Date().timeIntervalSince(focus.receivedAt) >= minimumFocusAge else { throw AutofillError.tooSoon }
         guard let login = try store.login(id: loginID) else { throw AutofillError.loginNotFound }
-        guard Origin.match(saved: login.origin, page: focus.frame.origin) != nil else {
+        switch Origin.match(saved: login.origin, page: focus.frame.origin) {
+        case .exact: break
+        case .sameSite: guard allowSameSite else { throw AutofillError.sameSiteNotAllowed }
+        case nil:
             Self.log.error("refused to fill a login into a frame of another origin")
             throw AutofillError.originMismatch
         }
@@ -228,6 +280,8 @@ public final class PasswordAutofill {
     /// focused field's form. Generate it with `PasswordGenerator.generate(focus.requirements)`.
     public func fillGeneratedPassword(_ password: String, into focus: LoginFieldFocus) async throws {
         guard let webView = focus.frame.webView else { throw AutofillError.frameGone }
+        guard !isDisabled(for: webView) else { throw AutofillError.disabled }
+        guard Date().timeIntervalSince(focus.receivedAt) >= minimumFocusAge else { throw AutofillError.tooSoon }
         try await runFill(in: webView, focus: focus, request: ["mode": "generated", "username": "", "password": password])
     }
 
@@ -248,16 +302,17 @@ public final class PasswordAutofill {
         switch result as? String {
         case "filled": return
         case "stale": throw AutofillError.stale
-        case "originMismatch": throw AutofillError.stale
+        case "originMismatch": throw AutofillError.frameOriginChanged
         case "noField": throw AutofillError.noField
         case let other: throw AutofillError.scriptFailed(other ?? "no result")
         }
     }
 
-    /// Saves a captured sign-in (the save bar's "Save" or "Update").
+    /// Saves a captured sign-in (the save bar's "Save" or "Update"), with the username the user
+    /// may have corrected in the bar.
     @discardableResult
-    public func save(_ capture: PasswordCapture) throws -> Login {
-        try store.save(origin: capture.origin, username: capture.username, password: capture.password)
+    public func save(_ capture: PasswordCapture, username: String? = nil) throws -> Login {
+        try store.save(origin: capture.origin, username: username ?? capture.username, password: capture.password)
     }
 
     /// Never offers to save for the capture's origin again (the save bar's "Never for this site").
@@ -275,7 +330,7 @@ public final class PasswordAutofill {
     }
 
     fileprivate func receive(_ message: WKScriptMessage) {
-        guard message.world.name == contentWorld.name, let webView = message.webView,
+        guard message.world.name == contentWorld.name, let webView = message.webView, !isDisabled(for: webView),
               let body = message.body as? [String: Any], let type = body["type"] as? String,
               let docID = body["docID"] as? String, docID.count == 32,
               docID.allSatisfy(\.isHexDigit) else { return }
@@ -317,16 +372,19 @@ public final class PasswordAutofill {
         if let chosen = tab.chosen, Date().timeIntervalSince(chosen.date) < usernameStepLifetime,
            matches.contains(where: { $0.login.id == chosen.id }) {
             suggested = chosen.id
-        } else if let pending = tab.pendingUsername, Date().timeIntervalSince(pending.date) < usernameStepLifetime,
-                  Origin.match(saved: pending.origin, page: frame.origin) != nil {
-            suggested = matches.first { $0.login.username == pending.username }?.login.id
+        } else if let pending = pendingUsername(in: tab, for: frame.origin) {
+            suggested = matches.first { $0.kind == .exact && $0.login.username == pending }?.login.id
         }
-        func intValue(_ key: String) -> Int? { (body[key] as? NSNumber)?.intValue }
+        func intValue(_ key: String) -> Int? {
+            guard let v = (body[key] as? NSNumber)?.intValue, (1...4096).contains(v) else { return nil }
+            return v
+        }
         let rules = (body["passwordRules"] as? String).flatMap { $0.isEmpty ? nil : String($0.prefix(512)) }
         let focus = LoginFieldFocus(
             frame: frame, fieldID: fieldID, field: field, form: form, rect: rect, rectInWebView: rectInWebView,
             logins: matches.map(\.summary), suggestedLoginID: suggested,
-            requirements: PasswordRequirements(minLength: intValue("minLength"), maxLength: intValue("maxLength"), rules: rules))
+            requirements: PasswordRequirements(minLength: intValue("minLength"), maxLength: intValue("maxLength"), rules: rules),
+            isUserInitiated: body["userInitiated"] as? Bool == true, receivedAt: Date())
         tab.lastFocus = focus
         delegate?.passwordAutofill(self, loginFieldFocused: focus)
     }
@@ -340,7 +398,7 @@ public final class PasswordAutofill {
         let tab = state(for: webView)
         let typed = text("username", limit: 1024).trimmingCharacters(in: .whitespacesAndNewlines)
         if form == .usernameOnly {
-            if !typed.isEmpty { tab.pendingUsername = (frame.origin, typed, Date()) }
+            if !typed.isEmpty { tab.pendingUsernames[Self.twoStepKey(frame.origin)] = (frame.origin, typed, Date()) }
             return
         }
         let current = text("password", limit: 4096), new = text("newPassword", limit: 4096)
@@ -353,20 +411,18 @@ public final class PasswordAutofill {
         guard !password.isEmpty else { return }
 
         var username = typed
-        if username.isEmpty, let pending = tab.pendingUsername,
-           Date().timeIntervalSince(pending.date) < usernameStepLifetime,
-           Origin.match(saved: pending.origin, page: frame.origin) != nil {
-            username = pending.username
+        if username.isEmpty, let pending = pendingUsername(in: tab, for: frame.origin) {
+            username = pending
         }
         if username.isEmpty {
             username = text("usernameHint", limit: 1024).trimmingCharacters(in: .whitespacesAndNewlines)
         }
-        tab.pendingUsername = nil
+        tab.pendingUsernames[Self.twoStepKey(frame.origin)] = nil
 
         // The script may report one sign-in more than once (a click and then the submit).
-        let key = [frame.origin.serialized, username, password].joined(separator: "\u{0}")
-        if let last = tab.lastCapture, last.key == key, Date().timeIntervalSince(last.date) < 10 { return }
-        tab.lastCapture = (key, Date())
+        let digest = Data(SHA256.hash(data: Data([frame.origin.serialized, username, password].joined(separator: "\u{0}").utf8)))
+        if let last = tab.lastCapture, last.digest == digest, Date().timeIntervalSince(last.date) < 10 { return }
+        tab.lastCapture = (digest, Date())
 
         let action: SaveAction
         do {
@@ -384,6 +440,20 @@ public final class PasswordAutofill {
             delegate?.passwordAutofill(self, captured: PasswordCapture(
                 origin: frame.origin, username: username, password: password, action: action, form: form, webView: webView))
         }
+    }
+}
+
+extension PasswordAutofill {
+    /// Two-step usernames are kept per site (or per host where only exact matching applies).
+    nonisolated static func twoStepKey(_ origin: Origin) -> String {
+        "\(origin.scheme)|\(origin.port)|\(origin.sameSiteKey(using: .shared) ?? origin.host)"
+    }
+
+    fileprivate func pendingUsername(in tab: TabState, for origin: Origin) -> String? {
+        guard let pending = tab.pendingUsernames[Self.twoStepKey(origin)],
+              Date().timeIntervalSince(pending.date) < usernameStepLifetime,
+              Origin.match(saved: pending.origin, page: origin) != nil else { return nil }
+        return pending.username
     }
 }
 

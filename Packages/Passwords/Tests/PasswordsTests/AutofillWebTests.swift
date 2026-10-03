@@ -3,6 +3,9 @@ import WebKit
 import XCTest
 
 /// Capture and fill in a real WKWebView, on the local HTML fixtures served over HTTP.
+///
+/// `type` and `click` use real keyboard and mouse input (trusted events), as a user would;
+/// `pageSet` and `focus` use page script, as a hostile page would.
 @MainActor
 final class AutofillWebTests: XCTestCase {
     private var server: FixtureServer!
@@ -23,23 +26,33 @@ final class AutofillWebTests: XCTestCase {
     private var origin: Origin { Origin(url: server.url("/"))! }
     private var localhostOrigin: Origin { Origin(url: server.url("/", host: "localhost"))! }
 
+    private func q(_ s: String) -> String { AutofillHarness.quote(s) }
+
     private func value(_ id: String, in frame: WKFrameInfo? = nil) async throws -> String {
-        try await h.pageString("return document.getElementById(\(jsonQuote(id))).value", in: frame)
+        try await h.pageString("return document.getElementById(\(q(id))).value", in: frame)
     }
 
-    private func jsonQuote(_ s: String) -> String {
-        String(decoding: try! JSONSerialization.data(withJSONObject: [s]).dropFirst().dropLast(), as: UTF8.self)
-    }
-
+    /// Focuses a field from page script and waits for the focus event.
     private func focus(_ id: String, in frame: WKFrameInfo? = nil) async throws -> LoginFieldFocus {
         let before = h.focuses.count
-        try await h.page("document.getElementById(\(jsonQuote(id))).focus()", in: frame)
+        try await h.page("document.getElementById(\(q(id))).focus()", in: frame)
         try await h.waitUntil("a focus event for #\(id)") { h.focuses.count > before }
         return h.focuses.last!
     }
 
+    /// Replaces a field's text by typing, as the user would.
     private func type(_ id: String, _ text: String, in frame: WKFrameInfo? = nil) async throws {
-        try await h.page("document.getElementById(\(jsonQuote(id))).value = \(jsonQuote(text))", in: frame)
+        try await h.page("const el = document.getElementById(\(q(id))); el.focus(); el.value = '';", in: frame)
+        try await h.typeReal(text)
+    }
+
+    /// Sets a field's value from page script (untrusted).
+    private func pageSet(_ id: String, _ text: String) async throws {
+        try await h.page("document.getElementById(\(q(id))).value = \(q(text))")
+    }
+
+    private func submit(_ formID: String, in frame: WKFrameInfo? = nil) async throws {
+        try await h.page("document.getElementById(\(q(formID))).requestSubmit()", in: frame)
     }
 
     // MARK: Single-page login
@@ -57,18 +70,22 @@ final class AutofillWebTests: XCTestCase {
         XCTAssertEqual(emptyPass, "")
         XCTAssertTrue(h.focuses.isEmpty)
 
-        let focus = try await focus("username")
-        XCTAssertEqual(focus.field, .username)
-        XCTAssertEqual(focus.form, .login)
-        XCTAssertEqual(focus.frame.origin, origin)
-        XCTAssertTrue(focus.frame.isMainFrame)
-        XCTAssertFalse(focus.frame.isCrossSite)
-        XCTAssertEqual(focus.logins.map(\.id), [saved.id], "only this origin's logins")
-        XCTAssertEqual(focus.logins.first?.matchKind, .exact)
-        XCTAssertNotNil(focus.rectInWebView)
-        XCTAssertGreaterThan(focus.rect.width, 0)
-        XCTAssertFalse(focus.offersGeneratedPassword)
-        XCTAssertEqual(h.autofill.lastFocus(in: h.webView)?.fieldID, focus.fieldID)
+        // A real click: the popover may open, and ⌘\ may fill the exact match.
+        try await h.click("username")
+        let clicked = try XCTUnwrap(h.focuses.last)
+        XCTAssertTrue(clicked.isUserInitiated)
+        XCTAssertEqual(clicked.field, .username)
+        XCTAssertEqual(clicked.form, .login)
+        XCTAssertEqual(clicked.frame.origin, origin)
+        XCTAssertTrue(clicked.frame.isMainFrame)
+        XCTAssertFalse(clicked.frame.isCrossSite)
+        XCTAssertEqual(clicked.logins.map(\.id), [saved.id], "only this origin's logins")
+        XCTAssertEqual(clicked.logins.first?.matchKind, .exact)
+        XCTAssertNotNil(clicked.rectInWebView)
+        XCTAssertGreaterThan(clicked.rect.width, 0)
+        XCTAssertFalse(clicked.offersGeneratedPassword)
+        XCTAssertEqual(h.autofill.lastFocus(in: h.webView)?.fieldID, clicked.fieldID)
+        XCTAssertEqual(h.autofill.bestAutomaticLogin(for: clicked)?.id, saved.id)
 
         // The search box is not a login field.
         let count = h.focuses.count
@@ -76,7 +93,7 @@ final class AutofillWebTests: XCTestCase {
         try await h.settle(0.4)
         XCTAssertEqual(h.focuses.count, count)
 
-        try await h.autofill.fill(saved.id, into: focus)
+        try await h.autofill.fill(saved.id, into: clicked)
         let filledUser = try await value("username"), filledPass = try await value("password")
         XCTAssertEqual(filledUser, "scott@example.com")
         XCTAssertEqual(filledPass, "Saved-Secret-1")
@@ -85,14 +102,14 @@ final class AutofillWebTests: XCTestCase {
         XCTAssertNotNil(try h.store.login(id: saved.id)?.lastUsed, "filling marks the login used")
 
         // Signing in with the filled login: already saved, so nothing to ask.
-        try await h.page("document.getElementById('login').requestSubmit()")
+        try await submit("login")
         try await h.settle()
         XCTAssertTrue(h.captures.isEmpty)
 
-        // A new account: offered for saving.
+        // A new account, typed: offered for saving.
         try await type("username", "new.user")
         try await type("password", "New-Password-2")
-        try await h.page("document.getElementById('login').requestSubmit()")
+        try await submit("login")
         try await h.waitUntil("a capture") { !h.captures.isEmpty }
         let capture = h.captures[0]
         XCTAssertEqual(capture.origin, origin)
@@ -101,13 +118,16 @@ final class AutofillWebTests: XCTestCase {
         XCTAssertEqual(capture.action, .save)
         XCTAssertEqual(capture.form, .login)
         XCTAssertFalse(String(describing: capture).contains("New-Password"), "captures don't print their password")
-        let created = try h.autofill.save(capture)
+        // The user corrected the username in the save bar.
+        let created = try h.autofill.save(capture, username: "new.user@example.com")
+        XCTAssertEqual(try h.store.login(id: created.id)?.username, "new.user@example.com")
         XCTAssertEqual(try h.store.login(id: created.id)?.password, "New-Password-2")
 
         // The same account with a new password: offered as an update.
+        try await type("username", "new.user@example.com")
         try await type("password", "Changed-Password-3")
         try await h.page("document.getElementById('signin').click()") // an untrusted click is ignored...
-        try await h.page("document.getElementById('login').requestSubmit()") // ...the submit is seen
+        try await submit("login") // ...the submit is seen
         try await h.waitUntil("an update capture") { h.captures.count == 2 }
         XCTAssertEqual(h.captures[1].action, .update(existing: created.id))
         XCTAssertEqual(h.captures[1].password, "Changed-Password-3")
@@ -115,9 +135,64 @@ final class AutofillWebTests: XCTestCase {
         // "Never for this site" silences it.
         try h.autofill.neverSave(h.captures[1])
         try await type("password", "Changed-Again-4")
-        try await h.page("document.getElementById('login').requestSubmit()")
+        try await submit("login")
         try await h.settle()
         XCTAssertEqual(h.captures.count, 2)
+    }
+
+    func testScriptFocusIsNotTheUsers() async throws {
+        let saved = try h.store.add(origin: origin, username: "user", password: "Script-Focus-1")
+        try await h.load(server.url("/login.html"))
+        let scripted = try await focus("password")
+        XCTAssertFalse(scripted.isUserInitiated, "a page calling focus() is not the user")
+        XCTAssertNil(h.autofill.bestAutomaticLogin(for: scripted), "⌘\\ doesn't fill a field the page focused")
+        XCTAssertEqual(scripted.logins.map(\.id), [saved.id])
+
+        // Only exact matches are filled automatically, and same-site ones only when picked.
+        try await h.click("password")
+        let clicked = try XCTUnwrap(h.focuses.last)
+        XCTAssertTrue(clicked.isUserInitiated)
+        let sibling = LoginSummary(id: UUID(), origin: origin, username: "sibling", lastUsed: nil, matchKind: .sameSite)
+        let onlySibling = LoginFieldFocus(
+            frame: clicked.frame, fieldID: clicked.fieldID, field: clicked.field, form: clicked.form, rect: clicked.rect,
+            rectInWebView: clicked.rectInWebView, logins: [sibling], suggestedLoginID: sibling.id,
+            requirements: clicked.requirements, isUserInitiated: true, receivedAt: clicked.receivedAt)
+        XCTAssertNil(h.autofill.bestAutomaticLogin(for: onlySibling))
+    }
+
+    func testFillRightAfterAFocusIsRefused() async throws {
+        let saved = try h.store.add(origin: origin, username: "user", password: "Too-Soon-1")
+        h.autofill.minimumFocusAge = 0.3
+        try await h.load(server.url("/login.html"))
+        let focus = try await focus("password")
+        do {
+            try await h.autofill.fill(saved.id, into: focus)
+            XCTFail("filled within the focus guard")
+        } catch {
+            XCTAssertEqual(error as? AutofillError, .tooSoon)
+        }
+        try await h.settle(0.35)
+        try await h.autofill.fill(saved.id, into: focus)
+        let pass = try await value("password")
+        XCTAssertEqual(pass, "Too-Soon-1")
+    }
+
+    func testPageCannotForgeSubmissions() async throws {
+        try h.store.add(origin: origin, username: "victim", password: "Real-Password-1")
+        try await h.load(server.url("/login.html"))
+        // Values set by script, then every kind of submit a script can cause.
+        try await pageSet("username", "victim")
+        try await pageSet("password", "Attacker-Chosen-2")
+        try await h.page("document.getElementById('login').dispatchEvent(new Event('submit', { bubbles: true }))")
+        try await submit("login")
+        try await h.page("document.getElementById('signin').click()")
+        try await h.page("""
+            const el = document.getElementById('password');
+            el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+            """)
+        try await h.settle()
+        XCTAssertTrue(h.captures.isEmpty, "no update offered for values the page made up")
+        XCTAssertEqual(try h.store.allLogins().first?.password, "Real-Password-1")
     }
 
     // MARK: Two-step sign-in
@@ -129,9 +204,7 @@ final class AutofillWebTests: XCTestCase {
         XCTAssertEqual(step1.field, .username)
 
         try await type("email", "two.step@example.com")
-        try await h.waitForNavigation {
-            try await h.page("document.getElementById('step1').requestSubmit()")
-        }
+        try await h.waitForNavigation { try await submit("step1") }
         XCTAssertTrue(h.webView.url?.path.hasSuffix("step2.html") == true)
         XCTAssertTrue(h.captures.isEmpty, "the username step alone isn't offered for saving")
 
@@ -139,7 +212,7 @@ final class AutofillWebTests: XCTestCase {
         XCTAssertEqual(step2.form, .login)
         XCTAssertEqual(step2.field, .password)
         try await type("password", "Two-Step-Secret-5")
-        try await h.page("document.getElementById('step2').requestSubmit()")
+        try await submit("step2")
         try await h.waitUntil("a capture") { !h.captures.isEmpty }
         XCTAssertEqual(h.captures[0].username, "two.step@example.com", "the username from the first page")
         XCTAssertEqual(h.captures[0].password, "Two-Step-Secret-5")
@@ -154,9 +227,7 @@ final class AutofillWebTests: XCTestCase {
         try await h.autofill.fill(saved.id, into: fillStep1)
         let filledEmail = try await value("email")
         XCTAssertEqual(filledEmail, "two.step@example.com")
-        try await h.waitForNavigation {
-            try await h.page("document.getElementById('step1').requestSubmit()")
-        }
+        try await h.waitForNavigation { try await submit("step1") }
         let fillStep2 = try await focus("password")
         XCTAssertEqual(fillStep2.suggestedLoginID, saved.id)
         let notYet = try await value("password")
@@ -164,6 +235,29 @@ final class AutofillWebTests: XCTestCase {
         try await h.autofill.fill(saved.id, into: fillStep2)
         let filled = try await value("password")
         XCTAssertEqual(filled, "Two-Step-Secret-5")
+    }
+
+    func testAnotherSitesFrameCannotWipeTheTwoStepUsername() async throws {
+        try await h.load(server.url("/step1.html"))
+        _ = try await focus("email")
+        try await type("email", "kept@example.com")
+        try await h.waitForNavigation { try await submit("step1") }
+        try await h.load(server.url("/step2-framed.html"))
+        try await h.waitUntil("the iframe's login form") { h.forms.contains { !$0.frame.isMainFrame } }
+        let iframe = h.forms.first { !$0.frame.isMainFrame }!.frame
+
+        // A sign-in inside the other site's frame, typed for real.
+        try await type("username", "framed-user", in: iframe.frameInfo)
+        try await type("password", "Framed-Secret-1", in: iframe.frameInfo)
+        try await submit("login", in: iframe.frameInfo)
+        try await h.waitUntil("the frame's capture") { h.captures.contains { $0.origin == localhostOrigin } }
+
+        _ = try await focus("password")
+        try await type("password", "Step-Two-Secret-2")
+        try await submit("step2")
+        try await h.waitUntil("the step-two capture") { h.captures.contains { $0.origin == origin } }
+        let capture = h.captures.first { $0.origin == origin }!
+        XCTAssertEqual(capture.username, "kept@example.com")
     }
 
     // MARK: Signup
@@ -186,7 +280,7 @@ final class AutofillWebTests: XCTestCase {
         XCTAssertEqual(confirmValue, generated)
 
         try await type("email", "signup@example.com")
-        try await h.page("document.getElementById('signup').requestSubmit()")
+        try await submit("signup")
         try await h.waitUntil("a capture") { !h.captures.isEmpty }
         XCTAssertEqual(h.captures[0].form, .signup)
         XCTAssertEqual(h.captures[0].username, "signup@example.com")
@@ -197,9 +291,24 @@ final class AutofillWebTests: XCTestCase {
         h.clearEvents()
         try await type("new", "Mismatch-One-1")
         try await type("confirm", "Mismatch-Two-2")
-        try await h.page("document.getElementById('signup').requestSubmit()")
+        try await submit("signup")
         try await h.settle()
         XCTAssertTrue(h.captures.isEmpty)
+    }
+
+    func testHugeLengthLimitsFromThePageAreIgnored() async throws {
+        try await h.load(server.url("/signup.html"))
+        try await h.page("""
+            const el = document.getElementById('new');
+            el.setAttribute('minlength', '2000000000');
+            el.setAttribute('passwordrules', 'minlength: 2000000000; max-consecutive: 1;');
+            """)
+        let focus = try await focus("new")
+        XCTAssertNil(focus.requirements.minLength, "an absurd minlength is dropped")
+        let start = Date()
+        let generated = PasswordGenerator.generate(focus.requirements)
+        XCTAssertLessThan(Date().timeIntervalSince(start), 0.5)
+        XCTAssertLessThanOrEqual(generated.count, PasswordGenerator.lengthLimits.upperBound)
     }
 
     // MARK: Frames
@@ -212,7 +321,7 @@ final class AutofillWebTests: XCTestCase {
             h.forms.contains { !$0.frame.isMainFrame && $0.frame.origin == localhostOrigin }
         }
         try await h.settle(0.5)
-        // The sandboxed frame has an opaque origin: it's ignored entirely.
+        // The sandboxed srcdoc frame is ignored entirely.
         for found in h.forms {
             XCTAssertTrue([origin, localhostOrigin].contains(found.frame.origin), "unexpected frame origin \(found.frame.origin)")
         }
@@ -226,6 +335,7 @@ final class AutofillWebTests: XCTestCase {
         XCTAssertTrue(frameFocus.frame.isCrossSite)
         XCTAssertNil(frameFocus.rectInWebView)
         XCTAssertEqual(frameFocus.logins.map(\.id), [framed.id], "the top page's login is not offered in the frame")
+        XCTAssertNil(h.autofill.bestAutomaticLogin(for: frameFocus), "⌘\\ never fills a cross-site frame")
 
         // Even if the app asked, the top page's login is refused for the frame.
         do {
@@ -276,7 +386,7 @@ final class AutofillWebTests: XCTestCase {
         XCTAssertEqual((probe["globals"] as? [String])?.isEmpty, true, "no iSmith globals in the page world")
         XCTAssertEqual(probe["postError"] as? String, "TypeError", "posting to the handler fails")
         XCTAssertTrue(h.captures.isEmpty, "the fake submission went nowhere")
-        XCTAssertTrue(h.focuses.isEmpty, "synthetic focus and mousedown events are ignored")
+        XCTAssertTrue(h.focuses.isEmpty, "synthetic focusin and mousedown events are ignored")
 
         // From the content world, the handler and fill function are there.
         let world = try await h.webView.callAsyncJavaScript(
@@ -294,8 +404,8 @@ final class AutofillWebTests: XCTestCase {
     func testNamedElementsCannotHideTheForm() async throws {
         let saved = try h.store.add(origin: origin, username: "user", password: "Clobber-Secret-11")
         try await h.load(server.url("/clobber.html"))
-        let clobbered = try await h.pageString("return [typeof document.body.tagName, document.forms.tagName, document.getElementById('login').elements.tagName].join()")
-        XCTAssertEqual(clobbered, "string,IMG,INPUT", "the fixture really shadows the built-ins")
+        let clobbered = try await h.pageString("return [document.forms.tagName, document.getElementById('login').elements.tagName].join()")
+        XCTAssertEqual(clobbered, "IMG,INPUT", "the fixture really shadows the built-ins")
         try await h.waitUntil("the login form to be found") { h.forms.contains { $0.kinds.contains(.login) } }
         let focus = try await focus("password")
         XCTAssertEqual(focus.form, .login)
@@ -309,7 +419,7 @@ final class AutofillWebTests: XCTestCase {
         try await h.load(server.url("/hidden.html"))
         try await h.settle(0.5)
         for id in ["t-username", "t-password", "o-username", "o-password"] {
-            try await h.page("document.getElementById(\(jsonQuote(id))).focus()")
+            try await h.page("document.getElementById(\(q(id))).focus()")
         }
         try await h.settle(0.5)
         XCTAssertTrue(h.focuses.isEmpty, "transparent and off-screen fields get no popover")
@@ -329,6 +439,42 @@ final class AutofillWebTests: XCTestCase {
         }
     }
 
+    func testCSSHidingTricksGetNoPopoverAndNoFill() async throws {
+        let saved = try h.store.add(origin: origin, username: "user@example.com", password: "Trick-Secret-12")
+        try await h.load(server.url("/tricks.html"))
+        try await h.settle(0.5)
+        for n in 1...11 {
+            for prefix in ["u", "p"] {
+                // preventScroll: a focus that scrolls the field into view makes it visible.
+                try await h.page("document.getElementById('\(prefix)\(n)').focus({ preventScroll: true })")
+            }
+        }
+        try await h.settle(0.6)
+        XCTAssertEqual(h.focuses.map(\.fieldID), [], "no hidden field gets a popover")
+
+        // The newsletter box is a username-only form: filling it puts in the email, and the
+        // faint password field beside it stays empty.
+        let news = try await focus("news-email")
+        XCTAssertEqual(news.form, .usernameOnly)
+        try await h.autofill.fill(saved.id, into: news)
+        let email = try await value("news-email"), hiddenPass = try await value("news-pass")
+        XCTAssertEqual(email, "user@example.com")
+        XCTAssertEqual(hiddenPass, "")
+
+        // A field moved into another form between the focus and the fill isn't filled.
+        let real = try await focus("rp")
+        try await h.page("document.getElementById('trap').appendChild(document.getElementById('rp'))")
+        do {
+            try await h.autofill.fill(saved.id, into: real)
+            XCTFail("filled a field that moved to another form")
+        } catch {
+            XCTAssertEqual(error as? AutofillError, .noField)
+        }
+        let trapUser = try await value("tu"), movedPass = try await value("rp")
+        XCTAssertEqual(trapUser, "")
+        XCTAssertEqual(movedPass, "")
+    }
+
     func testFillAfterNavigationIsRefused() async throws {
         let saved = try h.store.add(origin: origin, username: "user", password: "Stale-Secret-10")
         try await h.load(server.url("/login.html"))
@@ -343,6 +489,27 @@ final class AutofillWebTests: XCTestCase {
         }
         let pass = try await value("password")
         XCTAssertEqual(pass, "")
+    }
+
+    func testDisabledWebViewGetsNothing() async throws {
+        let saved = try h.store.add(origin: origin, username: "user", password: "Agent-Tab-1")
+        try await h.load(server.url("/login.html"))
+        let focus = try await focus("password")
+        h.autofill.setDisabled(true, for: h.webView)
+        XCTAssertNil(h.autofill.lastFocus(in: h.webView))
+        do {
+            try await h.autofill.fill(saved.id, into: focus)
+            XCTFail("filled a disabled web view")
+        } catch {
+            XCTAssertEqual(error as? AutofillError, .disabled)
+        }
+        let before = h.focuses.count
+        try await h.page("document.getElementById('username').focus()")
+        try await type("password", "Typed-In-Agent-Tab")
+        try await submit("login")
+        try await h.settle()
+        XCTAssertEqual(h.focuses.count, before)
+        XCTAssertTrue(h.captures.isEmpty)
     }
 }
 

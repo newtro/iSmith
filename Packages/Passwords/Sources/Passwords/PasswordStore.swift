@@ -112,7 +112,12 @@ public final class PasswordStore: @unchecked Sendable {
         var config = Configuration()
         config.label = "iSmith.passwords"
         // Deleted rows are overwritten with zeros rather than left in free pages.
-        config.prepareDatabase { db in try db.execute(sql: "PRAGMA secure_delete = ON") }
+        // The file is untrusted input: schema objects (triggers, views) may not call functions
+        // with side effects.
+        config.prepareDatabase { db in
+            try db.execute(sql: "PRAGMA secure_delete = ON")
+            try db.execute(sql: "PRAGMA trusted_schema = OFF")
+        }
         return config
     }
 

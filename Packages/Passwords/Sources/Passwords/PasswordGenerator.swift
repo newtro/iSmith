@@ -23,7 +23,14 @@ public struct PasswordRequirements: Hashable, Sendable {
 /// characters (about 100 bits). When the page's length limits or `passwordrules` don't allow
 /// that shape, it falls back to random characters from what the rules allow, with one of each
 /// required class.
+///
+/// The page's numbers are untrusted: lengths are kept within 4...128 characters
+/// (`lengthLimits`), so a field with `minlength=2000000000` can't stall or exhaust the app, and
+/// only printable ASCII is ever used.
 public enum PasswordGenerator {
+    /// The shortest and longest password ever generated, whatever the page asks for.
+    public static let lengthLimits = 4...128
+
     static let lower = Array("abcdefghijkmnpqrstuvwxyz")      // no l, o
     static let upper = Array("ABCDEFGHJKLMNPQRSTUVWXYZ")      // no I, O
     static let digits = Array("23456789")                     // no 0, 1
@@ -69,7 +76,7 @@ public enum PasswordGenerator {
         let pool = rules.allowed
         while chars.count < length { chars.append(pool.randomElement(using: &rng)!) }
         chars.shuffle(using: &rng)
-        return String(chars.prefix(max(length, rules.required.count)))
+        return String(chars.prefix(max(length, min(rules.required.count, PasswordGenerator.lengthLimits.upperBound))))
     }
 
     /// The parsed limits and rules for one field.
@@ -97,7 +104,7 @@ public enum PasswordGenerator {
             }
             if let m = requirements.minLength, m > 0 { minLength = max(minLength, m) }
             if let m = requirements.maxLength, m > 0 { maxLength = min(maxLength, m) }
-            required = required.filter { !$0.isEmpty }
+            required = Array(required.filter { !$0.isEmpty }.prefix(8))
             if required.isEmpty && allowedSets.isEmpty {
                 required = [PasswordGenerator.lower, PasswordGenerator.upper, PasswordGenerator.digits]
                 allowedSets = [PasswordGenerator.lower + PasswordGenerator.upper + PasswordGenerator.digits + ["-"]]
@@ -107,12 +114,12 @@ public enum PasswordGenerator {
             if allowed.isEmpty { allowed = PasswordGenerator.lower + PasswordGenerator.upper + PasswordGenerator.digits }
         }
 
-        /// 20 characters unless the field needs more or allows fewer.
+        /// 20 characters unless the field needs more or allows fewer, within `lengthLimits`.
         var length: Int {
             var n = 20
             if minLength > n { n = minLength }
             if maxLength < n { n = maxLength }
-            return max(n, 1)
+            return min(max(n, PasswordGenerator.lengthLimits.lowerBound), PasswordGenerator.lengthLimits.upperBound)
         }
 
         /// Whether hyphen-joined letters and digits fit: `-`, letters and digits are all allowed,
@@ -126,7 +133,7 @@ public enum PasswordGenerator {
 
         func accepts(_ password: String) -> Bool {
             let chars = Array(password)
-            guard chars.count >= minLength, chars.count <= maxLength else { return false }
+            guard chars.count >= min(minLength, length), chars.count <= max(maxLength, length) else { return false }
             let allowedSet = Set(allowed)
             guard chars.allSatisfy({ allowedSet.contains($0) }) else { return false }
             for set in required where !chars.contains(where: { set.contains($0) }) { return false }
@@ -149,7 +156,11 @@ public enum PasswordGenerator {
                 rest = rest.drop { $0 == "," || $0 == " " }
                 if rest.first == "[" {
                     let body = rest.dropFirst().prefix { $0 != "]" }
-                    out += body.filter { $0.isASCII && !$0.isWhitespace && $0 != "\"" && $0 != "'" && $0 != "`" }
+                    // Printable ASCII only: no control characters, spaces or quotes.
+                    out += body.filter {
+                        guard let a = $0.asciiValue else { return false }
+                        return (0x21...0x7E).contains(a) && $0 != "\"" && $0 != "'" && $0 != "`"
+                    }
                     rest = rest.dropFirst(body.count + 2)
                     continue
                 }

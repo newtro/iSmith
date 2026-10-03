@@ -30,6 +30,8 @@ final class AutofillHarness: NSObject, PasswordAutofillDelegate, WKNavigationDel
         configuration.websiteDataStore = .nonPersistent()
         autofill.attach(to: configuration)
         autofill.attach(to: configuration) // a second attach does nothing (and doesn't throw)
+        // Tests fill right after a focus; `testFillRightAfterAFocusIsRefused` covers the delay.
+        autofill.minimumFocusAge = 0
         webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 900, height: 700), configuration: configuration)
         _ = NSApplication.shared
         window = NSWindow(contentRect: NSRect(x: -3000, y: -3000, width: 900, height: 700),
@@ -117,6 +119,37 @@ final class AutofillHarness: NSObject, PasswordAutofillDelegate, WKNavigationDel
 
     func pageString(_ script: String, in frame: WKFrameInfo? = nil) async throws -> String {
         (try await page(script, in: frame) as? String) ?? "<not a string>"
+    }
+
+    // MARK: Real input
+
+    /// Clicks the middle of a main-frame element with real (trusted) mouse events.
+    func click(_ id: String) async throws {
+        let rect = try await page("""
+            const r = document.getElementById(\(Self.quote(id))).getBoundingClientRect();
+            return [r.left + r.width / 2, r.top + r.height / 2];
+            """) as? [NSNumber]
+        guard let rect, rect.count == 2 else { throw HarnessError.timeout("no element #\(id)") }
+        // CSS pixels from the top-left; the window's coordinates start at the bottom-left.
+        let point = NSPoint(x: rect[0].doubleValue, y: webView.bounds.height - rect[1].doubleValue)
+        let now = ProcessInfo.processInfo.systemUptime
+        let down = NSEvent.mouseEvent(with: .leftMouseDown, location: point, modifierFlags: [], timestamp: now,
+                                      windowNumber: window.windowNumber, context: nil, eventNumber: 1, clickCount: 1, pressure: 1)!
+        let up = NSEvent.mouseEvent(with: .leftMouseUp, location: point, modifierFlags: [], timestamp: now,
+                                    windowNumber: window.windowNumber, context: nil, eventNumber: 2, clickCount: 1, pressure: 0)!
+        webView.mouseDown(with: down)
+        webView.mouseUp(with: up)
+        try await settle(0.2)
+    }
+
+    /// Types into the focused field as the keyboard would (trusted input events).
+    func typeReal(_ text: String) async throws {
+        webView.insertText(text)
+        try await settle(0.1)
+    }
+
+    static func quote(_ s: String) -> String {
+        String(decoding: try! JSONSerialization.data(withJSONObject: [s]).dropFirst().dropLast(), as: UTF8.self)
     }
 
     /// Polls until `condition` holds, failing the test after `timeout` seconds.

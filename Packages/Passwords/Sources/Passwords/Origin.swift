@@ -17,12 +17,17 @@ import Foundation
 /// 3. Then either
 ///    - **exact**: the hosts are equal; or
 ///    - **same site**: both hosts have the same registrable domain under the Public Suffix List
-///      (`accounts.example.com` and `www.example.com` share `example.com`). Only for domain
-///      names: IP addresses, single-label hosts (`localhost`, `intranet`) and hosts that are
-///      themselves public suffixes (`github.io`) match exactly or not at all. Two hosts under a
+///      (`accounts.example.com` and `www.example.com` share `example.com`). Only for `https`
+///      domain names: `http` origins (a network attacker can invent any `http` subdomain), IP
+///      addresses, single-label hosts (`localhost`, `intranet`), hosts that are themselves
+///      public suffixes (`github.io`), and hosts under a multi-tenant service that isn't on the
+///      list (`Origin.exactOnlySites`: `okta.com`, `sharepoint.com`, `atlassian.net`, …, where
+///      each subdomain is a different customer) match exactly or not at all. Two hosts under a
 ///      public suffix (`alice.github.io`, `bob.github.io`) never match each other.
 ///
-/// Exact matches are listed before same-site matches. Matching is always against the origin of
+/// Exact matches are listed before same-site matches. A same-site match is only ever filled
+/// after the user picks it in the popover, which shows its host (`fill(_:into:allowSameSite:)`);
+/// ⌘\ and preselection use exact matches only. Matching is always against the origin of
 /// the frame that holds the form (`WKFrameInfo.securityOrigin`), never the tab's address, so a
 /// cross-origin iframe only sees logins for its own origin. Opaque origins (sandboxed frames,
 /// `data:`, `file:`) have no `Origin` and match nothing.
@@ -88,6 +93,26 @@ public struct Origin: Hashable, Sendable, Comparable, CustomStringConvertible {
         return list.registrableDomain(of: host)
     }
 
+    /// Registrable domains whose subdomains belong to different customers but that the Public
+    /// Suffix List doesn't list: hosts under these only match exactly, so one tenant's login is
+    /// never offered on another tenant's page.
+    public static let exactOnlySites: Set<String> = [
+        "okta.com", "oktapreview.com", "okta-emea.com", "okta-gov.com", "auth0.com", "onelogin.com",
+        "sharepoint.com", "sharepoint-df.com", "visualstudio.com", "dynamics.com", "powerapps.com",
+        "atlassian.net", "jira.com", "zendesk.com", "freshdesk.com", "freshservice.com",
+        "salesforce.com", "force.com", "site.com", "service-now.com", "servicenowservices.com",
+        "slack.com", "zoom.us", "webex.com", "box.com", "myshopify.com", "wordpress.com",
+        "tumblr.com", "wixsite.com", "squarespace.com", "notion.site", "bamboohr.com",
+        "workday.com", "myworkday.com", "smartsheet.com", "kintone.com", "zohodesk.com",
+    ]
+
+    /// The registrable domain used for same-site matching, or nil when this origin only matches
+    /// exactly.
+    func sameSiteKey(using list: PublicSuffixList) -> String? {
+        guard scheme == "https", let site = site(using: list), !Self.exactOnlySites.contains(site) else { return nil }
+        return site
+    }
+
     /// How a login saved under `saved` matches a form in a frame of origin `page`, or nil when it
     /// must not be offered there. See the type's documentation for the rules.
     public static func match(saved: Origin, page: Origin) -> MatchKind? {
@@ -97,7 +122,7 @@ public struct Origin: Hashable, Sendable, Comparable, CustomStringConvertible {
     static func match(saved: Origin, page: Origin, using list: PublicSuffixList) -> MatchKind? {
         guard saved.scheme == page.scheme, saved.port == page.port else { return nil }
         if saved.host == page.host { return .exact }
-        guard let a = saved.site(using: list), let b = page.site(using: list), a == b else { return nil }
+        guard let a = saved.sameSiteKey(using: list), let b = page.sameSiteKey(using: list), a == b else { return nil }
         return .sameSite
     }
 

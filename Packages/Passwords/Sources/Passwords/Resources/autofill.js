@@ -23,7 +23,9 @@
   crypto.getRandomValues(bytes);
   const docID = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 
+  const isWebDocument = () => location.protocol === "https:" || location.protocol === "http:";
   const post = (message) => {
+    if (!isWebDocument()) return;
     message.docID = docID;
     try { handler.postMessage(message); } catch (e) { /* the app went away */ }
   };
@@ -45,6 +47,12 @@
   // Fields seen as type=password stay password fields when a "show password" button flips them
   // to text.
   const passwordFields = new WeakSet();
+  // Fields the user typed or pasted into (trusted input events), or that this script filled.
+  // Only their values are ever reported as a submission, so a page can't forge one.
+  const touched = new WeakSet();
+  // The form (scope) each reported field was in when it was focused; a fill refuses a field that
+  // has since been moved to another form.
+  const scopeAtFocus = new WeakMap();
 
   const MAX_VALUE = 4096;
   const TEXT_TYPES = new Set(["text", "email", "tel", "username", "url", ""]);
@@ -83,19 +91,59 @@
     return score;
   };
 
-  const isVisible = (el) => {
-    if (!el.isConnected || el.disabled) return false;
-    if (el.type === "hidden") return false;
+  // Two levels of visibility. `isRendered` is cheap and decides what a form is made of.
+  // `isVisibleToUser` adds a hit test and is required of the focused field and of every field a
+  // fill writes to, so a password never lands in a field the user can't see: transparent,
+  // clipped, covered, off-screen, masked, or with invisible text.
+  const alphaOf = (color) => {
+    if (!color || color === "transparent") return 0;
+    const m = /rgba?\(([^)]*)\)/.exec(color);
+    if (!m) return 1;
+    const parts = m[1].split(/[\s,\/]+/).filter(Boolean);
+    if (parts.length < 4) return 1;
+    const a = parts[3].endsWith("%") ? parseFloat(parts[3]) / 100 : parseFloat(parts[3]);
+    return Number.isFinite(a) ? a : 1;
+  };
+
+  const isRendered = (el) => {
+    if (!el.isConnected || el.disabled || el.type === "hidden") return false;
     const rect = el.getBoundingClientRect();
-    if (rect.width < 4 || rect.height < 4) return false;
-    if (rect.right + window.scrollX < 0 || rect.bottom + window.scrollY < 0) return false;
-    for (let node = el; node && node.nodeType === 1; node = node.parentElement) {
+    if (rect.width < 8 || rect.height < 8) return false;
+    let opacity = 1;
+    for (let node = el; node && node.nodeType === 1; node = node.parentElement || (node.getRootNode() && node.getRootNode().host) || null) {
       const style = getComputedStyle(node);
       if (style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse") return false;
-      if (parseFloat(style.opacity) < 0.1) return false;
-      if (style.clipPath && style.clipPath !== "none" && /inset\(\s*50%|circle\(\s*0/.test(style.clipPath)) return false;
+      const o = parseFloat(style.opacity);
+      if (Number.isFinite(o)) opacity *= o;
+      const filter = style.filter || "";
+      const fo = /opacity\(\s*([\d.]+)(%?)/.exec(filter);
+      if (fo && (fo[2] ? parseFloat(fo[1]) / 100 : parseFloat(fo[1])) < 0.5) return false;
+      const mask = style.webkitMaskImage || style.maskImage || "none";
+      if (mask !== "none") return false;
     }
-    return true;
+    return opacity >= 0.5;
+  };
+
+  const elementFromPoint = Document.prototype.elementFromPoint;
+  const labelControlOf = Object.getOwnPropertyDescriptor(HTMLLabelElement.prototype, "control").get;
+  const hits = (el, x, y) => {
+    if (x < 0 || y < 0 || x >= window.innerWidth || y >= window.innerHeight) return false;
+    const hit = elementFromPoint.call(document, x, y);
+    if (!hit) return false;
+    if (hit === el) return true;
+    const root = el.getRootNode();
+    if (root && root.host === hit) return true; // the field is in the hit element's shadow root
+    if (hit instanceof HTMLLabelElement && labelControlOf.call(hit) === el) return true;
+    return false;
+  };
+
+  const isVisibleToUser = (el) => {
+    if (!isRendered(el)) return false;
+    const style = getComputedStyle(el);
+    if (alphaOf(style.webkitTextFillColor || style.color) < 0.3) return false;
+    const r = el.getBoundingClientRect();
+    const y = r.top + r.height / 2;
+    return [r.left + r.width / 2, r.left + r.width / 4, r.right - r.width / 4].some((x) => hits(el, x, y));
   };
 
   // Forms and documents have named properties that override built-ins (`<input name="elements">`
@@ -133,7 +181,7 @@
   //   usernameOnly the first step of a two-step sign-in: a username and no password
   const analyze = (scope) => {
     const inputs = scopeInputs(scope);
-    const visible = inputs.filter(isVisible);
+    const visible = inputs.filter(isRendered);
     const passwords = visible.filter(isPasswordField);
     const firstPassword = passwords[0];
     const candidates = visible.filter((el) => usernameScore(el) >= 0 &&
@@ -177,9 +225,10 @@
     return null;
   };
 
+  // Lengths from the page; absurd values are dropped (the app clamps them again).
   const intAttr = (el, name) => {
     const v = parseInt(el.getAttribute(name), 10);
-    return Number.isFinite(v) && v > 0 ? v : null;
+    return Number.isFinite(v) && v > 0 && v <= 4096 ? v : null;
   };
 
   const clip = (s) => (typeof s === "string" ? s.slice(0, MAX_VALUE) : "");
@@ -194,32 +243,45 @@
         (USERNAME_HINT.test(attrText(el)) && !NOT_USERNAME.test(attrText(el)));
       if (!looksRight) continue;
       const v = (el.value || "").trim();
-      if (v && v.length < 256 && !/\s/.test(v) && (el.type === "hidden" || el.readOnly || !isVisible(el))) return v;
+      if (v && v.length < 256 && !/\s/.test(v) && (el.type === "hidden" || el.readOnly || !isRendered(el))) return v;
     }
     return "";
   };
 
   // MARK: Focus
 
-  let lastFocus = { id: null, at: 0 };
+  // A focus counts as the user's when it comes from their click on the field, or from Tab just
+  // pressed. A page calling `el.focus()` also produces a trusted focus event, but not one of these.
+  let lastPointer = { el: null, at: 0 };
+  let lastTab = 0;
+  document.addEventListener("pointerdown", (event) => {
+    if (event.isTrusted) lastPointer = { el: event.composedPath ? event.composedPath()[0] : event.target, at: Date.now() };
+  }, true);
+
+  let lastFocus = { id: null, at: 0, user: false };
   const onFocus = (event) => {
     if (!event.isTrusted) return;
     const el = event.composedPath ? event.composedPath()[0] : event.target;
-    if (!isInput(el) || !isVisible(el)) return;
-    const a = analyze(scopeOf(el));
+    if (!isInput(el) || !isVisibleToUser(el)) return;
+    const scope = scopeOf(el);
+    const a = analyze(scope);
     if (!a.kind) return;
     const role = fieldRole(el, a);
     if (!role) return;
     const id = fieldID(el);
     const now = Date.now();
-    if (lastFocus.id === id && now - lastFocus.at < 400) return;
-    lastFocus = { id, at: now };
+    const user = event.type === "mousedown" ||
+      (lastPointer.el === el && now - lastPointer.at < 1000) || now - lastTab < 500;
+    if (lastFocus.id === id && now - lastFocus.at < 400 && (lastFocus.user || !user)) return;
+    lastFocus = { id, at: now, user };
+    scopeAtFocus.set(el, scope);
     const r = el.getBoundingClientRect();
     post({
       type: "focus",
       fieldID: id,
       field: role,
       form: a.kind,
+      userInitiated: user,
       rect: { x: r.left, y: r.top, width: r.width, height: r.height },
       mainFrame: window === window.top,
       minLength: intAttr(el, "minlength"),
@@ -230,6 +292,12 @@
   document.addEventListener("focusin", onFocus, true);
   document.addEventListener("mousedown", onFocus, true);
 
+  document.addEventListener("input", (event) => {
+    if (!event.isTrusted) return;
+    const el = event.composedPath ? event.composedPath()[0] : event.target;
+    if (isInput(el)) touched.add(el);
+  }, true);
+
   // MARK: Submission
 
   let lastReport = { key: "", at: 0 };
@@ -239,10 +307,11 @@
     const message = { type: "submit", form: a.kind, username: "", password: "", newPassword: "", usernameHint: "" };
     if (a.username) message.username = clip(a.username.value.trim());
     if (a.kind === "usernameOnly") {
-      if (!message.username) return;
+      if (!message.username || !touched.has(a.username)) return;
     } else {
-      if (a.password) message.password = clip(a.password.value);
-      if (a.newPassword) message.newPassword = clip(a.newPassword.value);
+      // Only values the user typed (or iSmith filled) are reported.
+      if (a.password && touched.has(a.password)) message.password = clip(a.password.value);
+      if (a.newPassword && touched.has(a.newPassword)) message.newPassword = clip(a.newPassword.value);
       if (a.confirm && a.confirm.value !== a.newPassword.value) message.newPassword = "";
       if (!message.password && !message.newPassword) return;
       if (!message.username) message.usernameHint = clip(usernameHint(scope));
@@ -255,13 +324,15 @@
   };
 
   document.addEventListener("submit", (event) => {
-    if (event.target instanceof HTMLFormElement) report(event.target);
+    if (event.isTrusted && event.target instanceof HTMLFormElement) report(event.target);
   }, true);
 
   // Sites that sign in by script (no real submit): Enter in a field, or a click on the form's
   // sign-in or next button.
   document.addEventListener("keydown", (event) => {
-    if (!event.isTrusted || event.key !== "Enter") return;
+    if (!event.isTrusted) return;
+    if (event.key === "Tab") lastTab = Date.now();
+    if (event.key !== "Enter") return;
     const el = event.composedPath ? event.composedPath()[0] : event.target;
     if (isInput(el)) report(scopeOf(el));
   }, true);
@@ -326,6 +397,7 @@
   // Sets a value the way typing would be seen by frameworks: through the element's own value
   // setter (this world's, which page scripts can't patch), then input and change events.
   const setValue = (el, value) => {
+    touched.add(el);
     el.focus();
     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set;
     setter.call(el, value);
@@ -344,22 +416,25 @@
       if (normalizedOrigin() !== request.origin) return "originMismatch";
       const ref = fieldsByID.get(request.fieldID);
       const el = ref && ref.deref();
-      if (!el || !el.isConnected || !isVisible(el)) return "noField";
-      const a = analyze(scopeOf(el));
+      if (!el || !el.isConnected || !isVisibleToUser(el)) return "noField";
+      const scope = scopeOf(el);
+      if (scopeAtFocus.get(el) !== scope) return "noField";
+      const a = analyze(scope);
       if (!fieldRole(el, a)) return "noField";
       if (request.mode === "generated") {
-        if (!a.newPassword || !isVisible(a.newPassword)) return "noField";
+        if (!a.newPassword || !isVisibleToUser(a.newPassword)) return "noField";
         setValue(a.newPassword, String(request.password));
-        if (a.confirm && isVisible(a.confirm)) setValue(a.confirm, String(request.password));
+        if (a.confirm && isVisibleToUser(a.confirm)) setValue(a.confirm, String(request.password));
         return "filled";
       }
       if (a.kind === "usernameOnly") {
+        if (!isVisibleToUser(a.username)) return "noField";
         setValue(a.username, String(request.username));
         return "filled";
       }
       const passwordField = a.password || (a.kind === "signup" ? null : a.newPassword);
-      if (!passwordField || !isVisible(passwordField)) return "noField";
-      if (a.username && isVisible(a.username) && !a.username.readOnly && request.username) {
+      if (!passwordField || !isVisibleToUser(passwordField)) return "noField";
+      if (a.username && isVisibleToUser(a.username) && !a.username.readOnly && request.username) {
         setValue(a.username, String(request.username));
       }
       setValue(passwordField, String(request.password));

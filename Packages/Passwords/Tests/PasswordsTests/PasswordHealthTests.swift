@@ -98,6 +98,17 @@ final class PasswordHealthTests: XCTestCase {
         }
         let long = PasswordGenerator.generate(PasswordRequirements(minLength: 32))
         XCTAssertEqual(long.count, 32)
+        // Page-supplied numbers can't stall the app or force a silly length.
+        let start = Date()
+        let huge = PasswordGenerator.generate(PasswordRequirements(minLength: 2_000_000_000, rules: "minlength: 2000000000; max-consecutive: 1;"))
+        XCTAssertLessThan(Date().timeIntervalSince(start), 0.5)
+        XCTAssertEqual(huge.count, PasswordGenerator.lengthLimits.upperBound)
+        XCTAssertEqual(PasswordGenerator.generate(PasswordRequirements(maxLength: 2)).count, PasswordGenerator.lengthLimits.lowerBound)
+        // Bracketed literals never bring control characters, spaces or quotes.
+        for _ in 0..<50 {
+            let p = PasswordGenerator.generate(PasswordRequirements(rules: "allowed: [\u{01}\u{7F} \"'`ab]; required: [\u{01}x];"))
+            XCTAssertTrue(p.allSatisfy { "abx".contains($0) }, p.debugDescription)
+        }
         let fixture = PasswordRequirements(maxLength: 24, rules: "required: upper; required: digit; minlength: 12; maxlength: 24;")
         let p = PasswordGenerator.generate(fixture)
         XCTAssertTrue((12...24).contains(p.count), p)
