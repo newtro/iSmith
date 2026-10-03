@@ -110,15 +110,15 @@ final class SessionTests: XCTestCase {
 
     func testRailOrderIsSavedThroughTheBrowser() {
         let paths = AppPaths(dataDir: dir, spikeDir: nil)
-        let browser = BrowserState(paths: paths, keyStore: InMemoryKeyStore())
+        let browser = BrowserState(paths: paths, keyStore: InMemoryKeyStore(), passwordsKeyStore: InMemoryKeyStore())
         let a = browser.manager.createSpace(name: "Alpha", color: 0, home: "", choices: [:], newNames: [:])
         let b = browser.manager.createSpace(name: "Beta", color: 1, home: "", choices: [:], newNames: [:])
         // The browser lists spaces it was started with; restart it to pick up the two new ones.
-        let restarted = BrowserState(paths: paths, keyStore: InMemoryKeyStore())
+        let restarted = BrowserState(paths: paths, keyStore: InMemoryKeyStore(), passwordsKeyStore: InMemoryKeyStore())
         XCTAssertEqual(restarted.spaces.map(\.def.name), ["Personal", "Alpha", "Beta"])
         restarted.moveSpace(b.id, to: 0)
         XCTAssertEqual(restarted.spaces.map(\.id), [b.id, "personal", a.id])
-        let again = BrowserState(paths: paths, keyStore: InMemoryKeyStore())
+        let again = BrowserState(paths: paths, keyStore: InMemoryKeyStore(), passwordsKeyStore: InMemoryKeyStore())
         XCTAssertEqual(again.spaces.map(\.id), [b.id, "personal", a.id], "the rail order is the same after a relaunch")
     }
 }

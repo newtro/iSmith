@@ -249,6 +249,7 @@ private struct TabPage: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            PasswordSaveBar(tab: tab)
             PromptBar(tab: tab)
             if tab.findShown { FindBar(window: window, tab: tab) }
             WebArea(tab: tab, color: color)
@@ -325,6 +326,7 @@ private struct Toolbar: View {
                     .overlay(Capsule().stroke(space.color.opacity(0.45)))
                     .fixedSize()
                 }
+                ShieldButton(shields: browser.shields, tab: tab)
                 if browser.data != nil, tab.url != nil {
                     Button { editingBookmark = browser.bookmarkForCurrentPage(in: window) } label: {
                         Image(systemName: bookmarked ? "star.fill" : "star")

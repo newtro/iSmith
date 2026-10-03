@@ -1,7 +1,9 @@
 import AppKit
+import Blocking
 import BrowserData
 import Combine
 import Network
+import Passwords
 import SignInSync
 import SwiftUI
 import WebKit
@@ -23,6 +25,9 @@ final class BrowserState: NSObject, ObservableObject {
     var presentWindow: ((WindowState) -> Void)?
     /// Opens the Settings window (accounts and sign-ins).
     var openSettings: (() -> Void)?
+    /// Opens the Passwords window and the Brave import screen (set by the app delegate).
+    var openPasswords: (() -> Void)?
+    var openImport: (() -> Void)?
     /// The browser window last made main, for menu commands while another window is key.
     weak var lastActiveWindow: WindowState?
     /// Space id → recently closed tabs, newest last.
@@ -56,6 +61,17 @@ final class BrowserState: NSObject, ObservableObject {
     /// Certificates the user chose to trust on a warning page, until the app quits.
     let certificateExceptions = CertificateExceptions()
     let contextReporter = ContextMenuReporter()
+    /// Where this run keeps its files.
+    let paths: AppPaths
+    /// Ad and tracker blocking: the global switch and the per-site shield (P3).
+    let shields: Shields
+    /// Password capture and autofill for every web view (P4). nil when the store couldn't be
+    /// opened (`passwordsProblem` says why); pages then work without it.
+    let passwords: PasswordAutofill?
+    let passwordsProblem: String?
+    /// The save bar, autofill popover and ⌘\.
+    let passwordUI = PasswordUI()
+    private var blockingObservers: [NSObjectProtocol] = []
     private var hibernationTimer: Timer?
     private var networkMonitor: NWPathMonitor?
     /// A background tab (not Keep alive) is unloaded after this long off screen.
@@ -75,7 +91,12 @@ final class BrowserState: NSObject, ObservableObject {
     static let maxClosedTabs = 25
     static let maxClosedWindows = 5
 
-    init(paths: AppPaths = .standard, keyStore: KeyStore = AppIdentity.vaultKeyStore()) {
+    /// `passwordsKeyStore` and `blocking` are injected by tests; the app uses this build's
+    /// Keychain item and a controller on `paths.blockingDir`.
+    init(paths: AppPaths = .standard, keyStore: KeyStore = AppIdentity.vaultKeyStore(),
+         passwordsKeyStore: KeyStore = AppIdentity.passwordsKeyStore(),
+         blocking: @MainActor (AppPaths) -> BlockingController? = BrowserState.makeBlocking) {
+        self.paths = paths
         var vault = Vault(fileURL: paths.vaultURL, keyStore: keyStore)
         while !vault.canSave {
             // Running on would let the saved vault roll back, on the next launch, any sign-in or
@@ -110,6 +131,11 @@ final class BrowserState: NSObject, ObservableObject {
             NSLog("iSmith: browser.sqlite couldn't be opened (\(error)); history and bookmarks are off")
         }
         self.data = data
+        // Made here, not in the windowless XCTest host app; the lists load in `start()`.
+        shields = Shields(controller: blocking(paths))
+        let opened = Self.openPasswordStore(fileURL: paths.passwordsURL, keyStore: passwordsKeyStore)
+        passwords = opened.store.map { PasswordAutofill(store: $0) }
+        passwordsProblem = opened.problem
         downloads = DownloadManager(store: data?.downloads)
         let sites = data?.sites
         notifications = WebNotifications(poster: NoNotificationPoster(),
@@ -139,6 +165,20 @@ final class BrowserState: NSObject, ObservableObject {
         }
         sync.bindingChanged = { [weak self] def in
             self?.space(def.id)?.def = def
+        }
+        passwordUI.browser = self
+        passwords?.delegate = passwordUI
+        blockingObservers = observeBlocking()
+    }
+
+    /// The app's blocking controller, under the data folder. nil (pages load unblocked) only if
+    /// WebKit can't open a rule-list store there.
+    static func makeBlocking(_ paths: AppPaths) -> BlockingController? {
+        do {
+            return try BlockingController(directory: paths.blockingDir)
+        } catch {
+            NSLog("iSmith: ad blocking is off: \(error)")
+            return nil
         }
     }
 
@@ -174,6 +214,13 @@ final class BrowserState: NSObject, ObservableObject {
             }
         }
         networkMonitor = watchNetwork()
+        shields.startLoading()
+        if let aside = passwords?.store.movedAside {
+            let alert = NSAlert()
+            alert.messageText = "Saved passwords couldn't be opened"
+            alert.informativeText = "iSmith couldn't decrypt its saved passwords with the key in your Keychain, so it started a new password store. The old file was kept at \(aside.path)."
+            alert.runModal()
+        }
         if let history = data?.history {
             let cutoff = Date().addingTimeInterval(-Self.historyKept)
             Task.detached(priority: .background) { try? history.prune(olderThan: cutoff) }
@@ -516,7 +563,11 @@ final class BrowserState: NSObject, ObservableObject {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = store
         configuration.preferences = Self.preferences(keepAlive: keepAlive)
+        // Its own content controller (WKWebViewConfiguration makes a new one), so the shield for
+        // this tab never changes another's.
+        prepareBlocking(configuration, host: (request?.url ?? tab.url)?.host)
         let webView = makeWebView(configuration)
+        applyAgentControl(tab, to: webView)
         tab.attach(webView, keepAlive: keepAlive)
         #if DEBUG
         NSLog("iSmith: web view for \(request?.url?.host ?? tab.url?.host ?? "empty tab") in \(spaceID), keep alive \(keepAlive)")
@@ -603,7 +654,15 @@ final class BrowserState: NSObject, ObservableObject {
             closedTabs[tabs.spaceID, default: []].append(closed)
             if closedTabs[tabs.spaceID]!.count > Self.maxClosedTabs { closedTabs[tabs.spaceID]!.removeFirst() }
         }
-        if let webView = tab.webView { notifications.forget(webView) }
+        if let webView = tab.webView {
+            notifications.forget(webView)
+            passwords?.forget(webView)
+            passwordUI.webViewChanged(webView)
+        }
+        // A sign-in popup that closes right after submitting hands its save bar to its opener.
+        if let offer = tab.passwordOffer, let opener = tab.openerID.flatMap(tabs.tab), opener.passwordOffer == nil {
+            opener.passwordOffer = offer
+        }
         tab.unload()
         tabs.take(id)
         if let returnTo {
@@ -867,7 +926,10 @@ final class BrowserState: NSObject, ObservableObject {
 
     func makeWebView(_ config: WKWebViewConfiguration) -> WKWebView {
         configure(config.userContentController)
+        // Passwords are global: every web view in every space, before it's created.
+        passwords?.attach(to: config)
         let webView = BrowserWebView(frame: .zero, configuration: config)
+        webView.windowChanged = { [weak self] webView in self?.passwordUI.webViewChanged(webView) }
         webView.contextItems = { [weak self] webView, element in
             self?.contextItems(for: webView, element: element) ?? .init()
         }

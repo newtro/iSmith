@@ -45,6 +45,12 @@ enum AppIdentity {
     static func vaultKeyStore() -> KeychainKeyStore {
         KeychainKeyStore(service: vaultKeyService, account: "vault", label: "\(displayName) vault key")
     }
+
+    /// The saved-passwords key for this build (the Passwords package's default is the Release
+    /// one, so the app always passes this).
+    static func passwordsKeyStore() -> KeychainKeyStore {
+        KeychainKeyStore(service: passwordsKeyService, account: "passwords", label: "\(displayName) passwords key")
+    }
 }
 
 /// Where the app keeps its files.
@@ -60,6 +66,12 @@ struct AppPaths {
     var sessionURL: URL { dataDir.appendingPathComponent("session.json") }
     /// History, bookmarks, site settings and downloads (the BrowserData package).
     var browserDataURL: URL { dataDir.appendingPathComponent("browser.sqlite") }
+    /// Ad and tracker blocking: the compiled lists, the downloaded copies and the allowlist.
+    var blockingDir: URL { dataDir.appendingPathComponent("Blocking", isDirectory: true) }
+    /// Saved passwords (the Passwords package), encrypted with the passwords key.
+    var passwordsURL: URL { dataDir.appendingPathComponent("passwords.sqlite") }
+    /// Written once the first-run "Import from Brave" screen has been offered.
+    var braveImportOfferedURL: URL { dataDir.appendingPathComponent("brave-import-offered") }
 
     /// ~/Library/Application Support/iSmith (Release) or ~/Library/Application Support/iSmith Dev
     /// (Debug). `ISMITH_DATA_DIR` points the app at another folder; that folder starts fresh

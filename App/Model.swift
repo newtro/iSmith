@@ -71,6 +71,14 @@ final class Tab: ObservableObject, Identifiable {
     let createdAt = Date()
     /// A load that failed in the background (no network): tried again later.
     var retryURL: URL?
+    /// The host of the page last committed in the current web view, so a navigation that fails
+    /// before committing puts that page's blocking setting back (Blocking INTEGRATION.md §4).
+    var committedHost: String?
+    /// A submitted sign-in the save bar is asking about. Holds the password only while the bar
+    /// is up.
+    @Published var passwordOffer: PasswordOffer?
+    /// Driven by an agent (after v1): no autofill or capture in its web views.
+    var agentControlled = false
     private var observations: [NSKeyValueObservation] = []
 
     init(id: UUID = UUID(), url: URL?, title: String? = nil, keepAlive: Bool? = nil, history: Data? = nil) {
@@ -102,6 +110,7 @@ final class Tab: ObservableObject, Identifiable {
         old.map(Self.close)
         self.webView = webView
         appliedKeepAlive = keepAlive
+        committedHost = nil
         cachedHistory = nil
         historyStale = true
         savedState = nil

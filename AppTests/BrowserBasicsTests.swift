@@ -340,7 +340,7 @@ final class BrowserBasicsTests: XCTestCase {
 
     /// The same question twice in a tab is shown once; both callers get the answer.
     func testSitePromptsAreAskedOncePerTab() {
-        let browser = BrowserState(paths: AppPaths(dataDir: dir, spikeDir: nil), keyStore: InMemoryKeyStore())
+        let browser = BrowserState(paths: AppPaths(dataDir: dir, spikeDir: nil), keyStore: InMemoryKeyStore(), passwordsKeyStore: InMemoryKeyStore())
         let tab = Tab(url: nil)
         var answers: [PromptAnswer] = []
         browser.ask(SitePrompt(key: "k", symbol: "bell", message: "m", allowTitle: "Allow") { answers.append($0) }, in: tab)
