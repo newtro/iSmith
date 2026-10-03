@@ -15,6 +15,10 @@ See [DESIGN.md](DESIGN.md) for the model and [BUILD_PLAN.md](BUILD_PLAN.md) for 
 - `Packages/SignInSync/`: the sign-in engine, with no UI. It holds providers, accounts and spaces
   (`Config`), the encrypted `Vault`, `CookieSync`, `SpaceManager`, and the one-time import from
   the spike.
+- `Packages/BraveImport/`: reads a Brave install, with no UI and no writes to Brave's files. It
+  finds profiles, parses bookmarks into a neutral tree, and decrypts saved passwords from private
+  copies of `Login Data` and `Login Data For Account`. The "Brave Safe Storage" Keychain read is
+  injected, so its tests never touch the Keychain.
 - `AppTests/`: tests that run inside the signed app.
 - `project.yml`: the XcodeGen spec. `iSmith.xcodeproj` is generated from it and not committed.
 

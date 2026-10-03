@@ -1,0 +1,134 @@
+{
+   "checksum": "0123456789abcdef0123456789abcdef",
+   "roots": {
+      "bookmark_bar": {
+         "children": [
+            {
+               "date_added": "13344473600000000",
+               "date_last_used": "13354473600000000",
+               "guid": "g-ex",
+               "id": "5",
+               "meta_info": {
+                  "power_bookmark_meta": ""
+               },
+               "name": "Example",
+               "type": "url",
+               "url": "https://example.com/"
+            },
+            {
+               "children": [
+                  {
+                     "date_added": "13344473700000000",
+                     "date_last_used": "0",
+                     "guid": "g-tokyo",
+                     "id": "7",
+                     "name": "東京 – Tōkyō 🗼",
+                     "type": "url",
+                     "url": "https://ja.wikipedia.org/wiki/%E6%9D%B1%E4%BA%AC"
+                  },
+                  {
+                     "children": [
+                        {
+                           "children": [
+                              {
+                                 "date_added": "13344473900000000",
+                                 "guid": "g-deep",
+                                 "id": "10",
+                                 "name": "Deep ✓",
+                                 "type": "url",
+                                 "url": "https://deep.example/a?b=c#d"
+                              }
+                           ],
+                           "date_added": "13344473850000000",
+                           "date_modified": "13344473901000000",
+                           "guid": "g-f3",
+                           "id": "9",
+                           "name": "Level 3",
+                           "type": "folder"
+                        },
+                        {
+                           "date_added": "13344473810000000",
+                           "guid": "g-rtl",
+                           "id": "11",
+                           "name": "שלום עולם",
+                           "type": "url",
+                           "url": "https://bücher.example/"
+                        }
+                     ],
+                     "date_added": "13344473800000000",
+                     "date_modified": "13344473902000000",
+                     "guid": "g-f2",
+                     "id": "8",
+                     "name": "Ünïcödé Földer",
+                     "type": "folder"
+                  },
+                  {
+                     "date_added": "13344474000000000",
+                     "guid": "g-js",
+                     "id": "12",
+                     "name": "Bookmarklet",
+                     "type": "url",
+                     "url": "javascript:alert('hi')"
+                  },
+                  {
+                     "guid": "g-weird",
+                     "id": "13",
+                     "name": "Not a node",
+                     "type": "separator"
+                  }
+               ],
+               "date_added": "13344473650000000",
+               "date_modified": "13344474000000000",
+               "guid": "g-f1",
+               "id": "6",
+               "name": "Work",
+               "type": "folder"
+            },
+            {
+               "children": [],
+               "date_added": "13344474100000000",
+               "date_modified": "0",
+               "guid": "g-empty",
+               "id": "14",
+               "name": "Empty",
+               "type": "folder"
+            }
+         ],
+         "date_added": "13334473600000000",
+         "date_modified": "13344474100000000",
+         "guid": "0bc5d13f-2cba-5d74-951f-3f233fe6c908",
+         "id": "1",
+         "name": "Bookmarks bar",
+         "type": "folder"
+      },
+      "other": {
+         "children": [
+            {
+               "date_added": "13344474200000000",
+               "guid": "g-other",
+               "id": "15",
+               "name": "",
+               "type": "url",
+               "url": "https://untitled.example/"
+            }
+         ],
+         "date_added": "13334473600000000",
+         "date_modified": "0",
+         "guid": "82b081ec-3dd3-529c-8475-ab6c344590dd",
+         "id": "2",
+         "name": "Other bookmarks",
+         "type": "folder"
+      },
+      "synced": {
+         "children": [],
+         "date_added": "13334473600000000",
+         "date_modified": "0",
+         "guid": "4cf2e351-0e85-532b-bb37-df045d8f8d0f",
+         "id": "3",
+         "name": "Mobile bookmarks",
+         "type": "folder"
+      }
+   },
+   "sync_metadata": "c29tZSBiYXNlNjQ=",
+   "version": 1
+}
