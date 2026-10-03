@@ -1,15 +1,18 @@
+import AppKit
 import Foundation
 import SwiftUI
 
 /// Where the app keeps its files.
 struct AppPaths {
-    /// config.json and vault.json.
+    /// config.json, vault.json and session.json.
     let dataDir: URL
     /// The spike's settings, imported on first launch. nil skips the import.
     let spikeDir: URL?
 
     var configURL: URL { dataDir.appendingPathComponent("config.json") }
     var vaultURL: URL { dataDir.appendingPathComponent("vault.json") }
+    /// The open windows, spaces, groups and tabs (see `SessionFile`).
+    var sessionURL: URL { dataDir.appendingPathComponent("session.json") }
 
     /// ~/Library/Application Support/iSmith. For development, `ISMITH_DATA_DIR` points the app at
     /// another folder; that folder starts fresh rather than importing the spike.
@@ -30,8 +33,12 @@ enum Palette {
         (0.75, 0.07, 0.24), (0.06, 0.46, 0.43), (0.86, 0.15, 0.55), (0.39, 0.45, 0.55),
     ]
     static func color(_ index: Int) -> Color {
+        Color(nsColor: nsColor(index))
+    }
+
+    static func nsColor(_ index: Int) -> NSColor {
         let c = rgb[((index % rgb.count) + rgb.count) % rgb.count]
-        return Color(red: c.0, green: c.1, blue: c.2)
+        return NSColor(srgbRed: c.0, green: c.1, blue: c.2, alpha: 1)
     }
 }
 
@@ -68,4 +75,9 @@ enum AddressInput {
             return parts.url
         }
     }
+}
+
+extension GroupColor {
+    var nsColor: NSColor { NSColor(srgbRed: rgb.0, green: rgb.1, blue: rgb.2, alpha: 1) }
+    var color: Color { Color(nsColor: nsColor) }
 }

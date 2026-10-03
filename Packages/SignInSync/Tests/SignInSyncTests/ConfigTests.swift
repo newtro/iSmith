@@ -161,6 +161,21 @@ final class ConfigTests: XCTestCase {
         check(await valueOf(m, "user_session") == "mine", "That sign-in becomes the shared one for other spaces")
     }
 
+    func testSpaceOrderIsSavedAcrossRelaunch() {
+        let before = config.spaces.map(\.id)
+        XCTAssertGreaterThanOrEqual(before.count, 3, "precondition: the fixture has three spaces")
+        config.moveSpace(before[0], to: 2)
+        var expected = before
+        expected.insert(expected.remove(at: 0), at: 2)
+        check(config.spaces.map(\.id) == expected, "Moving a space puts it at the new position")
+        config.moveSpace(before[1], to: -5)
+        config.moveSpace("no-such-space", to: 0)
+        expected.insert(expected.remove(at: expected.firstIndex(of: before[1])!), at: 0)
+        check(config.spaces.map(\.id) == expected, "Indexes are clamped and unknown spaces ignored")
+        let reopened = Config(fileURL: config.fileURL, hasSession: { _ in false })
+        check(reopened.spaces.map(\.id) == expected, "The order is the same after a relaunch")
+    }
+
     func testOlderPerSpaceConfigMigrates() {
         // An older per-space config moves to shared sign-ins, keeping the most-used sessions.
         let old = fx.dir.appendingPathComponent("migrate-test.json")

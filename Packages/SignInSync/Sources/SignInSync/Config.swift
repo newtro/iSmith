@@ -171,6 +171,17 @@ public final class Config: ObservableObject {
         save()
     }
 
+    /// Moves a space to a new position in the rail; `index` is where it ends up, clamped to the
+    /// list. The order is saved, so it's the same after a relaunch.
+    public func moveSpace(_ id: String, to index: Int) {
+        guard let from = spaces.firstIndex(where: { $0.id == id }) else { return }
+        let to = max(0, min(index, spaces.count - 1))
+        guard from != to else { return }
+        let space = spaces.remove(at: from)
+        spaces.insert(space, at: to)
+        save()
+    }
+
     @discardableResult
     public func addAccount(providerID: String, name: String) -> AccountDef {
         let account = AccountDef(id: "acct-" + UUID().uuidString.prefix(8).lowercased(), providerID: providerID, name: name)

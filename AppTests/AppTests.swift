@@ -51,7 +51,8 @@ final class AppTests: XCTestCase {
         let paths = AppPaths(dataDir: dir, spikeDir: nil)
         let browser = BrowserState(paths: paths, keyStore: InMemoryKeyStore())
         XCTAssertEqual(browser.spaces.map(\.def.name), ["Personal"])
-        XCTAssertEqual(browser.active?.def.home, "https://mail.google.com/")
+        XCTAssertEqual(browser.spaces.first?.def.home, "https://mail.google.com/")
+        XCTAssertTrue(browser.windows.isEmpty, "windows open only when the app starts them")
     }
 
     func testAddressInput() {
