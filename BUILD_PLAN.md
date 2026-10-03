@@ -66,9 +66,10 @@ iSmith/
 - **Storage**: `~/Library/Application Support/iSmith/`. Config is JSON, the same model as the spike.
   Everything else is SQLite through GRDB.
 - **Secrets**: the vault (provider sessions) and the password store are encrypted with AES-GCM. The
-  key is a 256-bit key in the data-protection Keychain (`ThisDeviceOnly`, not synced) and unlocks
-  with the Mac login. The data-protection Keychain needs a Developer ID provisioning profile
-  embedded in the app and in the XCTest host; without one, Keychain calls fail with -34018.
+  key is a 256-bit key in the file-based login Keychain (not synced), tied to the app's signature,
+  and unlocks with the Mac login (see P0 findings). The data-protection Keychain would need a
+  Developer ID provisioning profile in the app and the XCTest host; it can come later with the
+  passkey entitlement.
 - **WebKit**: one `WKWebsiteDataStore(forIdentifier:)` per space. A single shared
   `WKProcessPool` isn't needed (it's deprecated). Content-rule lists and user scripts are attached
   per web view.
@@ -94,6 +95,72 @@ iSmith/
   - Web notifications: present, but `requestPermission()` always returns "denied". The P2
     notification workaround is required.
   - `inactiveSchedulingPolicy = .none` is available for Keep-alive tabs.
+
+### Foundations built (2026-10-02)
+
+- **Project**: `project.yml` (XcodeGen) produces the `iSmith` app (`com.scottsmith.ismith`,
+  macOS 14) and an `iSmithTests` bundle hosted by the app. Signing is automatic with team
+  232A77467G and the Apple Development certificate. Hardened runtime is on, with the camera,
+  audio-input and location entitlements and their Info.plist usage strings. No sandbox.
+  `make build`, `make test` and `make run` wrap XcodeGen, `swift test` and `xcodebuild`.
+- **Packages**: only `SignInSync` exists so far. The other five packages (BrowserData, Passwords,
+  Blocking, Routing, BraveImport) are created in the phases that fill them; an empty package now
+  would only be scaffolding. `SignInSync` holds `Config`, `Vault`, `CookieSync`, the definitions,
+  `SpikeImport`, and a new `SpaceManager` for the space and account operations that used to sit in
+  the spike's `BrowserState`. Storage paths and the first-run layout are injected, so the core
+  has no self-test special cases.
+- **Tests run under `swift test`, not in a test host.** `WKWebsiteDataStore(forIdentifier:)`
+  works inside the plain `xctest` process: stores open, keep cookies, and can be removed. The one
+  requirement is that every reference to a store is released before
+  `WKWebsiteDataStore.remove(forIdentifier:)`, or WebKit answers "Data store is in use". The test
+  fixture detaches the sync and retries removal briefly. The spike's 49 checks became 13 XCTest
+  cases in three suites:
+  - `SharingTests`: 3 tests, 18 checks.
+  - `RelaunchTests`: 1 test, 3 checks, plus a fourth check: the space that lost a session
+    cookie gets it back. The relaunch is new `Vault`, `Config` and `CookieSync` instances on the
+    same files. WebKit keeps session cookies for the life of a process, so the test deletes the
+    cookie from the target stores and asserts they lack it before reopening.
+  - `ConfigTests`: 9 tests, 28 checks.
+
+  Each test uses its own temp folder and new store UUIDs, and deletes its stores when it ends.
+  The settle waits are the spike's: 3 s per sync, 2 s after the first opens. `VaultTests` adds 9
+  tests: encryption round trip, a wrong key, a missing key, an unreadable Keychain, the Keychain
+  key store, and the spike import. `iSmithTests` (app-hosted, 5 tests) checks the Keychain under
+  the app's own signature, first-launch import through `BrowserState`, the address bar and the
+  user agent.
+- **Vault**: AES-GCM through CryptoKit. The file is `{"version": 1, "combined": "<base64 sealed
+  box>"}`, mode 0600, in a 0700 folder, written atomically. The key is 256-bit, stored base64 as a
+  generic password in the file-based login Keychain (service `com.scottsmith.ismith.vault-key`,
+  account `vault`, `kSecUseDataProtectionKeychain` false). How failures are handled:
+  - A file that won't decrypt, or a key that's missing, is first copied to
+    `vault.unreadable-<time>.json`, and the vault starts empty. As with `config.json`, new saves
+    go to `vault.json` only once that copy exists.
+  - If the Keychain can't be read at all (locked, or access denied), nothing is written and no key
+    is replaced, so the old vault opens again once the Keychain does.
+- **Spike import**: on first launch (no `iSmith/config.json`, but `iSmithSpike/config.json`
+  exists), the spike's plaintext `vault.json` goes into the encrypted vault, then its `config.json`
+  is copied and loaded with the normal migration rules. The spike's files are only read. A dry run
+  against the real spike data imported 5 spaces and 4 vault entries (27 cookies), with Microsoft
+  (shared), Microsoft: Fabrikam and Google holding sessions. The spike's files were unchanged
+  afterwards (checksums matched). `ISMITH_DATA_DIR` points a development run at another folder and
+  skips the import.
+- **Sparkle 2.10.0** (exact pin) through SPM. `SPUStandardUpdaterController` starts at launch, and
+  "Check for Updates…" is in the app menu. `SUFeedURL` is
+  `https://raw.githubusercontent.com/newtro/iSmith-releases/main/appcast.xml`, and
+  `SUEnableAutomaticChecks` stays NO until P7. The EdDSA key came from
+  `build/SourcePackages/artifacts/sparkle/Sparkle/bin/generate_keys`, run with no options. That
+  saved the private key to the login Keychain (service `https://sparkle-project.org`, account
+  `ed25519`), and the public key went into Info.plist: `SUPublicEDKey` =
+  `Ezl8lB6Z6JnAQ08oLRWy8uOWsNpPxzlNEV4d5+xFyEU=`. Back up the private key with
+  `generate_keys -x <file>`: losing it means shipped apps can't verify new updates.
+- **Differs from the plan**:
+  - Debug builds use Apple Development signing with no provisioning profile. Developer ID and
+    notarization wait for P7.
+  - Keychain calls work in the signed app and in its test host. A smoke run of the app on a
+    scratch data folder created the key and an encrypted vault, and quit cleanly through the
+    vault flush.
+  - The data-protection Keychain and the Developer ID provisioning profile aren't used (see
+    Keychain above).
 
 ## Phases
 
