@@ -11,13 +11,14 @@ APP := $(DERIVED)/Build/Products/Debug/iSmith.app
 build: project
 	$(XCODEBUILD) build
 
-# The packages (SignInSync: sync, vault and config; BraveImport: Brave profiles, bookmarks and
-# passwords), then the app-hosted tests.
+# The package tests (SignInSync: sync, vault and config; BraveImport: Brave profiles, bookmarks
+# and passwords; Blocking: ad and tracker blocking), then the app-hosted tests.
 test: test-package test-app
 
 test-package:
 	cd Packages/SignInSync && swift test
 	cd Packages/BraveImport && swift test
+	cd Packages/Blocking && swift test
 
 test-app: project
 	$(XCODEBUILD) test
@@ -33,4 +34,4 @@ $(PROJECT): project.yml App AppTests
 	@touch $(PROJECT)
 
 clean:
-	rm -rf $(DERIVED) $(PROJECT) Packages/SignInSync/.build Packages/BraveImport/.build
+	rm -rf $(DERIVED) $(PROJECT) Packages/SignInSync/.build Packages/BraveImport/.build Packages/Blocking/.build

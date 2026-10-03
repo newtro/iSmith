@@ -282,6 +282,96 @@ Acceptance:
 - Ads are gone on cnn.com, youtube.com, weather.com and reddit.com.
 - Outlook, Teams, Azure, Gmail, Etsy and GitHub work unchanged.
 
+#### P3 notes (2026-10-03): the `Blocking` package
+
+The core is built in `Packages/Blocking` and isn't wired into the app yet; that waits for P1's
+tabs and P2's navigation delegate. `Packages/Blocking/INTEGRATION.md` gives the exact hook points.
+
+- **Converter**: AdGuard SafariConverterLib 4.3.0, pinned exactly, with swift-psl 1.1.182 (also
+  pinned) for site names. It builds with Xcode 27.0 and Swift 6.4 in Swift 5 mode. The WebKit
+  feature level is the library's `SafariVersion.autodetect()` for the running macOS. Advanced
+  AdGuard syntax (scriptlets, CSS injection) is left out; WebKit can't run it.
+- **Live lists (2026-10-03)**:
+
+  | | Source | Rule lines | WebKit rules | Lines skipped | JSON | Compile |
+  |---|---|---|---|---|---|---|
+  | EasyPrivacy 202610030402 | 1.51 MB | 56,256 | 57,002 | 44 | 6.3 MB | 1.31 s |
+  | EasyList 202610030410 | 2.08 MB | 78,743 | 61,267 | 38 | 7.3 MB | 1.63 s |
+
+  Both convert in 1.9 s together (debug build, M4 Max). Each fits in one list, well under the
+  150,000-rule limit, so today there are two lists. The compiled store is 52 MB. A first launch
+  converts and compiles the bundled snapshot in about 5 s in the test process. A normal launch
+  looks the compiled lists up in under a millisecond.
+- **Splitting**: WebKit applies an exception (`ignore-previous-rules`) only to earlier rules in
+  the same list. So every exception, cosmetic exception and `$badfilter` line from both lists
+  goes into every list, and only the blocking lines are divided. A list over the limit is cut
+  into pieces sized from the overflow, recursively. An EasyList exception for an EasyPrivacy
+  rule works as it would in a normal ad blocker.
+- **Snapshot**: the raw lists ship in the package (3.6 MB), rather than converted JSON (13.5 MB,
+  and specific to one WebKit feature level). `Tools/update-blocking-snapshot.sh` refreshes them.
+- **Refresh**: checked hourly once started, downloaded when a week has passed since the last
+  successful check, retried 6 hours after a failure. A download must start with `[Adblock` and
+  have at least 1,000 rule lines, or it's rejected (captive portals, truncated files). New lists
+  compile under new identifiers. Only when all of them compile do the saved copies, the state
+  and the lists in use change. Any failure removes the half-compiled lists and keeps the old
+  ones. The lists a refresh replaces stay in the store, since open web views may still hold them,
+  until the next refresh or launch, so the store holds at most two generations (about 104 MB).
+  The controller holds a list only while it's attached, so a removed generation's disk space is
+  freed once every web view has re-applied or closed.
+- **If nothing compiles** (neither the downloaded copies nor the snapshot), blocking is off and
+  `status.lastError` says why. The load is tried again after 10 minutes, and a successful
+  refresh also ends it.
+- **Recompiling**: the state records a fingerprint (converter version, WebKit feature level,
+  limit, sources). If it changes, or WebKit can't read a compiled list (as after an OS update),
+  the lists are rebuilt from the downloaded copies in use, or from the snapshot if there are none.
+- **Allowlist**: per site, meaning the registrable domain (eTLD+1, using the public suffix
+  list), as Brave's Shields work. Allowing `www.cnn.com` also covers `edition.cnn.com`.
+  `azurewebsites.net` and `github.io` apps are each their own site. The allowlist is saved in
+  `allowlist.json`. Blocking is toggled by attaching or removing the lists on that web view's
+  content controller, which takes effect from the next load. The app applies a destination's
+  setting only once its navigation is allowed, and restores the current page's setting if the
+  navigation fails before committing (unless a newer navigation replaced it); INTEGRATION.md
+  has the delegate code.
+- **Tests**: 35 tests in 5 suites (`swift test`, about 6 s), plus an opt-in live test
+  (`BLOCKING_LIVE_TESTS=1`) that downloads, converts and compiles today's lists:
+  - `RuleListBuilderTests`: conversion of a fixture list, comment handling, line classification,
+    the split (200 rules at a limit of 50, with every exception in each list), a cosmetic
+    exception and a `$badfilter` acting on the other source's rules, split lists compiling in
+    WebKit, and the error when exceptions alone exceed the limit.
+  - `StoreTests`: the real bundled snapshot compiled in the xctest process, then loaded from the
+    store with no compile; recompiling after the store is corrupted, the fingerprint changes or
+    the state file is damaged; recompiling the downloaded copies (not the snapshot); a failed
+    load tried again after the retry interval.
+  - `RefreshTests`: the weekly schedule, a successful swap (and a relaunch that loads it and
+    removes the old lists), a failed download with its retry delay, a non-list download, a
+    truncated download, a compile failure partway through, concurrent refreshes, "Update now"
+    during an automatic check, older generations removed by later refreshes, and automatic
+    refresh.
+  - `AllowlistTests`: site names, persistence across launches, an unreadable file, a failed save.
+  - `WebViewTests`: real loads from a local server under two host names. A fixture ad script is
+    blocked (the server never sees the request) and `.ad-banner` is hidden on a blocked host; both
+    load on an allowlisted host. Lists applied in `decidePolicyFor` take effect for that
+    navigation, a cancelled or failed navigation leaves the page on screen with its own setting,
+    a navigation replaced while loading doesn't undo the new one's setting, the shield toggle
+    plus reload works in one web view, and refreshed lists replace the old ones in an open web
+    view.
+- **License**: SafariConverterLib is GPL-3.0, and it's compiled into the app. EasyList and
+  EasyPrivacy are GPL-3.0 or CC BY-SA 3.0. For a personal build this doesn't matter. Publishing
+  binaries (P7's public releases repo) brings GPL obligations, such as offering the app's source.
+  Decide before P7: accept that, or move conversion out of the app (convert on a server and
+  download converted JSON).
+- **Review**: two adversarial rounds. Round 1 found one high (a cancelled or failed navigation
+  left the page on screen with the destination's setting) and three mediums (compiled lists
+  piling up during a long session, a failed load turning blocking off for the session, "Update
+  now" answering "not due"); round 2 found one high its fix introduced (a replaced navigation's
+  failure undoing the new one's setting) and one medium (replaced lists held until relaunch).
+  All are fixed and tested. Deferred, all hypothetical today: if the lists keep failing to
+  compile, each 10-minute retry holds one navigation for the compile; a retried load could
+  overlap a refresh; allowlist entries typed as Unicode domains don't match the punycode hosts
+  WebKit reports (only matters if a settings field accepts typed domains).
+- **Still to do for P3**: the shield button and wiring (after P1 and P2), then the acceptance
+  sites.
+
 ### P4. Password store and autofill (L)
 
 - **Store**: SQLite rows whose username and password fields are encrypted with the Keychain key.

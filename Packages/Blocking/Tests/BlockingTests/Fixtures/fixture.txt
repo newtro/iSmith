@@ -1,0 +1,26 @@
+[Adblock Plus 2.0]
+! Title: iSmith blocking test fixture
+! Version: 1
+! A small list in EasyList syntax covering the rule kinds the real lists use.
+
+! Network blocking
+/ads/adbanner.js
+||tracker.example^
+||ads.example^$third-party
+-ad-banner-$image
+
+! Network exception (an EasyList-style @@ rule)
+@@||tracker.example/allowed.js
+
+! Element hiding: generic and per site
+##.ad-banner
+example.com##.sponsored-box
+
+! Element-hiding exception
+example.org#@#.ad-banner
+
+! Advanced AdGuard syntax WebKit can't express; the converter skips it
+example.com#$#body { background: red; }
+
+! A rule with an option the converter does not know; it is counted as skipped
+||bad.example^$no-such-option

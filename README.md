@@ -19,6 +19,10 @@ See [DESIGN.md](DESIGN.md) for the model and [BUILD_PLAN.md](BUILD_PLAN.md) for 
   finds profiles, parses bookmarks into a neutral tree, and decrypts saved passwords from private
   copies of `Login Data` and `Login Data For Account`. The "Brave Safe Storage" Keychain read is
   injected, so its tests never touch the Keychain.
+- `Packages/Blocking/`: ad and tracker blocking, not yet wired into the app. EasyList and
+  EasyPrivacy become WebKit content-rule lists, refreshed weekly, with a per-site allowlist.
+  `Packages/Blocking/INTEGRATION.md` lists the app's hook points.
+- `Tools/update-blocking-snapshot.sh`: refreshes the filter lists bundled for first launch.
 - `AppTests/`: tests that run inside the signed app.
 - `project.yml`: the XcodeGen spec. `iSmith.xcodeproj` is generated from it and not committed.
 
@@ -28,7 +32,7 @@ Needs Xcode and XcodeGen (`brew install xcodegen`).
 
 ```bash
 make build   # generate the project and build Debug into build/
-make test    # SignInSync package tests (swift test), then the app-hosted tests
+make test    # package tests (SignInSync, Blocking; swift test), then the app-hosted tests
 make run     # build and open the app
 ```
 
