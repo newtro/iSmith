@@ -28,6 +28,7 @@ final class CookieSync: ObservableObject {
     private var observers: [String: StoreObserver] = [:]
     private var attachTasks: [String: Task<WKWebsiteDataStore, Never>] = [:]
     private var pendingScan: [String: Task<Void, Never>] = [:]
+    private var scanSince: [String: Date] = [:]
     private var baseline: [String: [String: [String: CookieRecord]]] = [:]
     private var tail: Task<Void, Never>?
 
@@ -73,11 +74,18 @@ final class CookieSync: ObservableObject {
         return await task.value
     }
 
+    /// Debounces bursts of changes, but never postpones a scan by more than two seconds, so a page
+    /// that sets cookies constantly can't starve it.
     private func scheduleScan(_ spaceID: String) {
+        if let since = scanSince[spaceID], Date().timeIntervalSince(since) > 2, pendingScan[spaceID] != nil { return }
+        if scanSince[spaceID] == nil { scanSince[spaceID] = Date() }
         pendingScan[spaceID]?.cancel()
         pendingScan[spaceID] = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 400_000_000)
-            guard !Task.isCancelled, let self,
+            guard !Task.isCancelled else { return }
+            self?.pendingScan[spaceID] = nil
+            self?.scanSince[spaceID] = nil
+            guard let self,
                   let space = self.spaces.first(where: { $0.id == spaceID }) else { return }
             await self.enqueue {
                 for account in space.accounts { await self.reconcile(account) }
@@ -90,16 +98,25 @@ final class CookieSync: ObservableObject {
     private func performAttach(_ space: Space) async -> WKWebsiteDataStore {
         let store = WKWebsiteDataStore(forIdentifier: space.storeID)
         for account in space.accounts {
-            guard let saved = vault.records(for: account.id) else { continue }
-            let writes = await apply(keyed(saved), removing: [], provider: account.provider, to: store)
-            note("\(space.name): loaded \(account.label) from vault (\(saved.count) cookies, \(writes) written)")
-        }
-        let cookies = await store.httpCookieStore.allCookies()
-        for account in space.accounts {
-            // An account the vault hasn't seen gets an empty baseline, so the next reconcile treats
-            // the store's existing cookies as new and adopts them.
-            baseline[space.id, default: [:]][account.id] =
-                vault.records(for: account.id) == nil ? [:] : keyed(records(in: cookies, for: account.provider))
+            let local = keyed(records(in: await store.httpCookieStore.allCookies(), for: account.provider))
+            if let saved = vault.records(for: account.id) {
+                // The vault is the source of truth: leftover cookies it doesn't have (an older
+                // session, or a sign-out elsewhere) are removed.
+                let want = keyed(saved)
+                let stale = Set(local.keys).subtracting(want.keys)
+                let written = await apply(want, removing: stale, provider: account.provider, to: store, current: local)
+                note("\(space.name): loaded \(account.label) from vault (\(saved.count) cookies, \(written.count) written)")
+                baseline[space.id, default: [:]][account.id] =
+                    keyed(records(in: await store.httpCookieStore.allCookies(), for: account.provider))
+            } else if !local.isEmpty {
+                // First sighting: adopt now, so a space attached next seeds from it. The empty
+                // baseline makes the next reconcile share it with spaces that are already open.
+                vault.set(Array(local.values), for: account.id)
+                note("\(space.name): adopted \(local.count) existing \(account.label) cookies")
+                baseline[space.id, default: [:]][account.id] = [:]
+            } else {
+                baseline[space.id, default: [:]][account.id] = [:]
+            }
         }
         let observer = StoreObserver { [weak self] in self?.scheduleScan(space.id) }
         observers[space.id] = observer
@@ -116,9 +133,11 @@ final class CookieSync: ObservableObject {
         var merged = before
         var removed = Set<String>()
         var changedIn: [String] = []
+        var currents: [String: [String: CookieRecord]] = [:]
 
         for space in members {
             let current = keyed(records(in: await stores[space.id]!.httpCookieStore.allCookies(), for: account.provider))
+            currents[space.id] = current
             let base = baseline[space.id]?[account.id] ?? [:]
             var touched = false
             for (key, record) in current where base[key] != record {
@@ -140,10 +159,15 @@ final class CookieSync: ObservableObject {
         }
         for space in members {
             let store = stores[space.id]!
-            await apply(merged, removing: removed, provider: account.provider, to: store)
+            let current = currents[space.id] ?? [:]
+            let written = await apply(merged, removing: removed, provider: account.provider, to: store, current: current)
             let after = keyed(records(in: await store.httpCookieStore.allCookies(), for: account.provider))
-            baseline[space.id, default: [:]][account.id] = after
-            let refused = merged.values.filter { !$0.isExpired && after[$0.key] != $0 }.map(\.name)
+            // Only keys we wrote take the re-read value. Anything else the page changed meanwhile
+            // stays different from the baseline, so the next scan picks it up as a delta.
+            var next = current
+            for key in written { next[key] = after[key] }
+            baseline[space.id, default: [:]][account.id] = next
+            let refused = written.compactMap { merged[$0] }.filter { !$0.isExpired && after[$0.key] != $0 }.map(\.name)
             if !refused.isEmpty {
                 note("\(space.name): WebKit kept a different \(account.label) cookie for \(refused.joined(separator: ", "))")
             }
@@ -156,32 +180,36 @@ final class CookieSync: ObservableObject {
         }
     }
 
-    /// Writes `want` into the store and deletes the keys in `removing`. Cookies are overwritten in
-    /// place, never deleted and re-added, so a live page never sees its session cookie missing.
+    /// Writes `want` into the store and deletes the keys in `removing`, and returns the keys it
+    /// touched. `current` is what the store held when it was last read; a key the page has changed
+    /// since then is left alone (the page's newer value wins and is picked up by the next scan).
+    /// Cookies are overwritten in place, never deleted and re-added, so a live page never sees its
+    /// session cookie missing.
     @discardableResult
     private func apply(_ want: [String: CookieRecord], removing: Set<String>, provider: Provider,
-                       to store: WKWebsiteDataStore) async -> Int {
+                       to store: WKWebsiteDataStore, current: [String: CookieRecord]) async -> Set<String> {
         var have: [String: (record: CookieRecord, cookie: HTTPCookie)] = [:]
         for cookie in await store.httpCookieStore.allCookies() where provider.tracks(cookie) {
             let record = CookieRecord(cookie)
-            have[record.key] = (record, cookie)
+            if !record.isExpired { have[record.key] = (record, cookie) }
         }
-        var writes = 0
-        for key in removing {
+        var written = Set<String>()
+        for key in removing where have[key]?.record == current[key] {
             if let existing = have[key] {
                 await store.httpCookieStore.deleteCookie(existing.cookie)
-                writes += 1
+                written.insert(key)
             }
         }
-        for (key, record) in want where !record.isExpired && have[key]?.record != record {
+        for (key, record) in want where !record.isExpired && !removing.contains(key)
+            && have[key]?.record != record && have[key]?.record == current[key] {
             guard let cookie = record.cookie else {
                 note("Could not rebuild cookie \(record.name) for \(record.domain)")
                 continue
             }
             await store.httpCookieStore.setCookie(cookie)
-            writes += 1
+            written.insert(key)
         }
-        return writes
+        return written
     }
 
     private func records(in cookies: [HTTPCookie], for provider: Provider) -> [CookieRecord] {

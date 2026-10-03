@@ -39,10 +39,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @MainActor
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard let flush = Self.flush else { return .terminateNow }
-        Task { @MainActor in
-            await flush()
+        // Quit goes ahead after 3 seconds even if WebKit never answers, so the app can't hang.
+        var replied = false
+        let reply = {
+            guard !replied else { return }
+            replied = true
             NSApp.reply(toApplicationShouldTerminate: true)
         }
+        Task { @MainActor in
+            await flush()
+            reply()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { reply() }
         return .terminateLater
     }
 }
