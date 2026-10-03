@@ -77,7 +77,9 @@ new space. The model now separates two things:
   - YOLO: do anything without asking (Scott's default).
 - **Backends** (`AgentBackend` protocol):
   - CLI backends (subscription): auto-detect `claude`, `codex`, `agy`, `opencode` on PATH;
-    newest model from each CLI's own list.
+    newest model from each CLI's own list. Prefer each CLI's structured interface over scraping
+    text: the Codex app server (`codex app-server`, JSON-RPC over stdio, with approvals), and
+    Claude Code's streaming JSON mode or the Agent SDK.
   - API backends: Anthropic / OpenAI / Google keys, configured in settings.
   - Used by the built-in sidebar; external agents connect over MCP instead.
   - No turn/budget caps; detect failure by liveness and offer Cancel.
@@ -115,8 +117,10 @@ new space. The model now separates two things:
   the record.
 - **Sign-out spreads**: when an account's session ends, every space using it shows one
   "Sign in again" prompt. Each account has "Sign out everywhere".
-- **Passwords and passkeys**: macOS password autofill (iCloud Keychain, 1Password). No built-in
-  password manager.
+- **Passwords and passkeys**: iSmith has its own encrypted password store with autofill, and
+  imports passwords from Brave. (Changed 2026-10-02: Apple Passwords can't autofill inside a
+  third-party WKWebView.) Passkeys go through Apple's passkey entitlement for browsers, if Apple
+  grants it. See BUILD_PLAN.md P4.
 - **Company policy**: no attempt to bypass sign-in frequency or device checks; just stay signed
   in as long as policy allows.
 - **Multiple Macs**: sync setup (spaces, accounts list, routing rules, groups, agent settings)
