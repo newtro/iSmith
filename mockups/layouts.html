@@ -1,0 +1,731 @@
+<title>iSmith Layouts</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: a control strip above one large interactive browser mockup; the mockup is the subject. */
+:root {
+  --bg: #f1f3f6;
+  --surface: #ffffff;
+  --fg: #151922;
+  --muted: #5c6577;
+  --line: #dce1e9;
+  --hover: rgba(30, 50, 90, .06);
+  --accent: #1d5f8c;
+  --win-chrome: #e7eaf0;
+  --win-side: #eef1f5;
+  --rail: #dfe3ea;
+  --page: #ffffff;
+  --tile: #e3e7ee;
+  --badge-fg: #ffffff;
+  --sp-1: #2563eb;
+  --sp-2: #158a5a;
+  --sp-3: #c26a06;
+  --sp-4: #7c3aed;
+  --sp-5: #0f766e;
+  --sp-6: #be123c;
+  --g-1: #0e7490;
+  --g-2: #be185d;
+  --g-3: #4d7c0f;
+  --g-4: #64748b;
+  --shadow: 0 24px 60px -28px rgba(20, 30, 50, .35);
+  --font-ui: "Geist", -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0e1116; --surface: #161a21; --fg: #e5e8ee; --muted: #98a1b2; --line: #282e39;
+    --hover: rgba(200, 215, 240, .06); --accent: #6aa8d8;
+    --win-chrome: #1b2028; --win-side: #151920; --rail: #12161c; --page: #0f1318; --tile: #222833;
+    --badge-fg: #0e1116;
+    --sp-1: #6b97f2; --sp-2: #45c08c; --sp-3: #f0a53a; --sp-4: #a687f6; --sp-5: #3cc6b5; --sp-6: #f07894;
+    --g-1: #3fb6d3; --g-2: #ec6aa6; --g-3: #93c552; --g-4: #94a3b8;
+    --shadow: 0 24px 60px -28px rgba(0, 0, 0, .8);
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0e1116; --surface: #161a21; --fg: #e5e8ee; --muted: #98a1b2; --line: #282e39;
+  --hover: rgba(200, 215, 240, .06); --accent: #6aa8d8;
+  --win-chrome: #1b2028; --win-side: #151920; --rail: #12161c; --page: #0f1318; --tile: #222833;
+  --badge-fg: #0e1116;
+  --sp-1: #6b97f2; --sp-2: #45c08c; --sp-3: #f0a53a; --sp-4: #a687f6; --sp-5: #3cc6b5; --sp-6: #f07894;
+  --g-1: #3fb6d3; --g-2: #ec6aa6; --g-3: #93c552; --g-4: #94a3b8;
+  --shadow: 0 24px 60px -28px rgba(0, 0, 0, .8);
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--fg); font-family: var(--font-ui); font-size: 14px; line-height: 1.5; }
+.wrap { max-width: 1240px; margin: 0 auto; padding-inline: 20px; padding-block: 28px 48px; display: flex; flex-direction: column; gap: 22px; }
+header h1 { margin: 0; font-size: 26px; font-weight: 650; letter-spacing: -.02em; text-wrap: balance; }
+header p { margin: 4px 0 0; color: var(--muted); max-width: 72ch; }
+
+.controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; }
+.ctl { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 12px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.ctl-label { font-size: 11px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); }
+.seg { display: flex; flex-wrap: wrap; gap: 4px; }
+.seg button { font: inherit; font-size: 12.5px; padding: 5px 10px; border-radius: 7px; border: 1px solid var(--line); background: transparent; color: var(--fg); cursor: pointer; }
+.seg button:hover { background: var(--hover); }
+.seg button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--badge-fg); }
+.seg button:focus-visible, .mock :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.ctl-note { font-size: 12.5px; color: var(--muted); margin: 0; }
+
+.stage { overflow-x: auto; padding-bottom: 6px; }
+.picks { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+.picks code { font-family: var(--font-mono); font-size: 12.5px; flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.picks button { font: inherit; font-size: 12.5px; padding: 5px 12px; border-radius: 7px; border: 1px solid var(--accent); background: transparent; color: var(--accent); cursor: pointer; }
+.foot { color: var(--muted); font-size: 12.5px; margin: 0; max-width: 90ch; }
+
+/* ---------- mock browser ---------- */
+.mock { position: relative; min-width: 1060px; height: 640px; border-radius: 12px; border: 1px solid var(--line); background: var(--win-chrome); box-shadow: var(--shadow); display: flex; overflow: hidden; font-size: 12.5px; }
+.ic { width: 15px; height: 15px; flex: none; }
+.rail { width: 64px; flex: none; background: var(--rail); border-right: 1px solid var(--line); display: flex; flex-direction: column; align-items: center; gap: 9px; padding: 12px 0; }
+.lights { display: flex; gap: 6px; flex: none; margin-bottom: 8px; }
+.lights span { width: 11px; height: 11px; border-radius: 50%; background: #ff5f57; }
+.lights span:nth-child(2) { background: #febc2e; }
+.lights span:nth-child(3) { background: #28c840; }
+.rl { position: relative; width: 40px; height: 40px; border-radius: 12px; display: grid; place-items: center; font-weight: 700; font-size: 13px; cursor: pointer; background: color-mix(in srgb, var(--c) 18%, var(--rail)); color: var(--c); }
+.rl:hover { background: color-mix(in srgb, var(--c) 30%, var(--rail)); }
+.rl.active { background: var(--c); color: var(--badge-fg); }
+.rl.active::before { content: ""; position: absolute; left: -12px; top: 8px; bottom: 8px; width: 4px; border-radius: 0 3px 3px 0; background: var(--c); }
+.rl .badge { position: absolute; top: -5px; right: -6px; box-shadow: 0 0 0 2px var(--rail); }
+.rl.plus { background: transparent; color: var(--muted); border: 1.5px dashed var(--line); }
+.rl.all { --c: var(--accent); }
+.rail-sep { width: 26px; height: 1px; background: var(--line); }
+.rail-bottom { margin-top: auto; color: var(--muted); display: grid; place-items: center; width: 40px; height: 40px; border-radius: 12px; }
+
+.col { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.strip { height: 42px; flex: none; display: flex; align-items: center; gap: 4px; padding: 0 10px; min-width: 0; }
+.col, .agent-right { transition: background-color .25s ease; }
+@media (prefers-reduced-motion: reduce) { .col, .agent-right { transition: none; } }
+.mock.tint .col, .mock.tintbanner .col { background: color-mix(in srgb, var(--sc) 18%, var(--win-chrome)); }
+.mock.tint .toolbar, .mock.tintbanner .toolbar { border-bottom-color: color-mix(in srgb, var(--sc) 30%, var(--line)); }
+.mock.tint .agent-right, .mock.tintbanner .agent-right { background: color-mix(in srgb, var(--sc) 9%, var(--win-side)); border-left-color: color-mix(in srgb, var(--sc) 30%, var(--line)); }
+.mock.tint .drawer, .mock.tintbanner .drawer { background: color-mix(in srgb, var(--sc) 9%, var(--win-side)); }
+.toolbar { height: 42px; display: flex; align-items: center; gap: 8px; padding: 0 10px; border-bottom: 1px solid var(--line); flex: none; }
+.navbtns { display: flex; gap: 2px; color: var(--muted); }
+.navbtns span { width: 26px; height: 26px; display: grid; place-items: center; border-radius: 6px; }
+.addr { flex: 1; min-width: 0; height: 28px; border-radius: 8px; background: var(--page); border: 1px solid var(--line); display: flex; align-items: center; gap: 8px; padding: 0 4px 0 10px; }
+.addr .url { font-family: var(--font-mono); font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0; }
+.chip { display: inline-flex; align-items: center; gap: 6px; padding: 1px 9px; border-radius: 999px; font-size: 11px; font-weight: 500; white-space: nowrap; background: color-mix(in srgb, var(--sc) 14%, transparent); border: 1px solid color-mix(in srgb, var(--sc) 45%, transparent); }
+.chip i { width: 8px; height: 8px; border-radius: 2px; background: var(--sc); }
+.dock { display: inline-flex; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; background: var(--page); }
+.dock button { font: inherit; width: 30px; height: 26px; display: grid; place-items: center; border: 0; background: transparent; color: var(--muted); cursor: pointer; }
+.dock button + button { border-left: 1px solid var(--line); }
+.dock button[aria-pressed="true"] { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); }
+
+/* tab strip */
+.t { display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 10px; border-radius: 8px; max-width: 190px; min-width: 0; flex: 0 1 auto; cursor: pointer; border-bottom: 2px solid var(--g, transparent); }
+.t:hover { background: var(--hover); }
+.t.active { background: var(--page); box-shadow: 0 0 0 1px var(--line); }
+.t .tt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.t.pin { padding: 0 9px; flex: none; border-bottom-color: transparent; position: relative; }
+.t.pin .badge { position: absolute; top: -3px; right: -5px; }
+.t.agent { border-bottom-style: dashed; color: var(--muted); }
+.t.agent .tt { color: var(--fg); }
+.gchip { display: inline-flex; align-items: center; gap: 5px; height: 22px; padding: 0 8px; border-radius: 6px; font-size: 11.5px; font-weight: 600; background: var(--g); color: var(--badge-fg); cursor: pointer; white-space: nowrap; flex: none; margin-left: 4px; }
+.gchip.closed { background: color-mix(in srgb, var(--g) 20%, transparent); color: var(--fg); }
+.gchip .n { font-weight: 500; opacity: .85; font-variant-numeric: tabular-nums; }
+.sep { width: 1px; height: 18px; background: var(--line); flex: none; margin: 0 4px; }
+.newtab { width: 28px; height: 28px; display: grid; place-items: center; border-radius: 7px; color: var(--muted); flex: none; }
+.spname { font-weight: 600; display: inline-flex; align-items: center; gap: 7px; padding-right: 6px; flex: none; white-space: nowrap; }
+.dot { width: 10px; height: 10px; border-radius: 3px; background: var(--c); flex: none; }
+.badge { font-size: 10.5px; font-weight: 600; line-height: 16px; min-width: 18px; text-align: center; padding: 0 5px; border-radius: 999px; background: var(--c); color: var(--badge-fg); font-variant-numeric: tabular-nums; flex: none; }
+.live { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); flex: none; animation: pulse 1.6s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: .3; } }
+@media (prefers-reduced-motion: reduce) { .live { animation: none; } }
+
+.mbody { flex: 1; display: flex; min-height: 0; }
+.main { flex: 1; min-width: 0; display: flex; flex-direction: column; padding: 8px; gap: 8px; }
+.page { flex: 1; min-height: 0; background: var(--page); border-radius: 8px; border: 1px solid var(--line); overflow: auto; }
+.mock.edge .page { border: 2px solid var(--sc); }
+
+/* agent panels */
+.agent-right { width: 300px; flex: none; border-left: 1px solid var(--line); background: var(--win-side); display: flex; flex-direction: column; min-height: 0; }
+.ag-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.ag-head strong { font-size: 13px; }
+.ag-head select { font: inherit; font-size: 11.5px; padding: 2px 6px; border-radius: 6px; border: 1px solid var(--line); background: var(--page); color: var(--fg); }
+.ag-backend { width: 100%; font-size: 11px; color: var(--muted); font-family: var(--font-mono); }
+.ag-scroll { flex: 1; overflow: auto; padding: 12px; display: flex; flex-direction: column; gap: 10px; min-height: 0; }
+.msg-user { align-self: flex-end; background: var(--accent); color: var(--badge-fg); padding: 7px 10px; border-radius: 10px 10px 2px 10px; max-width: 90%; }
+.steps { display: flex; flex-direction: column; gap: 5px; }
+.step { display: flex; gap: 7px; align-items: flex-start; color: var(--muted); font-size: 12px; }
+.step .ic { color: var(--sp-2); margin-top: 2px; }
+.msg-agent { background: var(--page); border: 1px solid var(--line); padding: 8px 10px; border-radius: 10px 10px 10px 2px; }
+.ag-input { margin: 10px 12px 12px; padding: 8px 10px; border-radius: 9px; border: 1px solid var(--line); background: var(--page); color: var(--muted); }
+.ag-empty { color: var(--muted); padding: 4px 2px; }
+.drawer { height: 190px; flex: none; border-radius: 8px; border: 1px solid var(--line); background: var(--win-side); display: grid; grid-template-columns: 1fr 1.25fr; min-height: 0; overflow: hidden; }
+.drawer > div { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+.drawer > div + div { border-left: 1px solid var(--line); }
+.drawer .ag-head { padding: 7px 10px; }
+.drawer .ag-scroll { padding: 8px 10px; gap: 6px; }
+.drawer .ag-input { margin: 0 10px 8px; padding: 5px 8px; }
+.log { width: 100%; border-collapse: collapse; font-size: 11.5px; }
+.log td { padding: 3px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+.log td:first-child { font-family: var(--font-mono); color: var(--muted); font-variant-numeric: tabular-nums; }
+.log td:last-child { color: var(--muted); overflow: hidden; text-overflow: ellipsis; max-width: 1px; width: 60%; }
+
+/* new space sheet */
+.veil { position: absolute; inset: 0; background: rgba(8, 12, 20, .42); display: flex; justify-content: center; align-items: flex-start; padding-top: 28px; z-index: 5; }
+.sheet { width: 620px; max-height: 584px; background: var(--surface); color: var(--fg); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow); display: flex; flex-direction: column; overflow: hidden; }
+.sh-head { display: flex; align-items: center; gap: 9px; padding: 12px 16px; border-bottom: 1px solid var(--line); font-size: 14px; }
+.sh-head .muted { color: var(--muted); font-size: 12.5px; }
+.sh-body { flex: 1; overflow: auto; padding: 12px 16px 16px; display: flex; flex-direction: column; gap: 10px; }
+.sh-row { display: grid; grid-template-columns: 96px 1fr; align-items: center; gap: 10px; }
+.sh-row label, .sh-row .lbl { color: var(--muted); font-size: 12px; }
+.sheet input[type=text], .sheet select { font: inherit; font-size: 12.5px; padding: 5px 8px; border-radius: 7px; border: 1px solid var(--line); background: var(--page); color: var(--fg); width: 100%; }
+.sheet select { width: auto; min-width: 200px; }
+.swatches { display: flex; gap: 8px; }
+.sw { width: 24px; height: 24px; border-radius: 7px; border: 0; background: var(--c); cursor: pointer; }
+.sw.on { box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--c); }
+.sec { margin-top: 6px; padding-top: 10px; border-top: 1px solid var(--line); font-weight: 600; display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.sec span { font-weight: 400; color: var(--muted); font-size: 12px; }
+.acc { width: 100%; border-collapse: collapse; }
+.acc td { padding: 4px 0; vertical-align: middle; }
+.acc td:first-child { width: 96px; color: var(--muted); font-size: 12px; }
+.acc td.st { padding-left: 10px; color: var(--muted); font-size: 11.5px; }
+.pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px; background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--fg); }
+.checks { display: flex; flex-direction: column; gap: 4px; }
+.checks.inline { flex-direction: row; flex-wrap: wrap; gap: 4px 16px; }
+.checks label { display: flex; align-items: center; gap: 8px; font-size: 12.5px; }
+.checks code { font-family: var(--font-mono); font-size: 11.5px; }
+.checks .to { color: var(--muted); font-size: 11.5px; }
+.sh-foot { display: flex; justify-content: flex-end; gap: 8px; padding: 10px 16px; border-top: 1px solid var(--line); }
+.sh-foot button { font: inherit; font-size: 12.5px; padding: 6px 14px; border-radius: 7px; border: 1px solid var(--line); background: transparent; color: var(--fg); cursor: pointer; }
+.sh-foot button.primary { background: var(--accent); border-color: var(--accent); color: var(--badge-fg); }
+.signin { display: grid; place-items: center; padding: 48px 20px; }
+.si-card { width: 360px; max-width: 100%; border: 1px solid var(--line); border-radius: 10px; padding: 22px; display: flex; flex-direction: column; gap: 12px; background: var(--page); }
+.si-card h2 { margin: 0; font-size: 19px; font-weight: 600; }
+.si-card p { margin: 0; color: var(--muted); font-size: 12.5px; }
+.si-prov { font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.si-field { border: 1px solid var(--line); border-radius: 6px; padding: 7px 10px; color: var(--muted); font-family: var(--font-mono); font-size: 12px; }
+.si-btn { align-self: flex-end; background: var(--sc); color: var(--badge-fg); padding: 5px 16px; border-radius: 6px; font-weight: 600; }
+.picks .ghost { border-color: var(--line); color: var(--fg); }
+
+/* page content */
+.banner { display: flex; align-items: center; gap: 10px; padding: 7px 14px; background: color-mix(in srgb, var(--sc) 16%, var(--page)); border-bottom: 1px solid color-mix(in srgb, var(--sc) 35%, transparent); font-size: 12px; position: sticky; top: 0; }
+.banner b { font-weight: 600; }
+.pg-head { display: flex; align-items: baseline; gap: 12px; padding: 14px 18px 10px; border-bottom: 1px solid var(--line); }
+.pg-head h2 { margin: 0; font-size: 17px; font-weight: 600; }
+.pg-head span { color: var(--muted); font-size: 12px; }
+.mail { display: grid; grid-template-columns: 8px 150px 1fr 72px; gap: 10px; align-items: baseline; padding: 9px 18px; border-bottom: 1px solid var(--line); }
+.mail.u .from, .mail.u .subj { font-weight: 600; }
+.mail .ud { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); align-self: center; }
+.mail:not(.u) .ud { visibility: hidden; }
+.mail .line { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.mail .prev { color: var(--muted); font-weight: 400; }
+.mail .time { text-align: right; color: var(--muted); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.mail.uni { grid-template-columns: 8px 110px 140px 1fr 72px; }
+.tag { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--muted); white-space: nowrap; }
+.tag i { width: 8px; height: 8px; border-radius: 2px; background: var(--c); }
+.board { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; padding: 14px 18px; }
+.bcol h3 { margin: 0 0 8px; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.card { background: var(--win-side); border: 1px solid var(--line); border-left: 3px solid var(--sp-1); border-radius: 6px; padding: 8px 10px; margin-bottom: 8px; }
+.card b { font-family: var(--font-mono); font-weight: 500; font-size: 11px; color: var(--muted); display: block; }
+.wi { padding: 16px 20px; display: flex; flex-direction: column; gap: 14px; max-width: 760px; }
+.wi h2 { margin: 0; font-size: 18px; font-weight: 600; }
+.wi .meta { display: grid; grid-template-columns: repeat(4, auto); justify-content: start; gap: 4px 24px; font-size: 12px; }
+.wi .meta span { color: var(--muted); font-size: 11px; display: block; }
+.wi p { margin: 0; max-width: 65ch; }
+.wi .disc { border-left: 3px solid var(--line); padding-left: 12px; color: var(--muted); }
+.ph { padding: 28px; display: flex; flex-direction: column; gap: 12px; }
+.ph h2 { margin: 0; font-size: 20px; font-weight: 600; }
+.ph .bar { height: 12px; border-radius: 4px; background: var(--tile); }
+</style>
+
+<div class="wrap">
+  <header>
+    <h1>iSmith layout mockups</h1>
+    <p>Space rail on the left, the selected space’s tabs across the top. Click a space in the rail to swap in its tabs. Click a group label in the tab strip to collapse or expand it. Click + in the rail to try setting up a new client space. Outlook, DevOps and Teams are ordinary tabs; the rail’s unread counts come from whatever tabs are open in each space. All mail and tickets are example data.</p>
+  </header>
+  <section class="controls" id="controls" aria-label="Mockup options"></section>
+  <div class="stage"><div id="mock"></div></div>
+  <div class="picks">
+    <code id="picks"></code>
+    <button type="button" id="open-sheet">Open New space sheet</button>
+    <button type="button" id="copy">Copy picks</button>
+    <button type="button" id="reset" class="ghost">Reset mockup</button>
+  </div>
+  <p class="foot">Each space uses one account per provider. Contoso and Fabrikam both show Outlook at the same URL, and the chip shows which Microsoft account is in use. The three dock buttons in the toolbar are the browser’s own setting for the agent panel.</p>
+</div>
+
+<script>
+const P = {
+  mail: '<rect x="2" y="3.5" width="12" height="9" rx="1.5"/><path d="M2.5 4.5 8 9l5.5-4.5"/>',
+  board: '<rect x="2" y="2.5" width="12" height="11" rx="1.5"/><path d="M6 2.5v11M10 2.5v11"/>',
+  chat: '<path d="M3 3.5h10a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H7l-3 2.5v-2.5H3a1 1 0 0 1-1-1v-6a1 1 0 0 1 1-1z"/>',
+  globe: '<circle cx="8" cy="8" r="5.8"/><path d="M2.3 8h11.4M8 2.2c1.7 1.6 2.5 3.6 2.5 5.8S9.7 12.2 8 13.8C6.3 12.2 5.5 10.2 5.5 8S6.3 3.8 8 2.2z"/>',
+  doc: '<path d="M4 2h5.5L12.5 5v9H4z"/><path d="M9.5 2v3h3M6 8h4.5M6 10.5h4.5"/>',
+  item: '<rect x="2.5" y="2.5" width="11" height="11" rx="2"/><path d="M5.5 8l2 2 3-4"/>',
+  pr: '<circle cx="4.5" cy="4" r="1.5"/><circle cx="4.5" cy="12" r="1.5"/><circle cx="11.5" cy="12" r="1.5"/><path d="M4.5 5.5v5M11.5 10.5V7a2 2 0 0 0-2-2H7.5"/>',
+  cal: '<rect x="2.5" y="3.5" width="11" height="10" rx="1.5"/><path d="M2.5 6.5h11M5.5 2v3M10.5 2v3"/>',
+  cloud: '<path d="M4.5 12.5a3 3 0 0 1-.4-6 4 4 0 0 1 7.7 1A2.5 2.5 0 0 1 11.5 12.5z"/>',
+  bot: '<rect x="3" y="5" width="10" height="8" rx="2"/><path d="M8 2.5V5M6 9h.01M10 9h.01"/>',
+  plus: '<path d="M8 3v10M3 8h10"/>',
+  check: '<path d="M3.5 8.5l3 3 6-7"/>',
+  back: '<path d="M10 3.5 5.5 8l4.5 4.5"/>',
+  fwd: '<path d="M6 3.5 10.5 8 6 12.5"/>',
+  reload: '<path d="M12.5 8a4.5 4.5 0 1 1-1.3-3.2M12.5 3v2.5H10"/>',
+  search: '<circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5 14 14"/>',
+  spark: '<path d="M8 2v3M8 11v3M2 8h3M11 8h3M4 4l2 2M10 10l2 2M12 4l-2 2M6 10l-2 2"/>',
+  gear: '<circle cx="8" cy="8" r="2"/><path d="M8 1.8v1.7M8 12.5v1.7M1.8 8h1.7M12.5 8h1.7M3.6 3.6l1.2 1.2M11.2 11.2l1.2 1.2M12.4 3.6l-1.2 1.2M4.8 11.2l-1.2 1.2"/>',
+  dockR: '<rect x="2" y="3" width="12" height="10" rx="1.5"/><path d="M10 3v10"/>',
+  dockB: '<rect x="2" y="3" width="12" height="10" rx="1.5"/><path d="M2 9.5h12"/>',
+  dockN: '<rect x="2" y="3" width="12" height="10" rx="1.5"/><path d="M5 6l6 4M11 6l-6 4"/>'
+};
+const ic = n => `<svg class="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${P[n]}</svg>`;
+
+const WI = id => `dev.azure.com/contoso-dev/Storefront/_workitems/edit/${id}`;
+const SP = {
+  contoso: {
+    name: 'Contoso', init: 'M', c: '--sp-1',
+    accounts: [['Microsoft', 'Contoso'], ['Google', 'personal'], ['GitHub', 'personal']],
+    pinned: [
+      { id: 'mail', name: 'Outlook', icon: 'mail', badge: 7, url: 'outlook.office.com/mail/inbox', kind: 'mail' },
+      { id: 'ado', name: 'Azure DevOps', icon: 'board', badge: 0, url: 'dev.azure.com/contoso-dev/Storefront/_boards', kind: 'ado' },
+      { id: 'teams', name: 'Teams', icon: 'chat', badge: 3, url: 'teams.microsoft.com/v2', kind: 'generic' }
+    ],
+    groups: [
+      { id: 's42', name: 'Sprint 42', g: '--g-1', tabs: [
+        { id: 'wi1', name: 'WI 81234 · Export retest fails on Q1', icon: 'item', url: WI(81234), kind: 'wi' },
+        { id: 'wi2', name: 'WI 81240 · Export button disabled', icon: 'item', url: WI(81240), kind: 'wi' }
+      ] },
+      { id: 'rev', name: 'Reviews', g: '--g-2', tabs: [
+        { id: 'pr', name: 'PR 4412 · Export fix', icon: 'pr', url: 'dev.azure.com/contoso-dev/Storefront/_git/Storefront/pullrequest/4412', kind: 'generic' },
+        { id: 'pr2', name: 'PR 4407 · Audit log paging', icon: 'pr', url: 'dev.azure.com/contoso-dev/Storefront/_git/Storefront/pullrequest/4407', kind: 'generic' }
+      ] }
+    ],
+    loose: [{ id: 'portal', name: 'Azure portal · Q1 app service', icon: 'cloud', url: 'portal.azure.com/#@contoso/resource/q1-app', kind: 'generic' }],
+    agentTabs: [
+      { id: 'ag1', name: 'Inbox triage', icon: 'mail', url: 'outlook.office.com/mail/inbox', kind: 'mail' },
+      { id: 'ag2', name: 'WI 81234 · Export retest fails on Q1', icon: 'item', url: WI(81234), kind: 'wi' }
+    ],
+    mail: [
+      { from: 'Azure DevOps', subj: 'Pull request 4412 needs your review', prev: 'Export fix for Sprint 42 · 3 files changed', t: '9:41', u: 1 },
+      { from: 'QA', subj: 'WI 81234 retest failed on Q1', prev: 'Export is still disabled when the filter is empty', t: '9:12', u: 1 },
+      { from: 'Teams', subj: 'You were mentioned in Storefront Dev', prev: 'Can you look at the Q1 deploy before standup?', t: '8:55', u: 1 },
+      { from: 'Sprint planning', subj: 'Sprint 43 planning, Thursday 10:00', prev: 'Agenda and carry-over items attached', t: 'Yesterday', u: 0 },
+      { from: 'Azure DevOps', subj: 'Build 2026.10.01.3 succeeded', prev: 'Storefront-CI · main', t: 'Yesterday', u: 0 }
+    ],
+    mode: 'YOLO',
+    agent: {
+      ask: 'Triage my inbox. Open any work items QA flagged and assign them to me.',
+      steps: ['Read Inbox · 24 messages', 'Found WI 81234 in a QA email', 'Opened WI 81234 in Agent tabs', 'Set Assigned To: Scott Smith', 'Added comment: Picking this up today'],
+      reply: 'Done. WI 81234 is assigned to you. PR 4412 is still waiting for your review.',
+      log: [['9:43:02', 'Read', 'Outlook · Inbox'], ['9:43:05', 'Open tab', 'WI 81234'], ['9:43:07', 'Edit field', 'Assigned To → Scott Smith'], ['9:43:08', 'Comment', 'WI 81234 · Picking this up today'], ['9:43:10', 'Read', 'PR 4412 · status']]
+    }
+  },
+  fabrikam: {
+    name: 'Fabrikam', init: 'TP', c: '--sp-2',
+    accounts: [['Microsoft', 'Fabrikam'], ['Google', 'personal']],
+    pinned: [
+      { id: 'mail', name: 'Outlook', icon: 'mail', badge: 2, url: 'outlook.office.com/mail/inbox', kind: 'mail' },
+      { id: 'teams', name: 'Teams', icon: 'chat', badge: 0, url: 'teams.microsoft.com/v2', kind: 'generic' },
+      { id: 'sp', name: 'SharePoint', icon: 'doc', badge: 0, url: 'fabrikam.sharepoint.com', kind: 'generic' }
+    ],
+    groups: [
+      { id: 'roll', name: 'Client rollout', g: '--g-3', tabs: [
+        { id: 'plan', name: 'Cutover checklist', icon: 'doc', url: 'fabrikam.sharepoint.com/sites/rollout/checklist', kind: 'generic' },
+        { id: 'deck', name: 'Status deck v3', icon: 'doc', url: 'fabrikam.sharepoint.com/sites/rollout/status-v3', kind: 'generic' }
+      ] }
+    ],
+    loose: [],
+    agentTabs: [],
+    mail: [
+      { from: 'Project lead', subj: 'Rollout status for Friday', prev: 'Can you confirm the cutover checklist by noon?', t: '10:02', u: 1 },
+      { from: 'SharePoint', subj: 'Status deck v3 was shared with you', prev: 'Client rollout site', t: '8:30', u: 1 },
+      { from: 'Calendar', subj: 'Weekly sync moved to 2:00', prev: 'Same Teams link', t: 'Yesterday', u: 0 }
+    ],
+    mode: 'Confirm submits'
+  },
+  personal: {
+    name: 'Personal', init: 'P', c: '--sp-3',
+    accounts: [['Google', 'personal'], ['GitHub', 'personal']],
+    pinned: [
+      { id: 'mail', name: 'Gmail', icon: 'mail', badge: 12, url: 'mail.google.com/mail/u/0/#inbox', kind: 'mail' },
+      { id: 'cal', name: 'Calendar', icon: 'cal', badge: 0, url: 'calendar.google.com', kind: 'generic' },
+      { id: 'gh', name: 'GitHub', icon: 'pr', badge: 0, url: 'github.com', kind: 'generic' }
+    ],
+    groups: [
+      { id: 'read', name: 'Reading', g: '--g-4', tabs: [
+        { id: 'r1', name: 'WKWebsiteDataStore', icon: 'doc', url: 'developer.apple.com/documentation/webkit/wkwebsitedatastore', kind: 'generic' },
+        { id: 'r2', name: 'WKHTTPCookieStore', icon: 'doc', url: 'developer.apple.com/documentation/webkit/wkhttpcookiestore', kind: 'generic' }
+      ] }
+    ],
+    loose: [],
+    agentTabs: [],
+    mail: [
+      { from: 'GitHub', subj: '[iSmith] Design doc pushed to main', prev: 'DESIGN.md · Accounts + Spaces', t: '9:30', u: 1 },
+      { from: 'Cloudflare', subj: 'DNS record updated for remail.foo', prev: 'A record · proxied', t: '7:14', u: 1 },
+      { from: 'AWS', subj: 'Your September Lightsail invoice', prev: 'Invoice is available in the billing console', t: 'Oct 1', u: 0 }
+    ],
+    mode: 'YOLO'
+  },
+  side: {
+    name: 'Side projects', init: 'SP', c: '--sp-4',
+    accounts: [['AWS', 'Lightsail'], ['GitHub', 'personal'], ['Cloudflare', 'personal']],
+    pinned: [
+      { id: 'aws', name: 'Lightsail', icon: 'cloud', badge: 0, url: 'lightsail.aws.amazon.com/ls/webapp/home/instances', kind: 'generic' },
+      { id: 'cf', name: 'Cloudflare', icon: 'globe', badge: 0, url: 'dash.cloudflare.com', kind: 'generic' },
+      { id: 'rm', name: 'Remail', icon: 'mail', badge: 0, url: 'remail.foo/dashboard', kind: 'generic' }
+    ],
+    groups: [
+      { id: 'vm', name: 'VM', g: '--g-1', tabs: [
+        { id: 'jc', name: 'johnnycode.ai', icon: 'globe', url: 'johnnycode.ai', kind: 'generic' },
+        { id: 'iw', name: 'InvoiceWhisper', icon: 'globe', url: 'invoicewhisper.com', kind: 'generic' }
+      ] }
+    ],
+    loose: [],
+    agentTabs: [],
+    mail: [],
+    mode: 'YOLO'
+  }
+};
+const ORDER = ['contoso', 'fabrikam', 'personal', 'side'];
+
+const CONTROLS = [
+  { key: 'agent', label: 'Agent panel', opts: [
+    ['right', 'Right panel', 'Chat and step list beside the page, so you can watch the agent while you keep working.'],
+    ['bottom', 'Bottom panel', 'A drawer under the page with the chat and this space’s activity log side by side.'],
+    ['none', 'Hidden', 'No panel. Agents still connect over MCP from Claude Code, Codex and others, and Agent tabs still appear.']
+  ] },
+  { key: 'cue', label: 'Identity cues', opts: [
+    ['subtle', 'Subtle', 'Only the active space in the rail. Least noise, but nothing in the toolbar names the account in use.'],
+    ['edge', 'Edge + chip', 'A space-colored border around the page and an address-bar chip naming the account in use for this site.'],
+    ['tint', 'Tinted chrome', 'The whole browser frame (tab strip, toolbar, agent panel) reshades to the space color when you switch spaces, plus the account chip. The rail stays neutral so every space color stays readable.'],
+    ['tintbanner', 'Tinted + banner', 'Tinted chrome plus a banner at the top of every page listing the space’s accounts.']
+  ] }
+];
+
+const DEFAULTS = { agent: 'right', cue: 'tint', pinned: 'none', space: 'contoso', tab: 'mail', closed: {}, modes: {}, lastTab: {}, custom: [], sheet: null };
+let state = structuredClone(DEFAULTS);
+try { const s = JSON.parse(localStorage.getItem('ismith-mock-v4') || 'null'); if (s) state = Object.assign(state, s); } catch (e) {}
+(state.custom || []).forEach(c => { SP[c.id] = c.data; if (!ORDER.includes(c.id)) ORDER.push(c.id); });
+if (!SP[state.space]) state.space = 'contoso';
+const save = () => { try { localStorage.setItem('ismith-mock-v4', JSON.stringify(state)); } catch (e) {} };
+
+const cv = sid => `var(${SP[sid].c})`;
+const unread = sid => SP[sid].pinned.reduce((n, p) => n + (p.badge || 0), 0);
+const showBadges = () => true;
+const modeOf = sid => state.modes[sid] || SP[sid].mode;
+const acctLine = sid => SP[sid].accounts.map(a => `${a[0]}: ${a[1]}`).join(' · ');
+function findTab(sid, id) {
+  const s = SP[sid];
+  return [...s.pinned, ...s.groups.flatMap(g => g.tabs), ...s.loose, ...s.agentTabs].find(t => t.id === id);
+}
+function activeTab() {
+  if (state.tab === 'all') return { id: 'all', name: 'All inboxes', url: 'ismith://inboxes', kind: 'unified' };
+  return findTab(state.space, state.tab) || SP[state.space].pinned[0];
+}
+function providerFor(url) {
+  if (/office\.com|azure\.com|microsoft\.com|sharepoint\.com/.test(url)) return 'Microsoft';
+  if (/google\.com/.test(url)) return 'Google';
+  if (/github\.com/.test(url)) return 'GitHub';
+  if (/aws\.amazon\.com/.test(url)) return 'AWS';
+  if (/cloudflare\.com/.test(url)) return 'Cloudflare';
+  return null;
+}
+function switchSpace(sid) {
+  if (state.tab !== 'all') state.lastTab[state.space] = state.tab;
+  state.space = sid;
+  state.tab = state.lastTab[sid] || SP[sid].pinned[0].id;
+}
+
+/* ---------- controls ---------- */
+function renderControls() {
+  document.getElementById('controls').innerHTML = CONTROLS.map(c => {
+    const cur = c.opts.find(o => o[0] === state[c.key]);
+    return `<div class="ctl"><div class="ctl-label" id="lbl-${c.key}">${c.label}</div>
+      <div class="seg" role="group" aria-labelledby="lbl-${c.key}">${c.opts.map(o => `<button type="button" id="opt-${c.key}-${o[0]}" data-key="${c.key}" data-val="${o[0]}" aria-pressed="${o[0] === state[c.key]}">${o[1]}</button>`).join('')}</div>
+      <p class="ctl-note">${cur[2]}</p></div>`;
+  }).join('');
+  const label = k => CONTROLS.find(c => c.key === k).opts.find(o => o[0] === state[k])[1];
+  document.getElementById('picks').textContent = `Layout: Space rail + top tabs · Agent: ${label('agent')} · Cues: ${label('cue')}`;
+}
+
+/* ---------- rail ---------- */
+function rail() {
+  let h = '<div class="lights"><span></span><span></span><span></span></div>';
+  if (state.pinned === 'unified') {
+    const n = ORDER.reduce((a, sid) => a + SP[sid].pinned.filter(p => p.kind === 'mail').reduce((x, p) => x + p.badge, 0), 0);
+    h += `<div class="rl all${state.tab === 'all' ? ' active' : ''}" data-all="1" title="All inboxes">${ic('mail')}<span class="badge">${n}</span></div><div class="rail-sep"></div>`;
+  }
+  h += ORDER.map(s => `<div class="rl${s === state.space && state.tab !== 'all' ? ' active' : ''}" data-space="${s}" style="--c:${cv(s)}" title="${SP[s].name}">${SP[s].init}${s !== state.space && showBadges() && unread(s) ? `<span class="badge">${unread(s)}</span>` : ''}</div>`).join('');
+  h += `<div class="rl plus" data-newspace="1" title="New space">${ic('plus')}</div><div class="rail-bottom" title="Accounts and settings">${ic('gear')}</div>`;
+  return `<nav class="rail">${h}</nav>`;
+}
+
+/* ---------- tab strip ---------- */
+function tabEl(t, sid, o = {}) {
+  const active = state.tab === t.id;
+  const badge = t.badge ? `<span class="badge" style="--c:${cv(sid)}">${t.badge}</span>` : '';
+  return `<div class="t${active ? ' active' : ''}${o.agent ? ' agent' : ''}" data-tab="${t.id}" style="${o.g ? `--g:var(${o.g});` : ''}${o.agent ? '--g:var(--accent);' : ''}" title="${t.name}">${ic(t.icon)}<span class="tt">${t.name}</span>${badge}${o.agent ? '<span class="live"></span>' : ''}</div>`;
+}
+function strip() {
+  const sid = state.space, s = SP[sid];
+  if (state.tab === 'all') return `<div class="strip"><span class="spname"><span class="dot" style="--c:var(--accent)"></span>All inboxes</span></div>`;
+  let h = `<span class="spname" style="--c:${cv(sid)}"><span class="dot"></span>${s.name}</span>`;
+  h += s.pinned.map(t => tabEl(t, sid)).join('');
+  s.groups.forEach(g => {
+    const key = sid + ':' + g.id, closed = state.closed[key];
+    h += `<div class="gchip${closed ? ' closed' : ''}" data-group="${key}" style="--g:var(${g.g})" title="${closed ? 'Expand' : 'Collapse'} ${g.name}">${g.name}${closed ? `<span class="n">${g.tabs.length}</span>` : ''}</div>`;
+    if (!closed) h += g.tabs.map(t => tabEl(t, sid, { g: g.g })).join('');
+  });
+  h += s.loose.map(t => tabEl(t, sid)).join('');
+  if (s.agentTabs.length) {
+    const key = sid + ':agent', closed = state.closed[key];
+    h += `<div class="gchip${closed ? ' closed' : ''}" data-group="${key}" style="--g:var(--accent)">${ic('bot')}Agent${closed ? `<span class="n">${s.agentTabs.length}</span>` : ''}</div>`;
+    if (!closed) h += s.agentTabs.map(t => tabEl(t, sid, { agent: 1 })).join('');
+  }
+  h += `<span class="newtab" title="New tab">${ic('plus')}</span>`;
+  return `<div class="strip">${h}</div>`;
+}
+
+/* ---------- agent ---------- */
+function modeSelect(sid) {
+  return `<select id="mode-${sid}" data-mode="${sid}" aria-label="Agent mode">${['Read-only', 'Ask', 'Confirm submits', 'YOLO'].map(m => `<option${m === modeOf(sid) ? ' selected' : ''}>${m}</option>`).join('')}</select>`;
+}
+function agentChat(sid, compact) {
+  const a = SP[sid].agent;
+  if (!a) return `<div class="ag-empty">Nothing running in ${SP[sid].name}. The agent signs in as this space’s accounts: ${acctLine(sid)}.</div>`;
+  const steps = compact ? a.steps.slice(-2) : a.steps;
+  return `<div class="msg-user">${a.ask}</div><div class="steps">${steps.map(s => `<div class="step">${ic('check')}<span>${s}</span></div>`).join('')}</div><div class="msg-agent">${a.reply}</div>`;
+}
+function agentRight(sid) {
+  return `<aside class="agent-right"><div class="ag-head">${ic('spark')}<strong>Agent</strong>${modeSelect(sid)}<div class="ag-backend">claude CLI · subscription · ${SP[sid].name}</div></div><div class="ag-scroll">${agentChat(sid)}</div><div class="ag-input">Ask about ${SP[sid].name}…</div></aside>`;
+}
+function agentDrawer(sid) {
+  const log = SP[sid].agent ? SP[sid].agent.log : [];
+  return `<div class="drawer"><div><div class="ag-head">${ic('spark')}<strong>Agent</strong>${modeSelect(sid)}<span class="ag-backend" style="width:auto;margin-left:auto">claude CLI · subscription</span></div><div class="ag-scroll">${agentChat(sid, true)}</div><div class="ag-input">Ask about ${SP[sid].name}…</div></div>
+    <div><div class="ag-head"><strong>Activity log</strong><span class="ag-backend" style="width:auto">${SP[sid].name}</span></div><div class="ag-scroll" style="padding:0">${log.length ? `<table class="log"><tbody>${log.map(r => `<tr><td>${r[0]}</td><td>${r[1]}</td><td>${r[2]}</td></tr>`).join('')}</tbody></table>` : '<div class="ag-empty" style="padding:10px">No agent activity yet.</div>'}</div></div></div>`;
+}
+function dock() {
+  const b = (v, icon, label) => `<button type="button" id="dock-${v}" data-dock="${v}" aria-pressed="${state.agent === v}" title="${label}">${ic(icon)}</button>`;
+  return `<div class="dock" role="group" aria-label="Agent panel position">${b('right', 'dockR', 'Agent panel on the right')}${b('bottom', 'dockB', 'Agent panel at the bottom')}${b('none', 'dockN', 'Hide agent panel')}</div>`;
+}
+
+/* ---------- page ---------- */
+function pageHtml(t) {
+  const sid = state.space, s = SP[sid];
+  let banner = '';
+  if (state.cue === 'tintbanner') banner = `<div class="banner"><span class="dot" style="--c:var(--sc)"></span><b>${t.kind === 'unified' ? 'All inboxes' : s.name}</b><span>${t.kind === 'unified' ? 'Read from each space’s own accounts' : acctLine(sid)}</span></div>`;
+  if (t.kind === 'signin') {
+    const slug = s.name.toLowerCase().replace(/[^a-z0-9]/g, '') || 'client';
+    return banner + `<div class="signin"><div class="si-card"><div class="si-prov">${t.prov}</div><h2>Sign in</h2><p>This tab is in <b>${esc(s.name)}</b>. Sign in with your ${esc(s.name)} work account. iSmith saves it as <b>${t.prov}: ${esc(s.name)}</b>, and every tab in this space shares that sign-in.</p><div class="si-field">you@${slug}.com</div><div class="si-btn">Next</div></div></div>`;
+  }
+  if (t.kind === 'unified') {
+    const rows = ORDER.flatMap(x => SP[x].mail.map(m => ({ ...m, sid: x }))).sort((a, b) => b.u - a.u);
+    return banner + `<div class="pg-head"><h2>All inboxes</h2><span>${rows.filter(r => r.u).length} unread across ${ORDER.filter(x => SP[x].mail.length).length} spaces · opening a message opens it in its own space</span></div>` +
+      rows.map(m => `<div class="mail uni${m.u ? ' u' : ''}"><span class="ud"></span><span class="tag" style="--c:${cv(m.sid)}"><i></i>${SP[m.sid].name}</span><span class="line from">${m.from}</span><span class="line subj">${m.subj} <span class="prev">— ${m.prev}</span></span><span class="time">${m.t}</span></div>`).join('');
+  }
+  if (t.kind === 'mail') {
+    const acct = s.accounts.find(a => a[0] === providerFor(t.url));
+    return banner + `<div class="pg-head"><h2>Inbox</h2><span>${acct ? `${acct[0]} account: ${acct[1]}` : ''}</span></div>` +
+      s.mail.map(m => `<div class="mail${m.u ? ' u' : ''}"><span class="ud"></span><span class="line from">${m.from}</span><span class="line subj">${m.subj} <span class="prev">— ${m.prev}</span></span><span class="time">${m.t}</span></div>`).join('');
+  }
+  if (t.kind === 'ado') {
+    const col = (n, items) => `<div class="bcol"><h3>${n}</h3>${items.map(i => `<div class="card"><b>${i[0]}</b>${i[1]}</div>`).join('')}</div>`;
+    return banner + `<div class="pg-head"><h2>Storefront · Sprint 42</h2><span>contoso-dev</span></div><div class="board">${col('New', [['WI 81240', 'Export button disabled'], ['WI 81251', 'Audit log paging']])}${col('Active', [['WI 81234', 'Export retest fails on Q1'], ['WI 81199', 'Report filter defaults']])}${col('Resolved', [['WI 81177', 'Timeout on Q1 import']])}</div>`;
+  }
+  if (t.kind === 'wi') {
+    const isA = t.id === 'wi1' || t.id === 'ag2';
+    return banner + `<div class="wi"><h2>${t.name.replace(' · ', ': ')}</h2>
+      <div class="meta"><div><span>State</span>${isA ? 'Active' : 'New'}</div><div><span>Assigned to</span>${isA ? 'Scott Smith' : 'Unassigned'}</div><div><span>Iteration</span>Sprint 42</div><div><span>Area</span>Storefront\\Reports</div></div>
+      <p>${isA ? 'Export stays disabled on Q1 when the report filter is empty. Retest after the Sprint 42 fix still reproduces it.' : 'The Export button stays disabled after a filter is cleared.'}</p>
+      ${isA ? '<div class="disc">QA: Reproduced on Q1 build 2026.10.01.3 with an empty filter.<br>Agent (YOLO): Assigned to Scott Smith. Picking this up today.</div>' : ''}</div>`;
+  }
+  return banner + `<div class="ph"><h2>${t.name}</h2><div class="bar" style="width:62%"></div><div class="bar" style="width:84%"></div><div class="bar" style="width:46%"></div><div class="bar" style="width:70%"></div></div>`;
+}
+
+/* ---------- mock ---------- */
+function renderMock() {
+  if (state.tab === 'all' && state.pinned !== 'unified') state.tab = state.lastTab[state.space] || SP[state.space].pinned[0].id;
+  const sid = state.space, t = activeTab();
+  const sc = t.kind === 'unified' ? 'var(--accent)' : cv(sid);
+  let chip = '';
+  if (state.cue !== 'subtle') {
+    if (t.kind === 'unified') chip = `<span class="chip"><i></i>All spaces</span>`;
+    else {
+      const prov = providerFor(t.url), acct = SP[sid].accounts.find(a => a[0] === prov);
+      chip = `<span class="chip"><i></i>${SP[sid].name}${acct ? ` · ${acct[0]}: ${acct[1]}` : ''}</span>`;
+    }
+  }
+  const agentSid = t.kind === 'unified' ? 'contoso' : sid;
+  document.getElementById('mock').innerHTML = `
+    <div class="mock ${state.cue}" style="--sc:${sc}">
+      ${rail()}
+      <div class="col">
+        ${strip()}
+        <div class="toolbar"><div class="navbtns"><span>${ic('back')}</span><span>${ic('fwd')}</span><span>${ic('reload')}</span></div>
+          <div class="addr">${ic('search')}<span class="url">${t.url}</span>${chip}</div>${dock()}</div>
+        <div class="mbody"><div class="main"><div class="page">${pageHtml(t)}</div>${state.agent === 'bottom' ? agentDrawer(agentSid) : ''}</div>${state.agent === 'right' ? agentRight(agentSid) : ''}</div>
+      </div>
+      <div id="sheet-host"></div>
+    </div>`;
+  renderSheet();
+}
+/* ---------- new space sheet ---------- */
+const esc = v => String(v).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const PROVIDERS = ['Microsoft', 'Google', 'GitHub', 'AWS', 'Cloudflare', 'Atlassian', 'Slack'];
+const COLORS = ['--sp-1', '--sp-2', '--sp-3', '--sp-4', '--sp-5', '--sp-6'];
+const STARTER = {
+  Outlook: { icon: 'mail', url: () => 'outlook.office.com/mail/inbox', prov: 'Microsoft' },
+  Teams: { icon: 'chat', url: () => 'teams.microsoft.com/v2', prov: 'Microsoft' },
+  SharePoint: { icon: 'doc', url: slug => `${slug}.sharepoint.com`, prov: 'Microsoft' },
+  'Azure DevOps': { icon: 'board', url: slug => `dev.azure.com/${slug}`, prov: 'Microsoft' },
+  Gmail: { icon: 'mail', url: () => 'mail.google.com/mail/u/0/#inbox', prov: 'Google' },
+  Drive: { icon: 'doc', url: () => 'drive.google.com', prov: 'Google' },
+  Calendar: { icon: 'cal', url: () => 'calendar.google.com', prov: 'Google' },
+  GitHub: { icon: 'pr', url: () => 'github.com', prov: 'GitHub' },
+  Lightsail: { icon: 'cloud', url: () => 'lightsail.aws.amazon.com', prov: 'AWS' },
+  Cloudflare: { icon: 'globe', url: () => 'dash.cloudflare.com', prov: 'Cloudflare' },
+  Remail: { icon: 'mail', url: () => 'remail.foo/dashboard', prov: null }
+};
+const slugOf = n => n.toLowerCase().replace(/[^a-z0-9]/g, '');
+function templates() {
+  return [['ms365', 'Client on Microsoft 365'], ['gws', 'Client on Google Workspace'], ['blank', 'Blank'], ...ORDER.map(s => ['copy:' + s, 'Copy of ' + SP[s].name])];
+}
+function tplAccounts(tpl) {
+  const acc = Object.fromEntries(PROVIDERS.map(p => [p, 'none']));
+  if (tpl === 'ms365') Object.assign(acc, { Microsoft: 'new', Google: 'personal', GitHub: 'personal' });
+  else if (tpl === 'gws') Object.assign(acc, { Google: 'new', GitHub: 'personal' });
+  else if (tpl.startsWith('copy:')) SP[tpl.slice(5)].accounts.forEach(([p, a]) => { acc[p] = a; });
+  return acc;
+}
+function tplTabs(tpl) {
+  let names = [];
+  if (tpl === 'ms365') names = ['Outlook', 'Teams', 'SharePoint', 'Azure DevOps'];
+  else if (tpl === 'gws') names = ['Gmail', 'Drive', 'Calendar'];
+  else if (tpl.startsWith('copy:')) names = SP[tpl.slice(5)].pinned.map(t => t.name).filter(n => STARTER[n]);
+  return Object.fromEntries(names.map(n => [n, true]));
+}
+function accountUsers(prov) {
+  const m = new Map();
+  ORDER.forEach(s => SP[s].accounts.forEach(([p, a]) => { if (p === prov) { if (!m.has(a)) m.set(a, []); m.get(a).push(SP[s].name); } }));
+  return m;
+}
+function suggestedRules(sh) {
+  const slug = slugOf(sh.name);
+  if (!slug) return [];
+  const r = [];
+  if (sh.acc.Microsoft === 'new') r.push(`${slug}.sharepoint.com/*`, `${slug}-my.sharepoint.com/*`, `dev.azure.com/${slug}/*`);
+  if (sh.acc.Atlassian === 'new') r.push(`${slug}.atlassian.net/*`);
+  if (sh.acc.Slack === 'new') r.push(`${slug}.slack.com/*`);
+  r.push(`*.${slug}.com/*`);
+  return r;
+}
+function openSheet() {
+  state.sheet = { name: 'Northwind', color: '--sp-5', tpl: 'ms365', acc: tplAccounts('ms365'), tabs: tplTabs('ms365'), off: {}, mode: 'YOLO' };
+  renderSheet();
+  const n = document.getElementById('sh-name'); if (n) { n.focus(); n.select(); }
+}
+function renderSheet() {
+  const host = document.getElementById('sheet-host');
+  if (!host) return;
+  const sh = state.sheet;
+  if (!sh) { host.innerHTML = ''; return; }
+  const focusId = document.activeElement && document.activeElement.id;
+  const caret = document.activeElement && document.activeElement.selectionStart;
+  const rows = PROVIDERS.map(p => {
+    const users = accountUsers(p), v = sh.acc[p];
+    const opts = [['none', 'None'], ...[...users.keys()].map(a => [a, a]), ['new', 'New account…']];
+    const st = v === 'new' ? '<span class="pill">Sign in after you create the space</span>' : v !== 'none' && users.get(v) ? `Also used by ${users.get(v).join(', ')}` : '';
+    return `<tr><td><label for="sh-acc-${p}">${p}</label></td><td><select id="sh-acc-${p}" data-prov="${p}">${opts.map(o => `<option value="${esc(o[0])}"${o[0] === v ? ' selected' : ''}>${esc(o[1])}</option>`).join('')}</select></td><td class="st">${st}</td></tr>`;
+  }).join('');
+  const rules = suggestedRules(sh);
+  const tabNames = [...new Set([...Object.keys(tplTabs(sh.tpl)), ...Object.keys(sh.tabs)])];
+  host.innerHTML = `<div class="veil" data-veil="1"><form class="sheet" id="sheet-form" novalidate>
+    <div class="sh-head"><span class="dot" style="--c:var(${sh.color})"></span><strong>New space</strong><span class="muted">${esc(sh.name || 'Untitled')}</span></div>
+    <div class="sh-body">
+      <div class="sh-row"><label for="sh-name">Name</label><input type="text" id="sh-name" value="${esc(sh.name)}" autocomplete="off"></div>
+      <div class="sh-row"><span class="lbl">Color</span><div class="swatches">${COLORS.map(c => `<button type="button" class="sw${c === sh.color ? ' on' : ''}" id="sh-color${c}" data-color="${c}" style="--c:var(${c})" aria-pressed="${c === sh.color}" aria-label="Color ${c.slice(-1)}"></button>`).join('')}</div></div>
+      <div class="sh-row"><label for="sh-tpl">Template</label><select id="sh-tpl">${templates().map(t => `<option value="${t[0]}"${t[0] === sh.tpl ? ' selected' : ''}>${esc(t[1])}</option>`).join('')}</select></div>
+      <div class="sec">Accounts <span>One per provider. Accounts you already have stay signed in here too.</span></div>
+      <table class="acc"><tbody>${rows}</tbody></table>
+      <div class="sec">Routing rules <span>Suggested from the name. iSmith checks them against your real tenant and org names after you sign in.</span></div>
+      <div class="checks">${rules.length ? rules.map((r, i) => `<label><input type="checkbox" id="sh-rule-${i}" data-rule="${esc(r)}"${sh.off[r] ? '' : ' checked'}><code>${esc(r)}</code><span class="to">→ ${esc(sh.name)}</span></label>`).join('') : '<span class="to">Give the space a name to get suggestions.</span>'}</div>
+      <div class="sec">Open on create</div>
+      <div class="checks inline">${tabNames.length ? tabNames.map(n => `<label><input type="checkbox" id="sh-tab-${slugOf(n)}" data-starter="${esc(n)}"${sh.tabs[n] ? ' checked' : ''}>${esc(n)}</label>`).join('') : '<span class="to">A blank tab.</span>'}</div>
+      <div class="sh-row" style="margin-top:6px"><label for="sh-mode">Agent mode</label><select id="sh-mode">${['Read-only', 'Ask', 'Confirm submits', 'YOLO'].map(m => `<option${m === sh.mode ? ' selected' : ''}>${m}</option>`).join('')}</select></div>
+    </div>
+    <div class="sh-foot"><button type="button" id="sh-cancel" data-sheet-cancel="1">Cancel</button><button type="submit" class="primary" id="sh-create">Create space</button></div>
+  </form></div>`;
+  if (focusId) { const el = document.getElementById(focusId); if (el) { el.focus(); if (el.type === 'text' && caret != null) el.setSelectionRange(caret, caret); } }
+}
+function createSpace() {
+  const sh = state.sheet, name = sh.name.trim() || 'Untitled', slug = slugOf(name) || 'client';
+  const id = 'c' + Date.now().toString(36);
+  const accounts = PROVIDERS.filter(p => sh.acc[p] !== 'none').map(p => [p, sh.acc[p] === 'new' ? name : sh.acc[p]]);
+  let tabs = Object.keys(sh.tabs).filter(n => sh.tabs[n]).map((n, i) => {
+    const d = STARTER[n] || { icon: 'globe', url: () => 'about:blank', prov: null };
+    return { id: 't' + i, name: n, icon: d.icon, url: d.url(slug), prov: d.prov, kind: d.prov && sh.acc[d.prov] === 'new' ? 'signin' : 'generic', badge: 0 };
+  });
+  if (!tabs.length) tabs = [{ id: 't0', name: 'New tab', icon: 'globe', url: 'about:blank', kind: 'generic', badge: 0 }];
+  const init = name.split(/\s+/).filter(Boolean).slice(0, 2).map(w => w[0].toUpperCase()).join('') || '?';
+  const data = { name, init, c: sh.color, accounts, pinned: tabs, groups: [], loose: [], agentTabs: [], mail: [], mode: sh.mode };
+  SP[id] = data; ORDER.push(id);
+  state.custom.push({ id, data });
+  state.modes[id] = sh.mode;
+  state.sheet = null;
+  switchSpace(id);
+  render();
+}
+
+function render() { renderControls(); renderMock(); save(); }
+
+document.getElementById('controls').addEventListener('click', e => {
+  const b = e.target.closest('button[data-key]');
+  if (!b) return;
+  state[b.dataset.key] = b.dataset.val;
+  render();
+  document.getElementById(b.id)?.focus();
+});
+document.getElementById('mock').addEventListener('click', e => {
+  if (state.sheet) {
+    const sw = e.target.closest('[data-color]');
+    if (sw) { state.sheet.color = sw.dataset.color; renderSheet(); document.getElementById(sw.id)?.focus(); }
+    else if (e.target.closest('[data-sheet-cancel]') || e.target.dataset.veil) { state.sheet = null; renderSheet(); save(); }
+    return;
+  }
+  if (e.target.closest('[data-newspace]')) return openSheet();
+  const d = e.target.closest('[data-dock]');
+  if (d) { state.agent = d.dataset.dock; render(); return document.getElementById(d.id)?.focus(); }
+  const g = e.target.closest('[data-group]');
+  if (g) { state.closed[g.dataset.group] = !state.closed[g.dataset.group]; return render(); }
+  if (e.target.closest('[data-all]')) { if (state.tab !== 'all') state.lastTab[state.space] = state.tab; state.tab = 'all'; return render(); }
+  const sp = e.target.closest('[data-space]');
+  if (sp) { switchSpace(sp.dataset.space); return render(); }
+  const tb = e.target.closest('[data-tab]');
+  if (tb) { state.tab = tb.dataset.tab; return render(); }
+});
+document.getElementById('mock').addEventListener('input', e => {
+  if (state.sheet && e.target.id === 'sh-name') { state.sheet.name = e.target.value; renderSheet(); }
+});
+document.getElementById('mock').addEventListener('submit', e => { e.preventDefault(); if (state.sheet) createSpace(); });
+document.getElementById('mock').addEventListener('change', e => {
+  const sh = state.sheet;
+  if (sh) {
+    const t = e.target;
+    if (t.id === 'sh-tpl') { sh.tpl = t.value; sh.acc = tplAccounts(t.value); sh.tabs = tplTabs(t.value); }
+    else if (t.dataset.prov) sh.acc[t.dataset.prov] = t.value;
+    else if (t.dataset.rule) sh.off[t.dataset.rule] = !t.checked;
+    else if (t.dataset.starter) sh.tabs[t.dataset.starter] = t.checked;
+    else if (t.id === 'sh-mode') sh.mode = t.value;
+    renderSheet(); return;
+  }
+  const s = e.target.closest('select[data-mode]');
+  if (s) { state.modes[s.dataset.mode] = s.value; save(); }
+});
+document.getElementById('copy').addEventListener('click', () => {
+  const el = document.getElementById('picks');
+  const btn = document.getElementById('copy');
+  navigator.clipboard.writeText(el.textContent).then(() => { btn.textContent = 'Copied'; setTimeout(() => btn.textContent = 'Copy picks', 1500); })
+    .catch(() => { const r = document.createRange(); r.selectNodeContents(el); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r); });
+});
+document.getElementById('open-sheet').addEventListener('click', () => { document.querySelector('.stage').scrollIntoView({ block: 'nearest' }); openSheet(); });
+document.getElementById('reset').addEventListener('click', () => {
+  state.custom.forEach(c => { delete SP[c.id]; const i = ORDER.indexOf(c.id); if (i > -1) ORDER.splice(i, 1); });
+  state = structuredClone(DEFAULTS); render();
+});
+render();
+</script>

@@ -1,0 +1,29 @@
+name: iSmithSpike
+options:
+  bundleIdPrefix: com.scottsmith
+  deploymentTarget:
+    macOS: "14.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+targets:
+  iSmithSpike:
+    type: application
+    platform: macOS
+    sources: [Spike]
+    info:
+      path: Spike/Info.plist
+      properties:
+        CFBundleDisplayName: iSmith Spike
+        CFBundleShortVersionString: "0.1"
+        CFBundleVersion: "1"
+        LSApplicationCategoryType: public.app-category.productivity
+        NSPrincipalClass: NSApplication
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.scottsmith.ismith.spike
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGN_STYLE: Manual
+        DEVELOPMENT_TEAM: ""
+        ENABLE_HARDENED_RUNTIME: NO

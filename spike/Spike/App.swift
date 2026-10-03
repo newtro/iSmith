@@ -1,0 +1,35 @@
+import SwiftUI
+
+@main
+struct ISmithSpikeApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+    @StateObject private var browser = BrowserState()
+
+    var body: some Scene {
+        Window("iSmith Spike", id: "main") {
+            ContentView()
+                .environmentObject(browser)
+                .environmentObject(browser.vault)
+                .environmentObject(browser.sync)
+                .frame(minWidth: 1100, minHeight: 700)
+        }
+        .commands {
+            CommandGroup(replacing: .newItem) {
+                Button("New Tab") { browser.newTabInActive() }
+                    .keyboardShortcut("t")
+                Button("Close Tab") { browser.closeSelectedTab() }
+                    .keyboardShortcut("w")
+            }
+            CommandMenu("Spaces") {
+                ForEach(Array(Seed.spaces.enumerated()), id: \.element.id) { index, space in
+                    Button(space.name) { browser.select(index: index) }
+                        .keyboardShortcut(KeyEquivalent(Character(String(index + 1))), modifiers: .command)
+                }
+            }
+        }
+    }
+}
+
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+}
