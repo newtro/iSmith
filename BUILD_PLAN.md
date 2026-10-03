@@ -628,8 +628,105 @@ tabs and P2's navigation delegate. `Packages/Blocking/INTEGRATION.md` gives the 
   compile, each 10-minute retry holds one navigation for the compile; a retried load could
   overlap a refresh; allowlist entries typed as Unicode domains don't match the punycode hosts
   WebKit reports (only matters if a settings field accepts typed domains).
-- **Still to do for P3**: the shield button and wiring (after P1 and P2), then the acceptance
-  sites.
+- **Still to do for P3**: the acceptance sites (cnn.com, youtube.com, weather.com, reddit.com
+  blocked; Outlook, Teams, Azure, Gmail, Etsy and GitHub unchanged) on Scott's machine.
+
+#### P3–P5 app wiring (2026-10-03)
+
+Blocking, passwords and the Brave import are wired into the app. 64 app-hosted tests (15 new)
+and every package test pass under `make test`. The acceptance runs on Scott's real sites, real
+Brave profile and real "Brave Safe Storage" item are still to do.
+
+- **Blocking in the app** (`App/Shields.swift`, `WebDelegates.swift`): one
+  `BlockingController` per app on `<data dir>/Blocking` (Dev's own folder), made in
+  `BrowserState.init` and loaded in `start()`, so the XCTest host never compiles lists. Every
+  web view gets its own content controller; popups get a new one (WebKit hands over the
+  opener's) with the app's scripts re-added. A main-frame navigation applies its destination's
+  setting once it's allowed, waiting at most 1 s for the lists: a first launch compiles for
+  about 5 s, and pages loaded meanwhile get the lists from their next load (`listsDidChange`)
+  rather than holding the UI. A failed or download-ending navigation puts the committed page's
+  setting back. The toolbar shield (filled or slashed, in the address field) toggles the
+  allowlist for the registrable domain and reloads the tab clicked plus the site's other tabs
+  that have nothing to lose; Keep alive tabs, popups and their openers, pages with unsaved edits
+  or a save bar get the new setting on their next load. Settings ▸ Privacy: a global "Block ads
+  and trackers" switch (new `BlockingController.isEnabled`, one package test added), the list
+  versions and last check, "Update Now", and the allowed sites. EasyList itself turns off
+  element hiding on 127.0.0.1 and localhost (`@@://127.0.0.1$generichide`), so local fixtures
+  only show network blocking.
+- **Passwords in the app** (`App/PasswordUI.swift`, `PasswordsWindow.swift`): the store is
+  `<data dir>/passwords.sqlite` with `AppIdentity.passwordsKeyStore()`
+  (`com.scottsmith.ismith.debug.passwords-key` in Dev). A Keychain that can't be read asks
+  "Try Again" or runs without passwords; a store moved aside is reported once. Autofill is
+  attached to every web view (popups included) before it's made.
+  - **Save bar** above the page: "Save password for [username, editable] on site?" (the frame's
+    origin), Never for This Site, Not Now, Save or Update. A sign-in popup that closes hands
+    its bar to its opener; a tab with a bar isn't hibernated.
+  - **Popover** under the field (or at the pointer for an iframe), only for a click or Tab
+    into the field, listing usernames (same-site rows show their host), "Use Strong Password"
+    on new-password fields, and "Manage Passwords…". Clicks and Return are ignored for 0.5 s;
+    ↑/↓, Return and Escape work while the page keeps focus; typing, scrolling, navigating or a
+    tab switch closes it. The popover is sized before it's shown: shrinking afterwards left it
+    250 points below the field.
+  - **⌘\\** (Edit ▸ AutoFill Password) fills the exact-origin login into the field last clicked,
+    or opens the popover; only into the browser window in front.
+  - **Passwords window** (⌥⌘P, also from Settings ▸ Passwords): search, All/Weak/Reused, a
+    summary, per-row warnings, "same password on …", edit, add (with a generator), delete, the
+    never-save list, and unreadable-row and store problems. Show, Copy and Edit ask for Touch ID
+    or the Mac password; the unlock lasts 60 s and only while the window is key (it relocks on
+    resigning key, sleep, screen lock or session switch). Copies go through `SecretPasteboard`;
+    a revealed password isn't selectable and the editor's password field is secure, so nothing
+    reaches the ordinary pasteboard.
+  - **Agent tabs**: `BrowserState.setAgentControlled(_:for:)` turns off autofill and capture for
+    a tab, its rebuilt web views and its popups (no callers until the agent panel).
+- **Brave import in the app** (`App/ImportFromBrave.swift`): a first-run screen (once per data
+  folder, when Brave's folder exists) and File ▸ Import from Brave…: profile and target-space
+  dropdowns, Bookmarks and Passwords. Bookmarks map as planned in P2 (bar → bar, other →
+  Other Bookmarks, Mobile and unknown roots as folders), idempotent by GUID. Passwords: the
+  origin is the sign-on realm (an HTTP-auth realm's address part), else the page; `android://`
+  and empty passwords are skipped and counted; an existing login with another password keeps
+  whichever changed last; the last use carries over; notes aren't imported (counted). Choosing
+  Passwords first shows "macOS will ask for your Mac password"; the "Brave Safe Storage" item is
+  read only after Continue, off the main thread. A Debug build pointed at a fixture
+  (`ISMITH_BRAVE_ROOT`) never reads the real item (`ISMITH_BRAVE_SAFE_STORAGE` gives the fixture
+  key). The result screen gives counts: added, already there, updated, kept, never-save rows
+  skipped, failures.
+- **macOS 27 permission (checked)**: reading another app's data is TCC's
+  `kTCCServiceSystemPolicyAppDataDetailed`, after a Full Disk Access check (seen in tccd's log
+  for a denied `ls` of Brave's folder). macOS asks "Allow “iSmith” to access your “Brave Browser”
+  data?", and a refusal is managed in Privacy & Security ▸ Files & Folders (TCC's strings say
+  so). The permission screen opens `…?Privacy_FilesAndFolders`, offers Full Disk Access, and
+  has Try Again.
+- **Tests** (app-hosted, `AppTests/*WiringTests.swift`, through a real `BrowserState` with a
+  fixture space, in-memory keys and a fixture filter list): blocking through the navigation
+  delegate, the shield's allowlist and reloads (and a Keep alive tab left alone), popups' own
+  controllers and scripts, the global switch, a failed navigation; the save bar on a typed
+  sign-in (trusted events) with a corrected username, unchanged sign-ins asking nothing, Never
+  for This Site, the popover's rows and 0.5 s delay, a popover pick and ⌘\\ filling, close on
+  navigation, the generated password, agent tabs, and reveal/lock in the manager; the import
+  of a fixture profile (bookmark tree into a space, passwords into the store with counts, a
+  second import adding nothing, the Keychain not read before Continue or for bookmarks only, a
+  wrong key, permission denied, no Brave).
+- **Smoke test** (Dev app on a scratch data folder and a fixture Brave profile, driven by pid
+  through accessibility and key events; screenshots of its own windows): first-run import
+  (7 bookmarks in 3 new folders, 3 passwords, 1 never-save skipped), bookmarks bar, the shield
+  blocking and allowing an EasyList-blocked script, the popover under the field with the
+  imported login, the save bar, ⌘\\ filling, the Passwords window with weak and reused warnings,
+  Settings ▸ Privacy, and the permission screen. Show and Copy weren't pressed (they'd show
+  macOS's Touch ID prompt).
+- **Review**: one adversarial round, no critical or high. Fixed: a revealed or edited password
+  could be selected and copied around `SecretPasteboard`; the unlock could take effect in a
+  window that wasn't key, and its relock timer didn't fire while scrolling; the shield reloaded
+  every tab of the site (Keep alive Outlook, drafts); a popover could stack on another; the
+  password import wrote on the main thread; Back reset the import choices; ⌘\\ could fill the
+  browser window behind Settings; unrelated tests built the real blocking controller.
+- **Deferred** (low, not hit in daily use as built):
+  - Restoring the page's setting after a failed navigation doesn't take an apply ticket, so on a
+    first launch only, a navigation that waited past 1 s and then failed could leave its own
+    setting on the page until the next load.
+  - HTTP-auth logins from Brave import as form logins for their origin (they stay on that
+    origin; iSmith's HTTP sign-in sheet doesn't use the store yet).
+  - The first-run screen reads Brave's folder as it opens, so macOS's data-access question
+    appears right at the first launch (it's the import offer, so that's when it's wanted).
 
 ### P4. Password store and autofill (L)
 
@@ -657,8 +754,8 @@ revealed password needs your fingerprint or Mac password.
 
 **Core built (2026-10-03)**: `Packages/Passwords` holds the store, matching, script and
 `PasswordAutofill` controller, with 42 tests (WebKit ones on local fixtures). The app UI (save
-bar, popover, manager window) is still to do; `Packages/Passwords/INTEGRATION.md` lists the hook
-points. Two security reviews changed the design:
+bar, popover, ⌘\\, manager window) is built: see "P3–P5 app wiring" under P3.
+`Packages/Passwords/INTEGRATION.md` lists the hook points. Two security reviews changed the design:
 - Same-site matching is https-only and skips multi-tenant hosts the Public Suffix List lacks
   (Okta, SharePoint, Atlassian, …). Same-site logins fill only from an explicit popover pick;
   ⌘\\ fills exact matches in fields the user clicked.
@@ -680,8 +777,8 @@ points. Two security reviews changed the design:
 Acceptance: every Brave bookmark and saved password appears in iSmith; the counts match Brave's
 (excluding "never save" entries).
 
-**Core built (2026-10-03)**: `Packages/BraveImport`, with no UI. The app still has to map
-bookmarks into a space, move passwords into the P4 store, and build the import screen.
+**Core built (2026-10-03)**: `Packages/BraveImport`, with no UI. The mapping into a space, the
+move into the P4 store and the import screens are built: see "P3–P5 app wiring" under P3.
 
 - `BraveProfiles.discover()` lists `Default` and `Profile N` folders that hold bookmarks or
   passwords, named and ordered from `Local State`.

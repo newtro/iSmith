@@ -30,6 +30,10 @@ See [DESIGN.md](DESIGN.md) for the model and [BUILD_PLAN.md](BUILD_PLAN.md) for 
     shown over a tab (questions, find, crash, failed load, bookmarks bar). `Settings.swift`.
   - `TabStripView.swift`, `WindowView.swift`, `MainMenu.swift`, `Panels.swift`: the UI.
   - `PageRules.swift`: unread badges from page titles, and which pages are kept alive.
+  - `Shields.swift`: ad and tracker blocking in web views, the toolbar shield and Settings ▸
+    Privacy. `PasswordUI.swift`: the save bar, the autofill popover and ⌘\\.
+    `PasswordsWindow.swift`: the Passwords window. `ImportFromBrave.swift`: the Brave import
+    (first-run screen and File ▸ Import from Brave…).
   - `Support.swift`: `AppIdentity` (Debug vs Release), `AppPaths`, search engines, address input.
 - `Packages/SignInSync/`: the sign-in engine, with no UI. It holds providers, accounts and spaces
   (`Config`), the encrypted `Vault`, `CookieSync`, `SpaceManager`, and the one-time import from
@@ -38,11 +42,11 @@ See [DESIGN.md](DESIGN.md) for the model and [BUILD_PLAN.md](BUILD_PLAN.md) for 
   finds profiles, parses bookmarks into a neutral tree, and decrypts saved passwords from private
   copies of `Login Data` and `Login Data For Account`. The "Brave Safe Storage" Keychain read is
   injected, so its tests never touch the Keychain.
-- `Packages/Blocking/`: ad and tracker blocking, not yet wired into the app. EasyList and
+- `Packages/Blocking/`: ad and tracker blocking (wired in by `App/Shields.swift`). EasyList and
   EasyPrivacy become WebKit content-rule lists, refreshed weekly, with a per-site allowlist.
   `Packages/Blocking/INTEGRATION.md` lists the app's hook points.
 - `Tools/update-blocking-snapshot.sh`: refreshes the filter lists bundled for first launch.
-- `Packages/Passwords/`: the password store and autofill core, with no UI: encrypted logins in
+- `Packages/Passwords/`: the password store and autofill core (the app's UI is in `App/`): encrypted logins in
   SQLite, origin matching, the capture and fill script, and the `PasswordAutofill` controller.
   [INTEGRATION.md](Packages/Passwords/INTEGRATION.md) lists the app's hook points.
 - `Packages/BrowserData/`: `browser.sqlite` through GRDB: history and bookmarks per space, site
@@ -75,9 +79,12 @@ afterwards. A full run takes about two minutes because the tests wait for the sy
 ## Data
 
 - `~/Library/Application Support/iSmith/` (`iSmith Dev/` for Debug builds) holds `config.json`,
-  `vault.json`, `session.json` and `browser.sqlite`, all owner-only. The vault is encrypted with
-  AES-GCM. Its key is in the login Keychain under `<bundle id>.vault-key`
+  `vault.json`, `session.json`, `browser.sqlite` and `passwords.sqlite`, all owner-only, and
+  `Blocking/` (the compiled filter lists, the downloaded copies and the allowlist). The vault is
+  encrypted with AES-GCM. Its key is in the login Keychain under `<bundle id>.vault-key`
   (`com.scottsmith.ismith.vault-key` for the installed app).
+- `passwords.sqlite` holds saved logins, each username and password sealed with AES-GCM under
+  its own Keychain key, `<bundle id>.passwords-key`. Passwords are global, not per space.
 - `config.json` is what each space is: name, color, accounts, and the rail's order.
 - `session.json` is what's open: windows → spaces → tab groups → tabs, with each tab's URL,
   title, Keep alive setting and back/forward history. The history can hold form posts, so it's
@@ -94,6 +101,9 @@ afterwards. A full run takes about two minutes because the tests wait for the sy
 - For development, `ISMITH_DATA_DIR=/some/folder` starts the app on another folder (a scratch
   folder for smoke tests):
   `ISMITH_DATA_DIR=/tmp/ismith-dev build/Build/Products/Debug/iSmith.app/Contents/MacOS/iSmith`.
+  In a Debug build, `ISMITH_BRAVE_ROOT=/fixture/Brave-Browser` points the Brave import at a
+  fixture profile; it then never reads the real "Brave Safe Storage" Keychain item
+  (`ISMITH_BRAVE_SAFE_STORAGE` gives the fixture's key).
 
 ## Using it
 
@@ -125,6 +135,19 @@ afterwards. A full run takes about two minutes because the tests wait for the sy
   Teams) appear as a bar above the page. Answers are kept per site (per scheme for apps) and can
   be changed in Settings ▸ Websites. Site notifications appear in Notification Center; clicking
   one brings its tab forward.
+- **Ads and trackers** are blocked with EasyList and EasyPrivacy (refreshed weekly). The shield
+  in the address bar turns blocking off or on for the whole site and reloads it; Settings ▸
+  Privacy has the global switch, the list versions, "Update Now" and the allowed sites.
+- **Passwords**: after you sign in, a bar offers to save (or update) the password; you can fix
+  the username first, or say "Never for This Site". Click a username or password field to pick
+  a saved login, or press ⌘\\ to fill the site's login; sign-up fields offer a strong password.
+  ⌥⌘P opens the Passwords window: search, weak and reused passwords, edit, add and delete.
+  Showing or copying a password asks for Touch ID or your Mac password; copies are cleared from
+  the clipboard after a minute and don't go to other devices.
+- **Import from Brave** (offered at first launch, and in the File menu): pick the profile and
+  the space for the bookmarks; passwords go to the password store. macOS asks once for
+  permission to read Brave's data (Privacy & Security ▸ Files & Folders if you said no) and for
+  your Mac password to use the "Brave Safe Storage" key.
 - **Background tabs** are unloaded after 30 minutes off screen (not Keep alive tabs, and not
   pages you've edited), keeping their history; they reload when selected. A page whose process
   crashed shows Reload.
