@@ -34,6 +34,13 @@ enum UnreadBadge {
         return n
     }
 
+    /// The title without a leading unread count ("(7) Mail - Outlook" → "Mail - Outlook").
+    static func stripped(_ title: String) -> String {
+        let text = title.trimmingCharacters(in: .whitespaces)
+        guard leading(text) != nil, let close = text.firstIndex(of: ")") else { return title }
+        return String(text[text.index(after: close)...]).trimmingCharacters(in: .whitespaces)
+    }
+
     /// A space's badge: the counts of its tabs added up, counting a page open in two tabs (the
     /// same title) once.
     static func total(_ titles: [String]) -> Int {

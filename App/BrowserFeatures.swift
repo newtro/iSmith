@@ -1,5 +1,6 @@
 import AppKit
 import BrowserData
+import Network
 import WebKit
 
 /// Viewing features on top of tabs: scripts every web view gets, the link context menu,
@@ -116,8 +117,44 @@ extension BrowserState {
 
     func canHibernate(_ tab: Tab) -> Bool {
         guard let webView = tab.webView, !tab.keepAlive, !tab.isBuilding, !isLinked(tab),
-              tab.pendingDialogs.isEmpty, !tab.showingDialog, tab.prompts.isEmpty else { return false }
+              tab.pendingDialogs.isEmpty, !tab.showingDialog, tab.prompts.isEmpty,
+              // Typing since the page loaded may be unsaved (a work item, a review comment).
+              (webView as? BrowserWebView)?.typedSinceLoad != true else { return false }
         return webView.cameraCaptureState == .none && webView.microphoneCaptureState == .none
+    }
+
+    // MARK: - Failed loads
+
+    /// Loads that failed for want of a network: background and Keep alive tabs try again (each
+    /// minute, and when the network comes back); a page on screen showing "can't open" tries
+    /// again when the network comes back.
+    func retryFailedLoads(networkReturned: Bool) {
+        for tab in windows.flatMap(\.allTabs) {
+            guard let webView = tab.webView else { continue }
+            if let url = tab.retryURL {
+                tab.retryURL = nil
+                webView.load(URLRequest(url: url))
+            } else if networkReturned, let problem = tab.certificateProblem, !problem.isCertificate {
+                tab.certificateProblem = nil
+                webView.load(URLRequest(url: problem.url))
+            }
+        }
+    }
+
+    /// Watches the network so failed loads retry when it comes back.
+    func watchNetwork() -> NWPathMonitor {
+        let monitor = NWPathMonitor()
+        var online = true
+        monitor.pathUpdateHandler = { [weak self] path in
+            let now = path.status == .satisfied
+            DispatchQueue.main.async {
+                defer { online = now }
+                guard now, !online else { return }
+                self?.retryFailedLoads(networkReturned: true)
+            }
+        }
+        monitor.start(queue: DispatchQueue(label: "com.scottsmith.ismith.network"))
+        return monitor
     }
 
     // MARK: - Zoom

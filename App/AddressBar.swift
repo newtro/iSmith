@@ -267,7 +267,10 @@ final class AddressTextField: NSTextField {
 @MainActor
 final class SuggestionPopup: ObservableObject {
     @Published var items: [Suggestion] = []
+    /// Highlighted with the arrow keys; Return opens it.
     @Published var selected: Int?
+    /// Under the mouse; only a click opens it.
+    @Published var hovered: Int?
     var picked: ((Suggestion) -> Void)?
     private var panel: NSPanel?
 
@@ -275,7 +278,10 @@ final class SuggestionPopup: ObservableObject {
 
     func show(_ items: [Suggestion], below anchor: NSView) {
         // The same list again (a late answer) keeps the highlight the arrow keys moved.
-        if items.map(\.id) != self.items.map(\.id) { selected = nil }
+        if items.map(\.id) != self.items.map(\.id) {
+            selected = nil
+            hovered = nil
+        }
         self.items = items
         guard !items.isEmpty, let window = anchor.window else { return hide() }
         let panel = self.panel ?? makePanel()
@@ -292,6 +298,7 @@ final class SuggestionPopup: ObservableObject {
     func hide() {
         items = []
         selected = nil
+        hovered = nil
         if let panel {
             panel.parent?.removeChildWindow(panel)
             panel.orderOut(nil)
@@ -343,9 +350,10 @@ private struct SuggestionList: View {
                 .font(.system(size: 12.5))
                 .padding(.horizontal, 10)
                 .frame(height: 30)
-                .background(RoundedRectangle(cornerRadius: 6).fill(index == popup.selected ? Color.accentColor.opacity(0.25) : .clear))
+                .background(RoundedRectangle(cornerRadius: 6).fill(index == popup.selected ? Color.accentColor.opacity(0.25)
+                      : index == popup.hovered ? Color.primary.opacity(0.08) : .clear))
                 .contentShape(Rectangle())
-                .onHover { if $0 { popup.selected = index } }
+                .onHover { popup.hovered = $0 ? index : (popup.hovered == index ? nil : popup.hovered) }
                 .onTapGesture { popup.picked?(item) }
                 .accessibilityElement(children: .combine)
                 .accessibilityAddTraits(.isButton)

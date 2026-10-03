@@ -46,6 +46,7 @@ final class WebNotifications: NSObject {
         let frame: WKFrameInfo
         let pageID: String
         let tab: UUID
+        let at: Date
     }
 
     init(poster: WebNotificationPoster,
@@ -94,6 +95,11 @@ final class WebNotifications: NSObject {
         guard let body = message.body as? [String: Any], let type = body["type"] as? String,
               let webView = message.webView else { return nil }
         let frame = message.frameInfo
+        // A sandboxed or data: frame has no site; it never gets notifications.
+        guard !frame.securityOrigin.isOpaque else {
+            return type == "request" ? ["type": "requestResult", "id": body["id"] as? Int ?? 0, "permission": "denied"]
+                : ["type": "error", "id": body["id"] as? String ?? ""]
+        }
         let origin = frame.securityOrigin.originKey
         switch type {
         case "query":
@@ -109,13 +115,14 @@ final class WebNotifications: NSObject {
             let pageID = body["id"] as? String ?? UUID().uuidString
             let tag = (body["tag"] as? String).flatMap { $0.isEmpty ? nil : $0 }
             // A tag replaces the site's earlier notification with the same tag, as on the web.
-            let id = tag.map { "\(origin)#tag:\($0)" } ?? "\(origin)#\(UUID().uuidString)"
+            let id = tag.map { "\(ctx.space)|\(origin)#tag:\($0)" } ?? "\(ctx.space)|\(origin)#\(UUID().uuidString)"
             let note = WebNotification(id: id, title: Self.clip(body["title"] as? String ?? "", 200),
                                        body: Self.clip(body["body"] as? String ?? "", 1000),
                                        site: frame.securityOrigin.displayHost, space: ctx.space,
                                        tab: ctx.tab, silent: body["silent"] as? Bool ?? false)
             if let old = shown[id], old.pageID != pageID { send(["type": "close", "id": old.pageID], to: old.webView, frame: old.frame) }
-            shown[id] = Shown(webView: webView, frame: frame, pageID: pageID, tab: ctx.tab)
+            shown[id] = Shown(webView: webView, frame: frame, pageID: pageID, tab: ctx.tab, at: Date())
+            if shown.count > 200, let oldest = shown.min(by: { $0.value.at < $1.value.at })?.key { shown[oldest] = nil }
             poster.post(note)
             return ["type": "show", "id": pageID]
         case "close":
@@ -360,7 +367,8 @@ protocol WebNotificationPoster: AnyObject {
 /// the notification's id; the app focuses the tab.
 @MainActor
 final class SystemNotificationPoster: NSObject, WebNotificationPoster, UNUserNotificationCenterDelegate {
-    var onClick: ((String) -> Void)?
+    /// The notification's id and the tab it named (still there after a relaunch).
+    var onClick: ((String, UUID?) -> Void)?
     var onDismiss: ((String) -> Void)?
     private let center = UNUserNotificationCenter.current()
     private var authorized: Bool?
@@ -389,6 +397,7 @@ final class SystemNotificationPoster: NSObject, WebNotificationPoster, UNUserNot
         content.sound = notification.silent ? nil : .default
         content.threadIdentifier = notification.site
         content.userInfo = ["tab": notification.tab.uuidString]
+        content.targetContentIdentifier = notification.tab.uuidString
         center.add(UNNotificationRequest(identifier: notification.id, content: content, trigger: nil))
     }
 
@@ -406,8 +415,9 @@ final class SystemNotificationPoster: NSObject, WebNotificationPoster, UNUserNot
                                             withCompletionHandler completionHandler: @escaping () -> Void) {
         let id = response.notification.request.identifier
         let action = response.actionIdentifier
+        let tab = (response.notification.request.content.userInfo["tab"] as? String).flatMap(UUID.init(uuidString:))
         Task { @MainActor in
-            if action == UNNotificationDismissActionIdentifier { self.onDismiss?(id) } else { self.onClick?(id) }
+            if action == UNNotificationDismissActionIdentifier { self.onDismiss?(id) } else { self.onClick?(id, tab) }
             completionHandler()
         }
     }

@@ -17,7 +17,6 @@ struct PromptBar: View {
                 Spacer(minLength: 8)
                 if let deny = prompt.denyTitle {
                     Button(deny) { browser.answer(prompt, .deny, in: tab) }
-                        .keyboardShortcut(.cancelAction)
                 }
                 Button(prompt.allowTitle) { browser.answer(prompt, .allow, in: tab) }
                     .buttonStyle(.borderedProminent)

@@ -9,8 +9,27 @@ import WebKit
 /// content world reports the element under the pointer on `contextmenu`; WebKit sends that
 /// message before it asks the app to show the menu, so `willOpenMenu` reads it.
 final class BrowserWebView: WKWebView {
-    /// Set when the tab closes it, so late callbacks are ignored.
-    var closing = false
+    /// The user's last click or key press in the page (app links honor a remembered "Open" only
+    /// right after one).
+    private(set) var lastUserInput: Date?
+    /// The user typed in the page since it last loaded, so it isn't hibernated (unsaved text).
+    var typedSinceLoad = false
+
+    override func mouseDown(with event: NSEvent) {
+        lastUserInput = Date()
+        super.mouseDown(with: event)
+    }
+
+    override func otherMouseDown(with event: NSEvent) {
+        lastUserInput = Date()
+        super.otherMouseDown(with: event)
+    }
+
+    override func keyDown(with event: NSEvent) {
+        lastUserInput = Date()
+        typedSinceLoad = true
+        super.keyDown(with: event)
+    }
     /// The element the last context menu was opened on.
     var contextElement: ContextElement?
     /// Builds the app's items for a link or image; set by `BrowserState`.
@@ -82,6 +101,7 @@ final class BrowserWebView: WKWebView {
     static let contextScript = """
     (() => {
       addEventListener("contextmenu", (e) => {
+        if (!e.isTrusted) return;
         let link = null, image = null;
         for (let n = e.target; n && n.nodeType === 1; n = n.parentElement) {
           if (!link && (n.tagName === "A" || n.tagName === "AREA") && n.href) link = String(n.href);

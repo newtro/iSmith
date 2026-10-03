@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import SignInSync
 
@@ -8,12 +9,15 @@ import SignInSync
 /// open in it. They're separate files because the session changes every time a page navigates,
 /// and config is rewritten rarely and carefully.
 ///
-/// Each tab also keeps its back/forward history: WebKit's `interactionState` (an opaque `Data`
-/// blob), base64 in the JSON. Crash safety: the file is written atomically at most a second after
-/// any change (a navigation counts), so a crash loses at most that second. Fields added later
-/// decode with defaults, so older files still load.
+/// Each tab also keeps its back/forward history: WebKit's `interactionState`, an opaque blob that
+/// can hold form posts (a sign-in's code or password). It's sealed with AES-GCM under a key
+/// derived from the vault key (`HistorySealer`) and stored base64 in the JSON. Crash safety: the
+/// file is written atomically a second after a navigation or a change to the tabs (a few seconds
+/// after a title-only change), so a crash loses at most that. Fields added later decode with
+/// defaults, so older files still load.
 struct SessionFile: Codable, Equatable {
-    var version = 1
+    /// 1: P1 (no histories). 2: histories sealed with `HistorySealer`.
+    var version = 2
     var windows: [WindowRecord] = []
 
     init(windows: [WindowRecord] = []) {
@@ -24,6 +28,36 @@ struct SessionFile: Codable, Equatable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         version = try c.decodeIfPresent(Int.self, forKey: .version) ?? 1
         windows = try c.decodeIfPresent([WindowRecord].self, forKey: .windows) ?? []
+    }
+
+    /// Replaces every tab's history (sealing on save, opening on load).
+    mutating func mapHistories(_ transform: (Data) -> Data?) {
+        for w in windows.indices {
+            for s in windows[w].spaces.indices {
+                for t in windows[w].spaces[s].tabs.indices {
+                    windows[w].spaces[s].tabs[t].history = windows[w].spaces[s].tabs[t].history.flatMap(transform)
+                }
+            }
+        }
+    }
+}
+
+/// Seals tab histories for session.json with a key derived (HKDF-SHA256) from the vault key, so
+/// the file never holds form posts in the clear and the vault key itself has one use.
+struct HistorySealer {
+    private let key: SymmetricKey
+
+    init(vaultKey: SymmetricKey) {
+        key = HKDF<SHA256>.deriveKey(inputKeyMaterial: vaultKey, info: Data("iSmith session history v1".utf8), outputByteCount: 32)
+    }
+
+    func seal(_ plain: Data) -> Data? {
+        try? AES.GCM.seal(plain, using: key).combined
+    }
+
+    func open(_ sealed: Data) -> Data? {
+        guard let box = try? AES.GCM.SealedBox(combined: sealed) else { return nil }
+        return try? AES.GCM.open(box, using: key)
     }
 }
 
@@ -107,17 +141,26 @@ struct TabRecord: Codable, Equatable {
 /// and the app starts with fresh windows; it's never written over without that copy.
 struct SessionStore {
     let fileURL: URL
+    /// Seals each tab's history in the file. Without one, histories aren't saved at all.
+    let sealer: HistorySealer?
     private(set) var canSave = true
 
-    init(fileURL: URL) {
+    init(fileURL: URL, sealer: HistorySealer? = nil) {
         self.fileURL = fileURL
+        self.sealer = sealer
     }
 
     /// The saved session, or nil on a first launch or after a file that couldn't be read.
     mutating func load() -> SessionFile? {
         guard FileManager.default.fileExists(atPath: fileURL.path) else { return nil }
         do {
-            return try JSONDecoder().decode(SessionFile.self, from: Data(contentsOf: fileURL))
+            var file = try JSONDecoder().decode(SessionFile.self, from: Data(contentsOf: fileURL))
+            // Histories are sealed from version 2 on; one that won't open (another key, a damaged
+            // file) is dropped and the tab reopens on its URL.
+            let sealed = file.version >= 2
+            let open: (Data) -> Data? = { [sealer] blob in sealed ? sealer?.open(blob) : nil }
+            file.mapHistories(open)
+            return file
         } catch {
             do {
                 let backup = try SecureFile.backUp(fileURL, reason: "unreadable")
@@ -131,12 +174,31 @@ struct SessionStore {
     }
 
     func save(_ session: SessionFile) {
+        guard let data = encode(session) else { return }
+        write(data)
+    }
+
+    /// The file's bytes: histories sealed (or left out without a sealer).
+    func encode(_ session: SessionFile) -> Data? {
+        guard canSave else { return nil }
+        var file = session
+        file.version = 2
+        file.mapHistories { [sealer] plain in sealer?.seal(plain) }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        do {
+            return try encoder.encode(file)
+        } catch {
+            NSLog("iSmith: session could not be encoded: \(error)")
+            return nil
+        }
+    }
+
+    func write(_ data: Data) {
         guard canSave else { return }
         do {
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             try SecureFile.prepareDirectory(fileURL.deletingLastPathComponent())
-            try SecureFile.write(encoder.encode(session), to: fileURL)
+            try SecureFile.write(data, to: fileURL)
         } catch {
             NSLog("iSmith: session save failed: \(error)")
         }

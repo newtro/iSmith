@@ -1,4 +1,5 @@
 import BrowserData
+import CryptoKit
 import SignInSync
 import WebKit
 import XCTest
@@ -58,9 +59,13 @@ final class BrowserBasicsTests: XCTestCase {
         let file = SessionFile(windows: [WindowRecord(id: UUID(), frame: nil, activeSpace: "a", spaces: [
             SpaceRecord(space: "a", selected: tab.id, groups: [], tabs: [tab.record(group: nil)]),
         ])])
-        let store = SessionStore(fileURL: dir.appendingPathComponent("session.json"))
+        let vaultKey = SymmetricKey(size: .bits256)
+        let store = SessionStore(fileURL: dir.appendingPathComponent("session.json"), sealer: HistorySealer(vaultKey: vaultKey))
         store.save(file)
-        var reader = SessionStore(fileURL: store.fileURL)
+        let bytes = try Data(contentsOf: store.fileURL)
+        XCTAssertNil(bytes.range(of: Data(state.base64EncodedString().utf8)), "the history is sealed, not stored as is")
+        XCTAssertNil(bytes.range(of: Data("127.0.0.1:\(server.port)/one".utf8)), "nothing of it readable in the file")
+        var reader = SessionStore(fileURL: store.fileURL, sealer: HistorySealer(vaultKey: vaultKey))
         let loaded = try XCTUnwrap(reader.load())
         XCTAssertEqual(loaded, file)
         let restoredTab = try XCTUnwrap(SpaceTabs.restore(loaded.windows[0].spaces[0]).ordered.first)
@@ -90,6 +95,26 @@ final class BrowserBasicsTests: XCTestCase {
         XCTAssertNil(tab.webView)
         XCTAssertNotNil(tab.savedState)
         XCTAssertEqual(tab.record(group: nil).history, tab.savedState, "the saved session carries it")
+    }
+
+    /// Without the key (another Mac, a new vault) histories are dropped and the tabs still open;
+    /// without a sealer nothing of the history is written.
+    func testHistoryNeedsTheVaultKey() throws {
+        let tab = TabRecord(id: UUID(), url: URL(string: "https://example.com"), title: "x", group: nil, keepAlive: nil,
+                            history: Data("secret form post".utf8))
+        let file = SessionFile(windows: [WindowRecord(id: UUID(), frame: nil, activeSpace: "a", spaces: [
+            SpaceRecord(space: "a", selected: tab.id, groups: [], tabs: [tab]),
+        ])])
+        let url = dir.appendingPathComponent("session.json")
+        SessionStore(fileURL: url, sealer: HistorySealer(vaultKey: SymmetricKey(size: .bits256))).save(file)
+        var other = SessionStore(fileURL: url, sealer: HistorySealer(vaultKey: SymmetricKey(size: .bits256)))
+        let loaded = try XCTUnwrap(other.load())
+        XCTAssertNil(loaded.windows[0].spaces[0].tabs[0].history)
+        XCTAssertEqual(loaded.windows[0].spaces[0].tabs[0].url, tab.url)
+
+        SessionStore(fileURL: url, sealer: nil).save(file)
+        XCTAssertNil(try Data(contentsOf: url).range(of: Data("secret".utf8)))
+        XCTAssertNil(try Data(contentsOf: url).range(of: Data("secret form post".utf8).base64EncodedData()))
     }
 
     func testOversizedOrDamagedHistoryIsDropped() throws {
@@ -148,7 +173,7 @@ final class BrowserBasicsTests: XCTestCase {
         XCTAssertEqual(note.site, "127.0.0.1")
         XCTAssertEqual(note.space, "Contoso")
         XCTAssertEqual(note.tab, tabID)
-        XCTAssertEqual(note.id, "\(server.origin)#tag:build", "a tag replaces the site's earlier notification")
+        XCTAssertEqual(note.id, "Contoso|\(server.origin)#tag:build", "a tag replaces the site's earlier notification in that space")
         let permission = try await webView.evaluateJavaScript("Notification.permission") as? String
         XCTAssertEqual(permission, "granted")
 
@@ -265,6 +290,9 @@ final class BrowserBasicsTests: XCTestCase {
         XCTAssertEqual(DownloadManager.safeName(".hidden"), "hidden")
         XCTAssertEqual(DownloadManager.safeName("  "), "download")
         XCTAssertEqual(DownloadManager.uniqueURL(in: dir, name: "a.txt").lastPathComponent, "a.txt")
+        let long = DownloadManager.safeName(String(repeating: "報告", count: 200) + ".pdf")
+        XCTAssertTrue(long.hasSuffix(".pdf"), "the extension survives")
+        XCTAssertLessThanOrEqual(long.utf8.count, 240, "fits a file name with room for \" (2)\"")
     }
 
     // MARK: - Permissions
@@ -312,6 +340,12 @@ final class BrowserBasicsTests: XCTestCase {
     }
 
     // MARK: - Address bar and context menu
+
+    func testHistoryTitlesDropUnreadCounts() {
+        XCTAssertEqual(UnreadBadge.stripped("(7) Mail - Scott Smith - Outlook"), "Mail - Scott Smith - Outlook")
+        XCTAssertEqual(UnreadBadge.stripped("Report (2) - Google Docs"), "Report (2) - Google Docs")
+        XCTAssertEqual(UnreadBadge.stripped("Inbox"), "Inbox")
+    }
 
     func testAddressInputAndSearchEngines() {
         XCTAssertEqual(AddressInput.url(for: "localhost:3000/x", engine: .google)?.absoluteString, "http://localhost:3000/x")

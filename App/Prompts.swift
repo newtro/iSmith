@@ -97,6 +97,9 @@ extension WKSecurityOrigin {
         host.isEmpty ? self.protocol : host
     }
 
+    /// A sandboxed or data: frame: it has no site to grant anything to.
+    var isOpaque: Bool { self.protocol.isEmpty || (host.isEmpty && ["http", "https"].contains(self.protocol.lowercased())) }
+
     /// "https://teams.microsoft.com", default ports left out: the key site settings use.
     var originKey: String {
         Self.key(scheme: self.protocol, host: host, port: port)

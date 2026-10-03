@@ -13,6 +13,11 @@ extension BrowserState: WKUIDelegate {
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
                  for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
         guard let (window, tabs, opener) = owner(of: webView) else { return nil }
+        // window.open("msteams:…") opens the app (after asking), not an empty tab.
+        if let url = navigationAction.request.url, !AppLinks.browserSchemes.contains(url.scheme?.lowercased() ?? "") {
+            openAppLink(url, from: webView, action: navigationAction)
+            return nil
+        }
         // ⌘-click or a middle click on a target=_blank link: a background tab with no opener, as
         // for an ordinary link.
         if navigationAction.navigationType == .linkActivated, let url = navigationAction.request.url,
@@ -151,7 +156,7 @@ extension BrowserState: WKNavigationDelegate {
         let scheme = url?.scheme?.lowercased() ?? "about"
         guard ["http", "https", "about", "data", "blob"].contains(scheme) else {
             decisionHandler(.cancel)
-            if let url { openAppLink(url, from: webView) }
+            if let url { openAppLink(url, from: webView, action: navigationAction) }
             return
         }
         if navigationAction.shouldPerformDownload { return decisionHandler(.download) }
@@ -211,6 +216,8 @@ extension BrowserState: WKNavigationDelegate {
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
         guard let (_, tabs, tab) = owner(of: webView) else { return }
         tab.certificateProblem = nil
+        tab.retryURL = nil
+        (webView as? BrowserWebView)?.typedSinceLoad = false
         // Questions from the page that's gone no longer apply.
         let prompts = tab.prompts
         tab.prompts = []
@@ -314,7 +321,15 @@ extension BrowserState {
         if nsError.domain == NSURLErrorDomain, Self.certificateErrorCodes.contains(nsError.code) || trust != nil {
             tab.certificateProblem = CertificateProblem(url: url, message: nsError.localizedDescription, trust: trust)
         } else if nsError.domain == NSURLErrorDomain {
-            tab.certificateProblem = CertificateProblem(url: url, message: nsError.localizedDescription, trust: nil)
+            // A tab in the background, or kept alive (Outlook reloading as the Mac wakes), keeps
+            // what it shows and tries again when the network is back (or within a minute); one on
+            // screen shows why the page didn't open.
+            let visible = owner(of: tab).map { $0.0.activeSpaceID == $0.1.spaceID && $0.1.layout.selected == tab.id } ?? false
+            if visible, !tab.keepAlive {
+                tab.certificateProblem = CertificateProblem(url: url, message: nsError.localizedDescription, trust: nil)
+            } else {
+                tab.retryURL = url
+            }
         }
     }
 
@@ -343,10 +358,11 @@ extension BrowserState {
               let nsWindow = window.window, nsWindow.attachedSheet == nil else { return }
         let dialog = tab.pendingDialogs.removeFirst()
         tab.showingDialog = true
-        dialog.show(nsWindow) { [weak self, weak tab] in
-            guard let tab else { return }
-            tab.showingDialog = false
-            self?.showPendingDialogs(of: tab)
+        dialog.show(nsWindow) { [weak self, weak tab, weak window] in
+            tab?.showingDialog = false
+            if let tab { self?.showPendingDialogs(of: tab) }
+            // Another tab may have been waiting for this sheet to go.
+            if let shown = window?.active?.selected, shown !== tab { self?.showPendingDialogs(of: shown) }
         }
     }
 
@@ -371,6 +387,7 @@ extension BrowserState {
     func askPermission(_ permission: SitePermission, origin: WKSecurityOrigin, webView: WKWebView, symbol: String,
                        message: String, decided: @escaping (Bool) -> Void) {
         let key = origin.originKey
+        guard !origin.isOpaque else { return decided(false) }
         let saved = SitePermissions.decision(for: permission) { try? self.data?.sites.decision($0, origin: key) }
         if let saved { return decided(saved == .allow) }
         guard let (_, _, tab) = owner(of: webView) else { return decided(false) }
@@ -390,24 +407,32 @@ extension BrowserState {
 
     // MARK: App links
 
-    /// msteams:, mailto: and other app links: open, ask once per scheme, or drop.
-    func openAppLink(_ url: URL, from webView: WKWebView) {
-        guard let scheme = url.scheme?.lowercased() else { return }
+    /// msteams:, mailto: and other app links. A remembered "Don't Open" drops them. A remembered
+    /// "Open" opens the app at once only for a link the user clicked (or a page that opened right
+    /// after a click, such as Outlook's "Join" launcher); a page reaching for an app on its own (a
+    /// restored launcher tab, an ad) gets the question again. One question per scheme at a time,
+    /// naming the frame that asked; answering opens that one link.
+    func openAppLink(_ url: URL, from webView: WKWebView, action: WKNavigationAction?) {
+        guard let scheme = url.scheme?.lowercased(), let (_, _, tab) = owner(of: webView) else { return }
         let stored = try? data?.sites.appLinkDecision(scheme: scheme)
+        let clicked = action?.navigationType == .linkActivated || hadRecentInput(webView, tab: tab)
+        let source = (action?.sourceFrame as WKFrameInfo?)?.securityOrigin.host
+        let site = (source?.isEmpty == false ? source : nil) ?? webView.url?.host ?? "This page"
         switch AppLinks.decide(url, stored: stored ?? nil, appFor: AppLinks.defaultApp) {
         case .browser, .block:
             return
-        case .open:
+        case .open where clicked:
             NSWorkspace.shared.open(url)
         case .noApp:
-            guard let (_, _, tab) = owner(of: webView) else { return }
+            guard clicked, !tab.prompts.contains(where: { $0.key == "noapp:\(scheme)" }) else { return }
             ask(SitePrompt(key: "noapp:\(scheme)", symbol: "questionmark.app",
                            message: "No app on this Mac opens “\(scheme):” links.", allowTitle: "OK", denyTitle: nil) { _ in }, in: tab)
-        case let .ask(_, name):
-            guard let (_, _, tab) = owner(of: webView) else { return }
-            let site = webView.url?.host ?? "This page"
+        case .open(let app), .ask(let app, _):
+            // Already asking about this scheme: later requests are dropped, not queued.
+            guard !tab.prompts.contains(where: { $0.key == "app:\(scheme)" }) else { return }
+            let name = AppLinks.appName(app)
             ask(SitePrompt(key: "app:\(scheme)", symbol: "arrow.up.forward.app",
-                           message: "\(site) wants to open \(name). iSmith will remember your answer for “\(scheme):” links.",
+                           message: "\(site) wants to open \(name). iSmith will remember your answer for “\(scheme):” links you click.",
                            allowTitle: "Open \(name)", denyTitle: "Don't Open") { [weak self] answer in
                 switch answer {
                 case .allow:
@@ -422,6 +447,17 @@ extension BrowserState {
         }
     }
 
+    /// The user clicked or typed in this page in the last few seconds, or the tab is a popup its
+    /// opener opened right after a click.
+    func hadRecentInput(_ webView: WKWebView, tab: Tab) -> Bool {
+        let now = Date()
+        if let input = (webView as? BrowserWebView)?.lastUserInput, now.timeIntervalSince(input) < 3 { return true }
+        guard let openerID = tab.openerID, now.timeIntervalSince(tab.createdAt) < 10,
+              let opener = windows.flatMap(\.allTabs).first(where: { $0.id == openerID }),
+              let input = (opener.webView as? BrowserWebView)?.lastUserInput else { return false }
+        return now.timeIntervalSince(input) < 10
+    }
+
     // MARK: Downloads
 
     func trackDownload(_ download: WKDownload, from webView: WKWebView?, askWhere: Bool = false) {
@@ -433,7 +469,11 @@ extension BrowserState {
     /// its cookies (the space's sign-ins) apply.
     func startDownload(_ url: URL, from webView: WKWebView, askWhere: Bool) {
         var request = URLRequest(url: url)
-        if let referrer = webView.url?.absoluteString { request.setValue(referrer, forHTTPHeaderField: "Referer") }
+        if let page = webView.url, let origin = WebNotifications.originKey(page),
+           !(page.scheme == "https" && url.scheme == "http") {
+            // The page's origin only (strict-origin-when-cross-origin), never its path.
+            request.setValue(origin + "/", forHTTPHeaderField: "Referer")
+        }
         webView.startDownload(using: request) { [weak self, weak webView] download in
             self?.trackDownload(download, from: webView, askWhere: askWhere)
         }
@@ -501,7 +541,8 @@ extension BrowserState {
                     let identity = identities[max(0, popup.indexOfSelectedItem)]
                     done.run((.useCredential, URLCredential(identity: identity, certificates: nil, persistence: .forSession)))
                 } else {
-                    done.run((.cancelAuthenticationChallenge, nil))
+                    // Without a certificate: the site decides what that means.
+                    done.run((.performDefaultHandling, nil))
                 }
                 finished()
             }

@@ -1,6 +1,7 @@
 import AppKit
 import BrowserData
 import Combine
+import Network
 import SignInSync
 import SwiftUI
 import WebKit
@@ -40,6 +41,13 @@ final class BrowserState: NSObject, ObservableObject {
     private var switching: [String: (token: UUID, task: Task<Void, Never>)] = [:]
     private var refreshScheduled = false
     private var saveTask: Task<Void, Never>?
+    /// When the waiting save runs: a second after a change to tabs or a navigation, a few seconds
+    /// after a title-only change.
+    private var saveDue: Date?
+    /// What was last written, so an unchanged session isn't written again.
+    private var lastSaved: SessionFile?
+    /// Session files are encoded on the main actor and written here, in order.
+    private let sessionQueue = DispatchQueue(label: "com.scottsmith.ismith.session", qos: .utility)
     /// History, bookmarks, site settings and downloads. nil if browser.sqlite couldn't be opened
     /// (the browser still works, without them).
     let data: BrowserDatabase?
@@ -49,6 +57,7 @@ final class BrowserState: NSObject, ObservableObject {
     let certificateExceptions = CertificateExceptions()
     let contextReporter = ContextMenuReporter()
     private var hibernationTimer: Timer?
+    private var networkMonitor: NWPathMonitor?
     /// A background tab (not Keep alive) is unloaded after this long off screen.
     static let hibernateAfter: TimeInterval = 30 * 60
     /// History older than this is removed at launch.
@@ -90,7 +99,10 @@ final class BrowserState: NSObject, ObservableObject {
         self.sync = sync
         manager = SpaceManager(config: config, vault: vault, sync: sync)
         spaces = config.spaces.map(SpaceState.init)
-        session = SessionStore(fileURL: paths.sessionURL)
+        // Tab histories in session.json are sealed with a key derived from the vault key (which
+        // exists once the vault can save).
+        let vaultKey = (try? keyStore.loadKey()) ?? nil
+        session = SessionStore(fileURL: paths.sessionURL, sealer: vaultKey.map(HistorySealer.init(vaultKey:)))
         var data: BrowserDatabase?
         do {
             data = try BrowserDatabase(fileURL: paths.browserDataURL)
@@ -145,8 +157,9 @@ final class BrowserState: NSObject, ObservableObject {
     /// Restores the saved windows, or opens one on the first space.
     func start() {
         let poster = SystemNotificationPoster()
-        poster.onClick = { [weak self] id in
-            guard let self, let tab = self.notifications.clicked(id) else { return }
+        poster.onClick = { [weak self] id, tab in
+            // The page gets its click event if it's still open; the tab comes forward either way.
+            guard let self, let tab = self.notifications.clicked(id) ?? tab else { return }
             self.focusTab(tab)
         }
         poster.onDismiss = { [weak self] id in self?.notifications.dismissed(id) }
@@ -156,8 +169,12 @@ final class BrowserState: NSObject, ObservableObject {
         if windows.isEmpty { newWindow() }
         refresh()
         hibernationTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.hibernateIdleTabs() }
+            MainActor.assumeIsolated {
+                self?.hibernateIdleTabs()
+                self?.retryFailedLoads(networkReturned: false)
+            }
         }
+        networkMonitor = watchNetwork()
         if let history = data?.history {
             let cutoff = Date().addingTimeInterval(-Self.historyKept)
             Task.detached(priority: .background) { try? history.prune(olderThan: cutoff) }
@@ -538,7 +555,7 @@ final class BrowserState: NSObject, ObservableObject {
         if let webView = tab.webView, tab.appliedKeepAlive == wanted {
             webView.load(request)
         } else {
-            let state = tab.webView?.interactionState
+            let state: Any? = tab.webView?.interactionState ?? tab.savedState
             Task { await buildWebView(for: tab, space: tabs.spaceID, state: state, load: request) }
         }
     }
@@ -750,9 +767,15 @@ final class BrowserState: NSObject, ObservableObject {
 
     func hook(_ tab: Tab) {
         tab.changed = { [weak self] in self?.scheduleRefresh() }
+        // A title flashing an unread count doesn't need the file written every second.
+        tab.titleChanged = { [weak self] in self?.scheduleRefresh(saveAfter: 5) }
         tab.retitled = { [weak self, weak tab] title in
-            guard let self, let tab, let url = tab.webView?.url, let spaceID = self.owner(of: tab)?.1.spaceID else { return }
-            try? self.data?.history.updateTitle(space: spaceID, url: url, title: title)
+            // History keeps the title without its unread count, and only when that changes.
+            let clean = UnreadBadge.stripped(title)
+            guard let self, let tab, clean != tab.lastHistoryTitle, let url = tab.webView?.url,
+                  let spaceID = self.owner(of: tab)?.1.spaceID else { return }
+            tab.lastHistoryTitle = clean
+            try? self.data?.history.updateTitle(space: spaceID, url: url, title: clean)
         }
         tab.movedInPage = { [weak self, weak tab] url in
             guard let self, let tab, let spaceID = self.owner(of: tab)?.1.spaceID else { return }
@@ -763,6 +786,13 @@ final class BrowserState: NSObject, ObservableObject {
     /// Adds a page to the space's history (http and https only).
     func recordVisit(_ url: URL, title: String?, tab: Tab, space spaceID: String) {
         guard ["http", "https"].contains(url.scheme?.lowercased() ?? "") else { return }
+        // Never a user name or password written into an address.
+        var parts = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        parts?.user = nil
+        parts?.password = nil
+        let url = parts?.url ?? url
+        let title = title.map(UnreadBadge.stripped)
+        tab.lastHistoryTitle = title
         var typed = false
         if let t = tab.typed, Date().timeIntervalSince(t.at) < 30 {
             typed = true
@@ -773,7 +803,7 @@ final class BrowserState: NSObject, ObservableObject {
 
     /// Badges update on the next turn of the run loop; the session is saved a second later, so a
     /// burst of title changes writes the file once.
-    func scheduleRefresh() {
+    func scheduleRefresh(saveAfter delay: TimeInterval = 1) {
         if !refreshScheduled {
             refreshScheduled = true
             DispatchQueue.main.async { [weak self] in
@@ -781,13 +811,16 @@ final class BrowserState: NSObject, ObservableObject {
                 self?.refresh()
             }
         }
-        // A save already waiting covers this change too. It isn't pushed back, so a page that
+        // A save already due as soon covers this change too. It isn't pushed back, so a page that
         // changes its title every second (Teams flashing a message) can't keep the session unsaved.
-        guard saveTask == nil else { return }
+        let due = Date().addingTimeInterval(delay)
+        if let current = saveDue, current <= due { return }
+        saveTask?.cancel()
+        saveDue = due
         saveTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             guard !Task.isCancelled else { return }
-            self?.saveSessionNow()
+            self?.saveSession(waitForDisk: false)
         }
     }
 
@@ -804,10 +837,24 @@ final class BrowserState: NSObject, ObservableObject {
         return SessionFile(windows: records.isEmpty ? lastClosedWindow.map { [$0] } ?? [] : records)
     }
 
+    /// Saves now and waits for the file (quitting, closing a window).
     func saveSessionNow() {
+        saveSession(waitForDisk: true)
+    }
+
+    /// Writes the session if it changed since the last write. Encoding (and sealing histories)
+    /// happens here; the write itself goes to a serial queue.
+    private func saveSession(waitForDisk: Bool) {
         saveTask?.cancel()
         saveTask = nil
-        session.save(sessionSnapshot)
+        saveDue = nil
+        let snapshot = sessionSnapshot
+        if snapshot != lastSaved, let bytes = session.encode(snapshot) {
+            lastSaved = snapshot
+            let store = session
+            sessionQueue.async { store.write(bytes) }
+        }
+        if waitForDisk { sessionQueue.sync {} }
     }
 
     // MARK: - Web views

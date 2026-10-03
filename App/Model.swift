@@ -28,8 +28,15 @@ final class Tab: ObservableObject, Identifiable {
     /// while both are open, since they may still talk to each other (sign-in popups do), and
     /// closing the popup goes back to its opener.
     var openerID: UUID?
-    /// Called when the title or URL changes: badges and the saved session follow.
+    /// Called when the URL changes: badges and the saved session follow.
     var changed: (() -> Void)?
+    /// Called when only the title changes (saved a little later).
+    var titleChanged: (() -> Void)?
+    /// The title history last got for this page.
+    var lastHistoryTitle: String?
+    /// The live web view's history, read again only after it navigates.
+    private var cachedHistory: Data?
+    private var historyStale = true
     /// The back/forward history while the tab has no web view (restored from the session, or
     /// hibernated). The next web view starts from it.
     var savedState: Data?
@@ -61,6 +68,9 @@ final class Tab: ObservableObject, Identifiable {
     @Published var zoom: CGFloat = 1
     /// When the tab was last on screen, for hibernation.
     var lastShown = Date()
+    let createdAt = Date()
+    /// A load that failed in the background (no network): tried again later.
+    var retryURL: URL?
     private var observations: [NSKeyValueObservation] = []
 
     init(id: UUID = UUID(), url: URL?, title: String? = nil, keepAlive: Bool? = nil, history: Data? = nil) {
@@ -71,9 +81,15 @@ final class Tab: ObservableObject, Identifiable {
         savedState = history
     }
 
-    /// The tab's back/forward history: the live web view's, or the one saved for it.
+    /// The tab's back/forward history: the live web view's, or the one saved for it. The live
+    /// one is read again only after a navigation, not on every save.
     var history: Data? {
-        (webView?.interactionState as? Data) ?? savedState
+        guard let webView else { return savedState }
+        if historyStale || cachedHistory == nil {
+            cachedHistory = webView.interactionState as? Data
+            historyStale = false
+        }
+        return cachedHistory ?? savedState
     }
 
     /// Whether the tab is kept alive: its own setting, or the automatic rule for its page.
@@ -86,6 +102,8 @@ final class Tab: ObservableObject, Identifiable {
         old.map(Self.close)
         self.webView = webView
         appliedKeepAlive = keepAlive
+        cachedHistory = nil
+        historyStale = true
         savedState = nil
         crashed = false
         certificateProblem = nil
@@ -99,7 +117,7 @@ final class Tab: ObservableObject, Identifiable {
                     } else if let host = wv.url?.host {
                         self.title = host
                     }
-                    self.changed?()
+                    self.titleChanged?()
                 }
             },
             webView.observe(\.url, options: [.initial]) { [weak self] wv, _ in
@@ -107,12 +125,20 @@ final class Tab: ObservableObject, Identifiable {
                     guard let self, self.webView === wv, let url = wv.url else { return }
                     let moved = self.url != url && !wv.isLoading
                     self.url = url
+                    self.historyStale = true
                     if moved { self.movedInPage?(url) }
                     self.changed?()
                 }
             },
             webView.observe(\.isLoading, options: [.initial]) { [weak self] wv, _ in
-                MainActor.assumeIsolated { if let self, self.webView === wv { self.isLoading = wv.isLoading } }
+                MainActor.assumeIsolated {
+                    guard let self, self.webView === wv else { return }
+                    self.isLoading = wv.isLoading
+                    if !wv.isLoading {
+                        self.historyStale = true
+                        self.changed?()
+                    }
+                }
             },
             webView.observe(\.canGoBack, options: [.initial]) { [weak self] wv, _ in
                 MainActor.assumeIsolated { if let self, self.webView === wv { self.canGoBack = wv.canGoBack } }
@@ -125,7 +151,8 @@ final class Tab: ObservableObject, Identifiable {
 
     /// Closes the web view; the tab keeps its title, URL and history and loads again when shown.
     func unload() {
-        if let state = webView?.interactionState as? Data { savedState = state }
+        historyStale = true
+        if let state = history { savedState = state }
         detachWebView().map(Self.close)
     }
 
@@ -147,7 +174,6 @@ final class Tab: ObservableObject, Identifiable {
     }
 
     private static func close(_ webView: WKWebView) {
-        (webView as? BrowserWebView)?.closing = true
         webView.stopLoading()
         webView.navigationDelegate = nil
         webView.uiDelegate = nil

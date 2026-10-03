@@ -103,7 +103,10 @@ final class DownloadManager: NSObject, ObservableObject, WKDownloadDelegate {
         let destination: URL?
         if item.askWhere, let choosePlace {
             destination = await choosePlace(name, download.webView)
-            if let destination { try? FileManager.default.removeItem(at: destination) } // the panel confirmed replacing it
+            // The panel confirmed replacing it; the old one goes to the Trash, not away for good.
+            if let destination, FileManager.default.fileExists(atPath: destination.path) {
+                try? FileManager.default.trashItem(at: destination, resultingItemURL: nil)
+            }
         } else {
             try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
             destination = Self.uniqueURL(in: folder, name: name)
@@ -146,6 +149,10 @@ final class DownloadManager: NSObject, ObservableObject, WKDownloadDelegate {
     func download(_ download: WKDownload, didFailWithError error: Error, resumeData: Data?) {
         guard let item = active.removeValue(forKey: ObjectIdentifier(download)) else { return }
         let cancelled = (error as NSError).code == NSURLErrorCancelled
+        // A partial file left behind is quarantined like a finished one.
+        if let file = item.fileURL, FileManager.default.fileExists(atPath: file.path) {
+            try? Quarantine.mark(file, source: item.source, referrer: item.referrer)
+        }
         finish(item, state: cancelled ? .cancelled : .failed, error: cancelled ? nil : error.localizedDescription)
     }
 
@@ -213,7 +220,13 @@ final class DownloadManager: NSObject, ObservableObject, WKDownloadDelegate {
         var name = suggested.replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ":", with: "-")
         while name.hasPrefix(".") { name.removeFirst() }
         name = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        return name.isEmpty ? "download" : String(name.prefix(200))
+        guard !name.isEmpty else { return "download" }
+        // File names are limited to 255 bytes; keep the extension and leave room for " (2)".
+        let ext = (name as NSString).pathExtension
+        var base = ext.isEmpty ? name : (name as NSString).deletingPathExtension
+        let limit = 230 - ext.utf8.count
+        while base.utf8.count > max(limit, 1) { base.removeLast() }
+        return ext.isEmpty ? base : base + "." + ext
     }
 
     /// `name`, or `name (2).ext`, `name (3).ext`… whichever doesn't exist yet.
