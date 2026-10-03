@@ -724,6 +724,15 @@ and Etsy each land in the right space.
 
 ### P7. Distribution (M)
 
+- **Release decisions (2026-10-03)**:
+  - `newtro/iSmith` becomes public at the first release (GPL source). The appcast and downloads
+    live in it (GitHub Releases), so there's no separate releases repo; SUFeedURL changes to it.
+  - Before it goes public, scan the full history for secrets and for client and employer names
+    in docs and fixtures, and confirm with Scott.
+  - Notarization uses an App Store Connect API key (Scott signs in; the key is stored for
+    `notarytool` in the login Keychain).
+  - The Sparkle EdDSA private key is backed up to an encrypted disk image,
+    `iCloud Drive/iSmith/sparkle-key.dmg`, with Scott's password.
 - **License (decided 2026-10-03)**: the ad-block converter (SafariConverterLib) is GPL-3.0 and is
   compiled into the app. Scott accepted the GPL: releases publish iSmith's source alongside the
   binaries (for example, by making the repo public at the first release).
