@@ -208,6 +208,21 @@ struct SelfTest {
         check(await value(p, "user_session") == "own1", "Its own sign-in is not replaced")
         check(await value(m, "user_session") == "g1", "The shared GitHub sign-in is untouched")
 
+        // The shared GitHub entry holds only a signed-out cookie: a migrated space's own sign-in
+        // becomes the shared one instead of being deleted.
+        if let c = await find(m, "user_session") { await m.httpCookieStore.deleteCookie(c) }
+        await m.httpCookieStore.setCookie(cookie("logged_in", "no", ".github.com", expires: hour))
+        await settle()
+        let newtro = config.space("newtro")!
+        await sync.detach("newtro")
+        let nStore = WKWebsiteDataStore(forIdentifier: newtro.storeID)
+        await nStore.httpCookieStore.setCookie(cookie("user_session", "mine", "github.com", expires: hour, secure: true))
+        config.markPendingAdoption("newtro", providers: ["github"])
+        let nAgain = await sync.attach(newtro)
+        await settle()
+        check(await value(nAgain, "user_session") == "mine", "Own sign-in survives when the shared one is signed out")
+        check(await value(m, "user_session") == "mine", "That sign-in becomes the shared one for other spaces")
+
         // An older per-space config moves to shared sign-ins, keeping the most-used sessions.
         let old = AppPaths.dir.appendingPathComponent("migrate-test.json")
         let v1 = """

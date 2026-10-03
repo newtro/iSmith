@@ -150,11 +150,14 @@ final class CookieSync: ObservableObject {
         // A space deleted while its first open was queued gets a throwaway store, never attached.
         guard let space = config.space(spaceID) else { return .nonPersistent() }
         let store = WKWebsiteDataStore(forIdentifier: space.storeID)
-        if let providers = config.pendingAdoption[space.id] { await keepOwnSignIns(space, store, providers: providers) }
+        var nowShared: Set<String> = []
+        if let providers = config.pendingAdoption[space.id] { nowShared = await keepOwnSignIns(space, store, providers: providers) }
         for (provider, account) in config.bound(config.space(spaceID) ?? space) {
             await seed(store, spaceName: space.name, provider: provider, account: account, adoptIfNew: true)
                 .map { baseline[space.id, default: [:]][provider.id] = $0 }
         }
+        // A session that just became the shared one is pushed to open spaces by the next reconcile.
+        for providerID in nowShared { baseline[space.id, default: [:]][providerID] = [:] }
         let observer = StoreObserver { [weak self] in
             self?.lastChange[spaceID] = Date()
             self?.scheduleScan(spaceID)
@@ -168,15 +171,25 @@ final class CookieSync: ObservableObject {
 
     /// First open after migration: a sign-in this space holds that differs from the shared one
     /// becomes a separate account for this space instead of being replaced.
-    private func keepOwnSignIns(_ space: SpaceDef, _ store: WKWebsiteDataStore, providers: [String]) async {
+    /// Returns the providers whose shared sign-in this space's session became.
+    private func keepOwnSignIns(_ space: SpaceDef, _ store: WKWebsiteDataStore, providers: [String]) async -> Set<String> {
         let cookies = await store.httpCookieStore.allCookies()
+        var nowShared: Set<String> = []
         var def = space
         for provider in config.providers where def.bindings[provider.id] == nil && providers.contains(provider.id) {
             let local = records(in: cookies, for: provider)
             let mine = provider.session(local)
             guard !mine.isEmpty, let sharedID = config.shared[provider.id] else { continue }
             let theirs = provider.session(vault.records(for: sharedID) ?? [])
-            guard !theirs.isEmpty, theirs != mine else { continue }
+            if theirs.isEmpty {
+                // The shared sign-in has no session (e.g. only a signed-out "logged_in=no"): this
+                // space's session becomes the shared one rather than being deleted by seeding.
+                vault.set(local, for: sharedID)
+                nowShared.insert(provider.id)
+                note("\(space.name): its \(provider.name) sign-in is now the shared one")
+                continue
+            }
+            guard theirs != mine else { continue }
             let account = config.addAccount(providerID: provider.id, name: space.name)
             vault.set(local, for: account.id)
             def.bindings[provider.id] = account.id
@@ -185,6 +198,7 @@ final class CookieSync: ObservableObject {
         if def != space { config.upsert(def) }
         config.finishAdoption(space.id)
         bindingChanged?(def)
+        return nowShared
     }
 
     /// Makes the store's cookies for the provider match the account's vault entry, and returns the
