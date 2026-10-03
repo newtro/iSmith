@@ -78,6 +78,23 @@ iSmith/
   `vault.json`. Your sign-in sessions carry over. Each site's own cookies don't, but sites sign in
   silently through the shared session (the account picker may appear once per app).
 
+## P0 findings (2026-10-02)
+
+- **Apple Developer membership is Individual.** The passkey entitlement will be requested, but v1
+  plans on passwords and Authenticator only.
+- **Signing**: Apple Development (team 232A77467G) is used for daily builds. The Developer ID
+  Application certificate is created in P7; it's only needed for releases.
+- **Keychain**: the vault and password keys use the file-based login Keychain, tied to the app's
+  signature, so no provisioning profile is needed. The data-protection Keychain can come later
+  along with the passkey entitlement.
+- **Teams/Meet feasibility** (`spike/Spike/FeasibilityProbe.swift`, run inside an app bundle that
+  declares camera and microphone usage):
+  - Camera and microphone: the API exists, and permission requests reach the app.
+  - `getDisplayMedia`: present. It needs a real click; a live Teams share is checklist item 8.
+  - Web notifications: present, but `requestPermission()` always returns "denied". The P2
+    notification workaround is required.
+  - `inactiveSchedulingPolicy = .none` is available for Keep-alive tabs.
+
 ## Phases
 
 Each phase ends with its tests green, an adversarial review (fix critical and high; at most two

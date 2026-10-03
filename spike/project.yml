@@ -20,6 +20,8 @@ targets:
         CFBundleVersion: "1"
         LSApplicationCategoryType: public.app-category.productivity
         NSPrincipalClass: NSApplication
+        NSCameraUsageDescription: Websites you allow can use the camera, for example for Teams calls.
+        NSMicrophoneUsageDescription: Websites you allow can use the microphone, for example for Teams calls.
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.scottsmith.ismith.spike

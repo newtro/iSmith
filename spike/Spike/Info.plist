@@ -22,6 +22,10 @@
 	<string>1</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.productivity</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Websites you allow can use the camera, for example for Teams calls.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Websites you allow can use the microphone, for example for Teams calls.</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 </dict>

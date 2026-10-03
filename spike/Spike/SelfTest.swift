@@ -12,6 +12,7 @@ struct SelfTest {
         if CommandLine.arguments.contains("--phase=write") { return await writePhase() }
         if CommandLine.arguments.contains("--phase=read") { return await readPhase() }
         if CommandLine.arguments.contains("--phase=config") { return await configPhase() }
+        if CommandLine.arguments.contains("--phase=feasibility") { return await FeasibilityProbe().run() }
         var failures: [String] = []
         func check(_ ok: Bool, _ what: String) {
             print((ok ? "PASS  " : "FAIL  ") + what)
