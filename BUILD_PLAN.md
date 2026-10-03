@@ -179,6 +179,75 @@ iSmith/
   - The data-protection Keychain and the Developer ID provisioning profile aren't used (see
     Keychain above).
 
+## P1 findings (2026-10-03)
+
+- **AppKit runs the app.** `Launcher` starts an `NSApplication` with `AppDelegate`; there's no
+  SwiftUI `App` scene. Browser windows are `NSWindow`s made by `BrowserWindowController` from
+  `BrowserState`'s window list, so ⌘N, session restore and "move tab to new window" all go
+  through one path and SwiftUI's own window restoration can't fight it. The menu bar is built in
+  `MainMenu.swift`, with the standard Edit items so copy and paste work in pages and fields.
+  SwiftUI draws each window's content (rail, toolbar, page) and the Accounts window (⌘, or the
+  rail's gear; it replaced the in-window panel).
+- **The tab strip is AppKit** (`TabStripView.swift`): an `NSScrollView` of tab and group-label
+  views, laid out by hand. Tabs shrink from 200 to 110 points, then the strip scrolls (a vertical
+  wheel scrolls it sideways). Drags use `NSDraggingSession` with an in-app pasteboard type
+  (`com.scottsmith.ismith.tab`, declared in Info.plist); the drag carries only an id, and drop
+  targets read `BrowserState.drag`, so nothing from outside the app can be dropped as a tab, and
+  a tab dropped on a page doesn't navigate it. The rail (SwiftUI) accepts the same type. A tab
+  dropped outside every iSmith window opens in a new window there. Drops in the strip: the left
+  or right half of a tab places it before or after that tab in that tab's group; the left 30% of
+  an expanded group label drops before the group, the rest into it; a collapsed group is one item.
+- **Tab model**: `TabLayout` (pure, unit-tested) holds the order, group membership and selection
+  for one space in one window. A group is always one contiguous run and is dropped when it has no
+  tabs; every change re-normalizes. Group colors are a fixed palette of nine (Chrome's), picked
+  from a dropdown in the group editor or the label's Color menu.
+- **Session file**: groups and their tabs persist in a new `session.json` (windows → spaces →
+  groups → tabs with URL, title and Keep alive setting), not in config. Config is what a space
+  is; the session is what's open in it and changes on every navigation. P1 restores it at launch,
+  loading only each window's visible tab and the Keep alive tabs. P2 adds each tab's back/forward
+  history (`interactionState`) and crash safety to the same records. Closing the last window
+  keeps its tabs for the next launch, and the Dock brings that window back.
+- **Rail order** is saved in config (`Config.moveSpace`, the only SignInSync change besides
+  making `SecureFile` public for the session file).
+- **Keep alive**: `inactiveSchedulingPolicy` is read when a web view is created, so every web
+  view gets its own `WKPreferences` (WebKit shares a configuration's preferences with popups) and
+  a policy change means a new web view, which keeps the tab's history through
+  `interactionState`. When it happens:
+  - creating a tab, restoring one, or typing an address: the policy for that URL is used from
+    the start;
+  - a link or redirect (GET) to Outlook, Teams or Gmail in an ordinary tab: the navigation is
+    cancelled and the same request loads in a new keep-alive web view;
+  - a form post that lands there (can't be replayed): the new web view is made once the tab is in
+    the background;
+  - the context menu: at once.
+  Losing Keep alive (navigating away from Outlook) isn't applied to a live tab, so a page isn't
+  reloaded just to be throttled; it applies the next time the tab loads. Tabs opened by a page
+  (sign-in popups) are never rebuilt automatically, since the opener may still talk to them.
+- **Unread badges** come from leading "(N)" in titles (Outlook, Teams) and Gmail's
+  "Inbox (N) - … - Gmail". A space's badge adds up its tabs in every window, counting identical
+  titles once, and isn't shown for the space the window is on.
+- **Shortcuts**: all are menu items. ⌃Tab, ⌃⇧Tab, ⌘⇧] and ⌘⇧[ are also caught by a local key
+  monitor before the page sees them. ⌘W with no tab in the space closes the window; in the
+  Accounts window it closes that window.
+- **Smoke test** (scratch `ISMITH_DATA_DIR`, four spaces, a seeded session), driven through the
+  accessibility API by process id: restore with groups and a collapsed group; only the selected
+  and Keep alive tabs loaded; new tab and address bar; typing `outlook.office.com` rebuilt the tab
+  with keep-alive on; a meta-refresh to `teams.microsoft.com` was cancelled and reloaded
+  keep-alive; group from the context menu, named in its editor; collapse; move to another space
+  (reloaded in that space's store); space switch with tint and badges; close and reopen in place;
+  next tab; move to a new window; Accounts window; new-space sheet; quit saved the session.
+  Real mouse drags weren't driven by the test (the drop logic is unit-tested), and keyboard
+  shortcuts were checked as menu items, not as keystrokes.
+- **Tests**: `make test` runs 27 SignInSync tests (one new: the rail order survives a relaunch)
+  and 28 app-hosted tests: `TabLayoutTests` (11: order, groups as one run, drops into and out of
+  groups, collapse moving the selection, repair of saved records), `SessionTests` (6: round trip,
+  owner-only file, unreadable file kept aside, older records, pruning deleted spaces, rail order
+  through the browser), `PageRulesTests` (6: badge parsing and totals, keep-alive hosts, a tab's
+  own setting, the scheduling policy on its own preferences) and the 5 P0 app tests.
+- **Seen during the smoke test**: WebKit shows its own "Allow related Microsoft websites to share
+  cookies?" prompt (Storage Access for related domains) during Microsoft sign-in. It's WebKit's
+  UI, shown over the window; P2's prompts work should check it doesn't block real sign-ins.
+
 ## Phases
 
 Each phase ends with its tests green, an adversarial review (fix critical and high; at most two
