@@ -94,6 +94,15 @@ public struct PasswordCapture: Identifiable, CustomStringConvertible, CustomRefl
     }
 }
 
+/// What a fill wrote.
+public enum FillResult: Equatable, Sendable {
+    /// The username (if the form has one) and the password, or the username of a first step.
+    case filled
+    /// Only the username: the form's password field couldn't be seen (covered by a banner, say).
+    /// The user can click the password field and fill again.
+    case usernameOnly
+}
+
 public enum AutofillError: Error, Equatable {
     /// The web view or frame is gone.
     case frameGone
@@ -257,7 +266,8 @@ public final class PasswordAutofill {
     ///
     /// A same-site login (from another host of the site) is only filled with `allowSameSite`,
     /// which the popover passes when the user picked that row with its host shown.
-    public func fill(_ loginID: UUID, into focus: LoginFieldFocus, allowSameSite: Bool = false) async throws {
+    @discardableResult
+    public func fill(_ loginID: UUID, into focus: LoginFieldFocus, allowSameSite: Bool = false) async throws -> FillResult {
         guard let webView = focus.frame.webView else { throw AutofillError.frameGone }
         guard !isDisabled(for: webView) else { throw AutofillError.disabled }
         guard Date().timeIntervalSince(focus.receivedAt) >= minimumFocusAge else { throw AutofillError.tooSoon }
@@ -269,11 +279,12 @@ public final class PasswordAutofill {
             Self.log.error("refused to fill a login into a frame of another origin")
             throw AutofillError.originMismatch
         }
-        try await runFill(in: webView, focus: focus, request: [
+        let result = try await runFill(in: webView, focus: focus, request: [
             "mode": "login", "username": login.username, "password": login.password,
         ])
         try? store.markUsed(id: login.id)
         state(for: webView).chosen = (login.id, focus.frame.origin, Date())
+        return result
     }
 
     /// Fills a generated password into the new-password field (and its confirmation) of the
@@ -282,10 +293,10 @@ public final class PasswordAutofill {
         guard let webView = focus.frame.webView else { throw AutofillError.frameGone }
         guard !isDisabled(for: webView) else { throw AutofillError.disabled }
         guard Date().timeIntervalSince(focus.receivedAt) >= minimumFocusAge else { throw AutofillError.tooSoon }
-        try await runFill(in: webView, focus: focus, request: ["mode": "generated", "username": "", "password": password])
+        _ = try await runFill(in: webView, focus: focus, request: ["mode": "generated", "username": "", "password": password])
     }
 
-    private func runFill(in webView: WKWebView, focus: LoginFieldFocus, request: [String: String]) async throws {
+    private func runFill(in webView: WKWebView, focus: LoginFieldFocus, request: [String: String]) async throws -> FillResult {
         var args: [String: Any] = request
         args["docID"] = focus.frame.documentID
         args["fieldID"] = focus.fieldID
@@ -300,7 +311,8 @@ public final class PasswordAutofill {
             throw AutofillError.frameGone
         }
         switch result as? String {
-        case "filled": return
+        case "filled": return .filled
+        case "usernameOnly": return .usernameOnly
         case "stale": throw AutofillError.stale
         case "originMismatch": throw AutofillError.frameOriginChanged
         case "noField": throw AutofillError.noField
@@ -370,7 +382,7 @@ public final class PasswordAutofill {
         let tab = state(for: webView)
         var suggested: UUID?
         if let chosen = tab.chosen, Date().timeIntervalSince(chosen.date) < usernameStepLifetime,
-           matches.contains(where: { $0.login.id == chosen.id }) {
+           matches.contains(where: { $0.login.id == chosen.id && $0.kind == .exact }) {
             suggested = chosen.id
         } else if let pending = pendingUsername(in: tab, for: frame.origin) {
             suggested = matches.first { $0.kind == .exact && $0.login.username == pending }?.login.id

@@ -306,6 +306,16 @@ Acceptance:
 Acceptance: you sign in to 10 everyday sites using autofill only; new passwords are captured; a
 revealed password needs your fingerprint or Mac password.
 
+**Core built (2026-10-03)**: `Packages/Passwords` holds the store, matching, script and
+`PasswordAutofill` controller, with 42 tests (WebKit ones on local fixtures). The app UI (save
+bar, popover, manager window) is still to do; `Packages/Passwords/INTEGRATION.md` lists the hook
+points. Two security reviews changed the design:
+- Same-site matching is https-only and skips multi-tenant hosts the Public Suffix List lacks
+  (Okta, SharePoint, Atlassian, …). Same-site logins fill only from an explicit popover pick;
+  ⌘\\ fills exact matches in fields the user clicked.
+- Only fields the user can see get a popover or a password (hit test, opacity, clipping, masks).
+- Captures need a trusted click or Return and a password the user typed or iSmith filled.
+
 ### P5. Import from Brave (S)
 
 - Find Brave profiles under `~/Library/Application Support/BraveSoftware/Brave-Browser/`.

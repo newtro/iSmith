@@ -47,9 +47,15 @@
   // Fields seen as type=password stay password fields when a "show password" button flips them
   // to text.
   const passwordFields = new WeakSet();
-  // Fields the user typed or pasted into (trusted input events), or that this script filled.
-  // Only their values are ever reported as a submission, so a page can't forge one.
-  const touched = new WeakSet();
+  // The value each field had after the user last typed or pasted into it (trusted input events)
+  // or this script filled it. A field is only reported as submitted while it still holds that
+  // value, so a page can't swap in values of its own.
+  const userValues = new WeakMap();
+  const holdsUserValue = (el) => userValues.has(el) && userValues.get(el) === el.value;
+  // The last trusted click or Enter: a submission is only reported right after one, so a page
+  // calling requestSubmit() on its own (say, on every keystroke) reports nothing.
+  let lastAction = 0;
+  const ACTION_WINDOW = 3000;
   // The form (scope) each reported field was in when it was focused; a fill refuses a field that
   // has since been moved to another form.
   const scopeAtFocus = new WeakMap();
@@ -97,6 +103,12 @@
   // clipped, covered, off-screen, masked, or with invisible text.
   const alphaOf = (color) => {
     if (!color || color === "transparent") return 0;
+    // color(srgb r g b / a), oklch(l c h / a), rgb(r g b / a)
+    const slash = /\/\s*([\d.]+)(%?)\s*\)\s*$/.exec(color);
+    if (slash) {
+      const a = slash[2] ? parseFloat(slash[1]) / 100 : parseFloat(slash[1]);
+      return Number.isFinite(a) ? a : 1;
+    }
     const m = /rgba?\(([^)]*)\)/.exec(color);
     if (!m) return 1;
     const parts = m[1].split(/[\s,\/]+/).filter(Boolean);
@@ -118,6 +130,8 @@
       const filter = style.filter || "";
       const fo = /opacity\(\s*([\d.]+)(%?)/.exec(filter);
       if (fo && (fo[2] ? parseFloat(fo[1]) / 100 : parseFloat(fo[1])) < 0.5) return false;
+      const blur = /blur\(\s*([\d.]+)px/.exec(filter);
+      if (blur && parseFloat(blur[1]) >= 3) return false;
       const mask = style.webkitMaskImage || style.maskImage || "none";
       if (mask !== "none") return false;
     }
@@ -131,19 +145,36 @@
     const hit = elementFromPoint.call(document, x, y);
     if (!hit) return false;
     if (hit === el) return true;
-    const root = el.getRootNode();
-    if (root && root.host === hit) return true; // the field is in the hit element's shadow root
+    // The field is inside the hit element's shadow root (or a shadow root nested in it).
+    for (let root = el.getRootNode(); root && root.host; root = root.host.getRootNode()) {
+      if (root.host === hit) return true;
+    }
     if (hit instanceof HTMLLabelElement && labelControlOf.call(hit) === el) return true;
     return false;
   };
 
-  const isVisibleToUser = (el) => {
+  // `strict` (for a field a password is written to): both the middle and the left quarter must
+  // be the field, so a field narrowed to a sliver or half covered doesn't count. Otherwise (the
+  // field the user just clicked) one of three points is enough, allowing for icons drawn over
+  // its ends.
+  const isVisibleToUser = (el, strict) => {
     if (!isRendered(el)) return false;
     const style = getComputedStyle(el);
     if (alphaOf(style.webkitTextFillColor || style.color) < 0.3) return false;
     const r = el.getBoundingClientRect();
     const y = r.top + r.height / 2;
+    if (strict) return hits(el, r.left + r.width / 2, y) && hits(el, r.left + r.width / 4, y);
     return [r.left + r.width / 2, r.left + r.width / 4, r.right - r.width / 4].some((x) => hits(el, x, y));
+  };
+
+  // A field below the fold (or scrolled away in its container) is brought into view before it's
+  // judged, as the user would scroll to it.
+  const scrollIntoView = Element.prototype.scrollIntoView;
+  const visibleOrScrolled = (el, strict) => {
+    if (isVisibleToUser(el, strict)) return true;
+    if (!isRendered(el)) return false;
+    scrollIntoView.call(el, { block: "nearest", inline: "nearest" });
+    return isVisibleToUser(el, strict);
   };
 
   // Forms and documents have named properties that override built-ins (`<input name="elements">`
@@ -254,8 +285,14 @@
   // pressed. A page calling `el.focus()` also produces a trusted focus event, but not one of these.
   let lastPointer = { el: null, at: 0 };
   let lastTab = 0;
+  const closest = Element.prototype.closest;
   document.addEventListener("pointerdown", (event) => {
-    if (event.isTrusted) lastPointer = { el: event.composedPath ? event.composedPath()[0] : event.target, at: Date.now() };
+    if (!event.isTrusted) return;
+    let el = event.composedPath ? event.composedPath()[0] : event.target;
+    // A click on a field's label focuses the field: count it as a click on the field.
+    const label = el && el.nodeType === 1 ? closest.call(el, "label") : null;
+    if (label) el = labelControlOf.call(label) || el;
+    lastPointer = { el, at: Date.now() };
   }, true);
 
   let lastFocus = { id: null, at: 0, user: false };
@@ -295,23 +332,26 @@
   document.addEventListener("input", (event) => {
     if (!event.isTrusted) return;
     const el = event.composedPath ? event.composedPath()[0] : event.target;
-    if (isInput(el)) touched.add(el);
+    if (isInput(el)) userValues.set(el, el.value);
   }, true);
 
   // MARK: Submission
 
   let lastReport = { key: "", at: 0 };
   const report = (scope) => {
+    if (Date.now() - lastAction > ACTION_WINDOW) return;
     const a = analyze(scope);
     if (!a.kind) return;
     const message = { type: "submit", form: a.kind, username: "", password: "", newPassword: "", usernameHint: "" };
     if (a.username) message.username = clip(a.username.value.trim());
     if (a.kind === "usernameOnly") {
-      if (!message.username || !touched.has(a.username)) return;
+      // A username the site filled in itself counts; one the page changed after the user typed
+      // doesn't.
+      if (!message.username || (userValues.has(a.username) && !holdsUserValue(a.username))) return;
     } else {
-      // Only values the user typed (or iSmith filled) are reported.
-      if (a.password && touched.has(a.password)) message.password = clip(a.password.value);
-      if (a.newPassword && touched.has(a.newPassword)) message.newPassword = clip(a.newPassword.value);
+      // Only passwords the user typed (or iSmith filled), still as they were, are reported.
+      if (a.password && holdsUserValue(a.password)) message.password = clip(a.password.value);
+      if (a.newPassword && holdsUserValue(a.newPassword)) message.newPassword = clip(a.newPassword.value);
       if (a.confirm && a.confirm.value !== a.newPassword.value) message.newPassword = "";
       if (!message.password && !message.newPassword) return;
       if (!message.username) message.usernameHint = clip(usernameHint(scope));
@@ -333,6 +373,7 @@
     if (!event.isTrusted) return;
     if (event.key === "Tab") lastTab = Date.now();
     if (event.key !== "Enter") return;
+    lastAction = Date.now();
     const el = event.composedPath ? event.composedPath()[0] : event.target;
     if (isInput(el)) report(scopeOf(el));
   }, true);
@@ -349,6 +390,7 @@
 
   document.addEventListener("click", (event) => {
     if (!event.isTrusted) return;
+    lastAction = Date.now();
     const target = event.composedPath ? event.composedPath()[0] : event.target;
     const button = buttonLike(target);
     if (!button) return;
@@ -397,10 +439,10 @@
   // Sets a value the way typing would be seen by frameworks: through the element's own value
   // setter (this world's, which page scripts can't patch), then input and change events.
   const setValue = (el, value) => {
-    touched.add(el);
     el.focus();
     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set;
     setter.call(el, value);
+    userValues.set(el, el.value);
     el.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
     el.dispatchEvent(new Event("change", { bubbles: true }));
   };
@@ -416,28 +458,39 @@
       if (normalizedOrigin() !== request.origin) return "originMismatch";
       const ref = fieldsByID.get(request.fieldID);
       const el = ref && ref.deref();
-      if (!el || !el.isConnected || !isVisibleToUser(el)) return "noField";
+      if (!el || !el.isConnected || !isVisibleToUser(el, false)) return "noField";
       const scope = scopeOf(el);
       if (scopeAtFocus.get(el) !== scope) return "noField";
       const a = analyze(scope);
       if (!fieldRole(el, a)) return "noField";
+      const password = String(request.password);
       if (request.mode === "generated") {
-        if (!a.newPassword || !isVisibleToUser(a.newPassword)) return "noField";
-        setValue(a.newPassword, String(request.password));
-        if (a.confirm && isVisibleToUser(a.confirm)) setValue(a.confirm, String(request.password));
+        if (!a.newPassword || !visibleOrScrolled(a.newPassword, true)) return "noField";
+        setValue(a.newPassword, password);
+        if (a.confirm && visibleOrScrolled(a.confirm, true)) setValue(a.confirm, password);
         return "filled";
       }
+      const username = String(request.username);
       if (a.kind === "usernameOnly") {
-        if (!isVisibleToUser(a.username)) return "noField";
-        setValue(a.username, String(request.username));
+        setValue(a.username, username);
         return "filled";
       }
       const passwordField = a.password || (a.kind === "signup" ? null : a.newPassword);
-      if (!passwordField || !isVisibleToUser(passwordField)) return "noField";
-      if (a.username && isVisibleToUser(a.username) && !a.username.readOnly && request.username) {
-        setValue(a.username, String(request.username));
+      if (!passwordField) return "noField";
+      const canFillUsername = a.username && !a.username.readOnly && username &&
+        (a.username === el || visibleOrScrolled(a.username, false));
+      const canFillPassword = passwordField === el || visibleOrScrolled(passwordField, true);
+      if (!canFillPassword) {
+        // The password field can't be seen (covered by a banner, say): fill only the username
+        // the user clicked, and let them click the password field to finish.
+        if (canFillUsername && a.username === el) {
+          setValue(a.username, username);
+          return "usernameOnly";
+        }
+        return "noField";
       }
-      setValue(passwordField, String(request.password));
+      if (canFillUsername) setValue(a.username, username);
+      setValue(passwordField, password);
       return "filled";
     },
     writable: false,

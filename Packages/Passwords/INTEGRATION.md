@@ -78,7 +78,9 @@ trigger.
     form;
   - `.disabled`: autofill is off for the web view.
 
-  It marks the login used.
+  It returns `.filled`, or `.usernameOnly` when the password field couldn't be seen even after
+  scrolling it into view (a cookie banner over it, say): tell the user to click the password
+  field to finish. It marks the login used.
 - `try await autofill.fillGeneratedPassword(password, into: focus)`: for `focus.offersGeneratedPassword`.
   Generate with `PasswordGenerator.generate(focus.requirements)` (it honors `minlength`,
   `maxlength` and `passwordrules`).
@@ -128,6 +130,18 @@ trigger.
   marks it concealed and transient for clipboard managers, and clears it after 60 seconds or at
   quit unless something else was copied.
 - Report `store.unreadableCount()` if it's non-zero ("2 saved logins couldn't be decrypted").
+
+## What the script reports
+
+- **Focus**: only for fields the user can see (hit-tested at the field's middle, not
+  transparent, clipped, masked, blurred or off-screen) in forms it recognizes.
+- **Submissions**: only right after a trusted click or Return, and only passwords the user typed
+  or iSmith filled that still hold that value. Pages can't forge a "Save" or "Update" by setting
+  values and calling `requestSubmit()`.
+- **Limits**: an opaque overlay with `pointer-events: none` over the field isn't detected (hit
+  testing looks through it), and a page script on the site itself can always read what's filled
+  into its own visible form. Same-origin script is trusted with that origin's logins, as in every
+  browser.
 
 ## Rules the app must keep (threat model)
 

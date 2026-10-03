@@ -27,6 +27,11 @@
   <input id="news-pass" type="password" style="width: 2px; height: 2px; padding: 0; border: 0; opacity: 0.1">
 </form>
 
+<!-- A visible username with a password field narrowed to a 2px strip, and one blurred out: the
+     username may be filled, the password never. -->
+<form id="f12" onsubmit="event.preventDefault()"><input id="u12" autocomplete="username"><input id="p12" type="password" style="clip-path: inset(0 calc(50% - 1px))"></form>
+<form id="f13" onsubmit="event.preventDefault()"><input id="u13" autocomplete="username"><input id="p13" type="password" style="filter: blur(30px) brightness(3)"></form>
+
 <!-- A normal form whose focused field the page moves into another form before the fill. -->
 <form id="real" onsubmit="event.preventDefault()"><input id="ru" autocomplete="username"><input id="rp" type="password"></form>
 <form id="trap" onsubmit="event.preventDefault()"><input id="tu" autocomplete="username"></form>

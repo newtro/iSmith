@@ -14,8 +14,8 @@ public enum SecretPasteboard {
 
     public static func copy(_ secret: String, clearAfter seconds: TimeInterval = 60,
                             pasteboard: NSPasteboard = .general) {
+        // No declareTypes here: it would start the contents over without the current-host option.
         pasteboard.prepareForNewContents(with: .currentHostOnly)
-        pasteboard.declareTypes([.string, concealed, transient], owner: nil)
         pasteboard.setString(secret, forType: .string)
         pasteboard.setData(Data(), forType: concealed)
         pasteboard.setData(Data(), forType: transient)

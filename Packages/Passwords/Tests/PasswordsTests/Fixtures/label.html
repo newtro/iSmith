@@ -1,0 +1,10 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Labelled sign in</title></head>
+<body>
+<!-- A label beside its field: clicking the label focuses the field, and that's the user's click. -->
+<form id="login" onsubmit="event.preventDefault()">
+  <label id="lab" for="username" style="display: block; padding: 10px; width: 200px">Email address</label>
+  <input id="username" autocomplete="username">
+  <input id="password" type="password">
+</form>
+</body></html>

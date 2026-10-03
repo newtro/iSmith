@@ -102,14 +102,14 @@ final class AutofillWebTests: XCTestCase {
         XCTAssertNotNil(try h.store.login(id: saved.id)?.lastUsed, "filling marks the login used")
 
         // Signing in with the filled login: already saved, so nothing to ask.
-        try await submit("login")
+        try await h.pressReturn()
         try await h.settle()
         XCTAssertTrue(h.captures.isEmpty)
 
         // A new account, typed: offered for saving.
         try await type("username", "new.user")
         try await type("password", "New-Password-2")
-        try await submit("login")
+        try await h.pressReturn()
         try await h.waitUntil("a capture") { !h.captures.isEmpty }
         let capture = h.captures[0]
         XCTAssertEqual(capture.origin, origin)
@@ -127,7 +127,7 @@ final class AutofillWebTests: XCTestCase {
         try await type("username", "new.user@example.com")
         try await type("password", "Changed-Password-3")
         try await h.page("document.getElementById('signin').click()") // an untrusted click is ignored...
-        try await submit("login") // ...the submit is seen
+        try await h.pressReturn() // ...Return in the field is seen
         try await h.waitUntil("an update capture") { h.captures.count == 2 }
         XCTAssertEqual(h.captures[1].action, .update(existing: created.id))
         XCTAssertEqual(h.captures[1].password, "Changed-Password-3")
@@ -135,7 +135,7 @@ final class AutofillWebTests: XCTestCase {
         // "Never for this site" silences it.
         try h.autofill.neverSave(h.captures[1])
         try await type("password", "Changed-Again-4")
-        try await submit("login")
+        try await h.pressReturn()
         try await h.settle()
         XCTAssertEqual(h.captures.count, 2)
     }
@@ -204,7 +204,7 @@ final class AutofillWebTests: XCTestCase {
         XCTAssertEqual(step1.field, .username)
 
         try await type("email", "two.step@example.com")
-        try await h.waitForNavigation { try await submit("step1") }
+        try await h.waitForNavigation { try await h.pressReturn() }
         XCTAssertTrue(h.webView.url?.path.hasSuffix("step2.html") == true)
         XCTAssertTrue(h.captures.isEmpty, "the username step alone isn't offered for saving")
 
@@ -212,7 +212,7 @@ final class AutofillWebTests: XCTestCase {
         XCTAssertEqual(step2.form, .login)
         XCTAssertEqual(step2.field, .password)
         try await type("password", "Two-Step-Secret-5")
-        try await submit("step2")
+        try await h.pressReturn()
         try await h.waitUntil("a capture") { !h.captures.isEmpty }
         XCTAssertEqual(h.captures[0].username, "two.step@example.com", "the username from the first page")
         XCTAssertEqual(h.captures[0].password, "Two-Step-Secret-5")
@@ -227,7 +227,7 @@ final class AutofillWebTests: XCTestCase {
         try await h.autofill.fill(saved.id, into: fillStep1)
         let filledEmail = try await value("email")
         XCTAssertEqual(filledEmail, "two.step@example.com")
-        try await h.waitForNavigation { try await submit("step1") }
+        try await h.waitForNavigation { try await h.pressReturn() }
         let fillStep2 = try await focus("password")
         XCTAssertEqual(fillStep2.suggestedLoginID, saved.id)
         let notYet = try await value("password")
@@ -241,7 +241,7 @@ final class AutofillWebTests: XCTestCase {
         try await h.load(server.url("/step1.html"))
         _ = try await focus("email")
         try await type("email", "kept@example.com")
-        try await h.waitForNavigation { try await submit("step1") }
+        try await h.waitForNavigation { try await h.pressReturn() }
         try await h.load(server.url("/step2-framed.html"))
         try await h.waitUntil("the iframe's login form") { h.forms.contains { !$0.frame.isMainFrame } }
         let iframe = h.forms.first { !$0.frame.isMainFrame }!.frame
@@ -249,12 +249,12 @@ final class AutofillWebTests: XCTestCase {
         // A sign-in inside the other site's frame, typed for real.
         try await type("username", "framed-user", in: iframe.frameInfo)
         try await type("password", "Framed-Secret-1", in: iframe.frameInfo)
-        try await submit("login", in: iframe.frameInfo)
+        try await h.pressReturn()
         try await h.waitUntil("the frame's capture") { h.captures.contains { $0.origin == localhostOrigin } }
 
         _ = try await focus("password")
         try await type("password", "Step-Two-Secret-2")
-        try await submit("step2")
+        try await h.pressReturn()
         try await h.waitUntil("the step-two capture") { h.captures.contains { $0.origin == origin } }
         let capture = h.captures.first { $0.origin == origin }!
         XCTAssertEqual(capture.username, "kept@example.com")
@@ -280,7 +280,7 @@ final class AutofillWebTests: XCTestCase {
         XCTAssertEqual(confirmValue, generated)
 
         try await type("email", "signup@example.com")
-        try await submit("signup")
+        try await h.pressReturn()
         try await h.waitUntil("a capture") { !h.captures.isEmpty }
         XCTAssertEqual(h.captures[0].form, .signup)
         XCTAssertEqual(h.captures[0].username, "signup@example.com")
@@ -291,7 +291,7 @@ final class AutofillWebTests: XCTestCase {
         h.clearEvents()
         try await type("new", "Mismatch-One-1")
         try await type("confirm", "Mismatch-Two-2")
-        try await submit("signup")
+        try await h.pressReturn()
         try await h.settle()
         XCTAssertTrue(h.captures.isEmpty)
     }
@@ -491,6 +491,78 @@ final class AutofillWebTests: XCTestCase {
         XCTAssertEqual(pass, "")
     }
 
+    func testPageCannotSwapValuesAfterTheUserTypes() async throws {
+        try h.store.add(origin: origin, username: "victim", password: "Real-Password-1")
+        try await h.load(server.url("/login.html"))
+        // The page submits on every keystroke: no click or Return, no capture.
+        try await h.page("""
+            document.getElementById('password').addEventListener('input', () =>
+                document.getElementById('login').requestSubmit());
+            """)
+        try await type("username", "victim")
+        try await type("password", "Sec")
+        try await h.settle(0.5)
+        XCTAssertTrue(h.captures.isEmpty, "keystrokes alone don't count as a sign-in")
+
+        // The user types; the page swaps in its own password before the real Return.
+        try await h.load(server.url("/login.html"))
+        try await h.page("""
+            const el = document.getElementById('password');
+            el.addEventListener('input', () => setTimeout(() => { el.value = 'Attacker-Chosen-2'; }, 0));
+            """)
+        try await type("username", "victim")
+        try await type("password", "Typed-Password-3")
+        let swapped = try await value("password")
+        XCTAssertEqual(swapped, "Attacker-Chosen-2")
+        try await h.pressReturn()
+        try await h.settle()
+        XCTAssertTrue(h.captures.isEmpty, "a value the user didn't type isn't offered")
+        XCTAssertEqual(try h.store.allLogins().first?.password, "Real-Password-1")
+    }
+
+    func testCoveredPasswordFieldFillsOnlyTheUsername() async throws {
+        let saved = try h.store.add(origin: origin, username: "fold-user", password: "Fold-Secret-1")
+        try await h.load(server.url("/fold.html"))
+        // Below the fold: scrolled into view and filled.
+        try await h.click("username")
+        var result = try await h.autofill.fill(saved.id, into: h.focuses.last!)
+        XCTAssertEqual(result, .filled)
+        var user = try await value("username"), pass = try await value("password")
+        XCTAssertEqual(user, "fold-user")
+        XCTAssertEqual(pass, "Fold-Secret-1")
+
+        // Under a fixed cookie banner wherever it scrolls: only the username.
+        try await h.load(server.url("/fold.html"))
+        try await h.page("document.body.classList.add('banner')")
+        try await h.click("username")
+        result = try await h.autofill.fill(saved.id, into: h.focuses.last!)
+        XCTAssertEqual(result, .usernameOnly)
+        user = try await value("username")
+        pass = try await value("password")
+        XCTAssertEqual(user, "fold-user")
+        XCTAssertEqual(pass, "")
+    }
+
+    func testPasswordNeverGoesIntoASliverOrABlur() async throws {
+        let saved = try h.store.add(origin: origin, username: "user@example.com", password: "Sliver-Secret-1")
+        try await h.load(server.url("/tricks.html"))
+        for n in [12, 13] {
+            let focus = try await focus("u\(n)")
+            _ = try await h.autofill.fill(saved.id, into: focus)
+            let user = try await value("u\(n)"), pass = try await value("p\(n)")
+            XCTAssertEqual(user, "user@example.com", "#u\(n)")
+            XCTAssertEqual(pass, "", "#p\(n) gets no password")
+        }
+    }
+
+    func testClickingALabelIsTheUsers() async throws {
+        try await h.load(server.url("/label.html"))
+        try await h.click("lab")
+        let focus = try XCTUnwrap(h.focuses.last)
+        XCTAssertEqual(focus.field, .username)
+        XCTAssertTrue(focus.isUserInitiated)
+    }
+
     func testDisabledWebViewGetsNothing() async throws {
         let saved = try h.store.add(origin: origin, username: "user", password: "Agent-Tab-1")
         try await h.load(server.url("/login.html"))
@@ -506,7 +578,7 @@ final class AutofillWebTests: XCTestCase {
         let before = h.focuses.count
         try await h.page("document.getElementById('username').focus()")
         try await type("password", "Typed-In-Agent-Tab")
-        try await submit("login")
+        try await h.pressReturn()
         try await h.settle()
         XCTAssertEqual(h.focuses.count, before)
         XCTAssertTrue(h.captures.isEmpty)

@@ -148,6 +148,19 @@ final class AutofillHarness: NSObject, PasswordAutofillDelegate, WKNavigationDel
         try await settle(0.1)
     }
 
+    /// Presses Return in the focused field (a trusted Enter keydown, and the form's implicit
+    /// submission when it has one).
+    func pressReturn() async throws {
+        let now = ProcessInfo.processInfo.systemUptime
+        for type in [NSEvent.EventType.keyDown, .keyUp] {
+            let event = NSEvent.keyEvent(with: type, location: .zero, modifierFlags: [], timestamp: now,
+                                         windowNumber: window.windowNumber, context: nil, characters: "\r",
+                                         charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36)!
+            if type == .keyDown { webView.keyDown(with: event) } else { webView.keyUp(with: event) }
+        }
+        try await settle(0.2)
+    }
+
     static func quote(_ s: String) -> String {
         String(decoding: try! JSONSerialization.data(withJSONObject: [s]).dropFirst().dropLast(), as: UTF8.self)
     }
