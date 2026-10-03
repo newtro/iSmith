@@ -11,11 +11,12 @@ APP := $(DERIVED)/Build/Products/Debug/iSmith.app
 build: project
 	$(XCODEBUILD) build
 
-# The SignInSync package (sync, vault and config suites), then the app-hosted tests.
+# The package tests (SignInSync's sync, vault and config suites; Blocking), then the app-hosted tests.
 test: test-package test-app
 
 test-package:
 	cd Packages/SignInSync && swift test
+	cd Packages/Blocking && swift test
 
 test-app: project
 	$(XCODEBUILD) test
@@ -31,4 +32,4 @@ $(PROJECT): project.yml App AppTests
 	@touch $(PROJECT)
 
 clean:
-	rm -rf $(DERIVED) $(PROJECT) Packages/SignInSync/.build
+	rm -rf $(DERIVED) $(PROJECT) Packages/SignInSync/.build Packages/Blocking/.build
