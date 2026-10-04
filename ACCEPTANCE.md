@@ -149,6 +149,8 @@ For sign-in problems, also copy the last lines of Settings (⌘,) ▸ Accounts �
 
 ## 11. An update through Sparkle
 
+**Passed 2026-10-04**: 1.0.0 updated itself to 1.0.1 via Check for Updates, tabs restored.
+
 Needs the first signed release from P7. When it's published:
 1. iSmith ▸ Check for Updates…
    - See: the new version offered; Install and Relaunch; the About box shows the new version, and
