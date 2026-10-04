@@ -39,12 +39,16 @@ extension BrowserState: WKUIDelegate {
         let tab = Tab(url: navigationAction.request.url)
         tab.openerID = opener.id
         tab.agentControlled = opener.agentControlled
+        tab.agentHandOff = opener.agentHandOff
         hook(tab)
         let popup = makeWebView(configuration)
         applyAgentControl(tab, to: popup)
         tab.attach(popup, keepAlive: keepAlive)
         tabs.add(tab) { $0.insert(tab.id, after: opener.id) }
-        if window.activeSpaceID == tabs.spaceID { selectTab(tab.id, in: tabs) }
+        // A popup from an agent's background tab stays in the background with it.
+        if window.activeSpaceID == tabs.spaceID, !opener.agentControlled || tabs.layout.selected == opener.id {
+            selectTab(tab.id, in: tabs)
+        }
         return popup
     }
 

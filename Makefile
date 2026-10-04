@@ -20,8 +20,8 @@ build: project
 
 # The package tests (SignInSync: sync, vault and config; BraveImport: Brave profiles, bookmarks
 # and passwords; Blocking: ad and tracker blocking; Passwords: store, matching, autofill;
-# BrowserData: history, bookmarks, site settings, downloads; Routing: link rules and learning), then
-# the app-hosted tests.
+# BrowserData: history, bookmarks, site settings, downloads, agent threads; Routing: link rules and
+# learning; AgentKit: the Codex app-server backend against a fake server), then the app-hosted tests.
 test: test-package test-app
 
 test-package:
@@ -31,6 +31,7 @@ test-package:
 	cd Packages/Passwords && swift test
 	cd Packages/BrowserData && swift test
 	cd Packages/Routing && swift test
+	cd Packages/AgentKit && swift test
 
 test-app: project
 	$(XCODEBUILD) test
@@ -65,4 +66,4 @@ $(PROJECT): project.yml App AppTests
 	@touch $(PROJECT)
 
 clean:
-	rm -rf $(DERIVED) $(PROJECT) Packages/SignInSync/.build Packages/BraveImport/.build Packages/Blocking/.build Packages/Passwords/.build Packages/BrowserData/.build Packages/Routing/.build
+	rm -rf $(DERIVED) $(PROJECT) Packages/SignInSync/.build Packages/BraveImport/.build Packages/Blocking/.build Packages/Passwords/.build Packages/BrowserData/.build Packages/Routing/.build Packages/AgentKit/.build

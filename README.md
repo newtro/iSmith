@@ -7,6 +7,8 @@ sign in once. Each site's own session stays in its space, so Outlook or Etsy can
 account in each space.
 
 See [DESIGN.md](DESIGN.md) for the model and [BUILD_PLAN.md](BUILD_PLAN.md) for the v1 phases.
+[AGENT_PANEL.md](AGENT_PANEL.md) is the agent panel (v1.1): Codex through its app server, with
+iSmith's own per-tab browser tools.
 [ACCEPTANCE.md](ACCEPTANCE.md) is the runbook for the v1 checks on real accounts.
 `spike/` is the prototype that proved the sign-in sync. It's kept for reference.
 
@@ -38,6 +40,12 @@ See [DESIGN.md](DESIGN.md) for the model and [BUILD_PLAN.md](BUILD_PLAN.md) for 
     `PasswordsWindow.swift`: the Passwords window. `ImportFromBrave.swift`: the Brave import
     (first-run screen and File ▸ Import from Brave…).
   - `Support.swift`: `AppIdentity` (Debug vs Release), `AppPaths`, search engines, address input.
+  - The agent panel (v1.1): `AgentController.swift` (the backend, a session per space, chats,
+    cards), `AgentPanel.swift` (the panel, the activity log, the toolbar's dock control),
+    `AgentTools.swift` (the browser tools and the sign-in hand-off), `AgentPolicy.swift` (what
+    each mode allows), `AgentPageScript.swift` (the page script in the agent's content world),
+    `AgentInput.swift` (real mouse and key events for one tab, screenshots, the offscreen stage)
+    and `AgentTabs.swift` (the Agent group and agent control).
   - `PerfHarness.swift` (Debug only): drives the performance run started by `Tools/perf-run.py`.
 - `Packages/SignInSync/`: the sign-in engine, with no UI. It holds providers, accounts and spaces
   (`Config`), the encrypted `Vault`, `CookieSync`, `SpaceManager`, and the one-time import from
@@ -60,6 +68,11 @@ See [DESIGN.md](DESIGN.md) for the model and [BUILD_PLAN.md](BUILD_PLAN.md) for 
 - `Packages/Routing/`: link routing, with no UI: URL patterns, ordered rules, the space last used
   for shared-address sites (Outlook, Teams, Gmail, Etsy), the Default space, Safe Links
   unwrapping and learned rules, saved in `routing.json`.
+- `Packages/AgentKit/`: agent backends for the agent panel, with no UI and no browser code: the
+  `AgentBackend` protocol and `CodexAppServerBackend` (`codex app-server`, newline-delimited
+  JSON-RPC over stdio: threads, turns, streamed events, iSmith's dynamic tools, approvals,
+  restart and resume). Its tests drive `FakeCodexAppServer`, a stand-in executable in the
+  package, so they never use Codex or a subscription.
 - `Packages/BrowserData/`: `browser.sqlite` through GRDB: history and bookmarks per space, site
   settings (permissions, zoom, app-link answers) and the downloads list. No UI.
 - `AppTests/`: tests that run inside the signed app.
@@ -71,7 +84,7 @@ Needs Xcode and XcodeGen (`brew install xcodegen`).
 
 ```bash
 make build   # generate the project and build Debug ("iSmith Dev") into build/
-make test    # package tests (SignInSync, BraveImport, Blocking, Passwords, BrowserData, Routing; swift test), then the app-hosted tests
+make test    # package tests (SignInSync, BraveImport, Blocking, Passwords, BrowserData, Routing, AgentKit; swift test), then the app-hosted tests
 make run     # build and open the Debug app, "iSmith Dev"
 make install # build Release and install it as /Applications/iSmith.app (quit iSmith first)
 ```
@@ -108,6 +121,9 @@ seed or runs longer.
 - `routing.json` holds the link rules, the Default space, the space each shared-address site was
   last used in, learned moves and suggestions turned off. It's owner-only; a file that can't be
   read is kept aside.
+- `browser.sqlite` also holds the agent panel's chats (Codex thread ids, names and dates; the
+  messages stay with Codex in `~/.codex`), each space's agent mode, working folder and model, and
+  the activity log (what each tool acted on, never typed text or page content; kept a year).
 - `browser.sqlite` holds history and bookmarks (per space), site settings (camera, microphone,
   location and notification answers per site, zoom per site, app-link answers per scheme) and
   the downloads list. History older than a year is removed at launch.
@@ -172,6 +188,16 @@ seed or runs longer.
   the space for the bookmarks; passwords go to the password store. macOS asks once for
   permission to read Brave's data (Privacy & Security ▸ Files & Folders if you said no) and for
   your Mac password to use the "Brave Safe Storage" key.
+- **Agent panel** (needs Codex: `npm install -g @openai/codex`, then `codex login`): the toolbar's
+  three buttons dock it on the right, at the bottom or hide it (per window; ⌥⌘A shows or hides
+  it). Ask about the space's tabs; the agent reads pages and clicks and types in them with real
+  input, opens its own tabs in the space's **Agent** group (in the background), and moves a tab
+  of yours there when it acts on it. Drag a tab out of the group (or "Take Tab Back from the
+  Agent") and it stops acting there. The mode dropdown is per space: Read-only, Ask, Confirm
+  submits or YOLO (the default, set in Settings ▸ Agents). Approvals and sign-ins appear as cards
+  in the panel; on a sign-in page the agent waits while you sign in (autofill works for you), then
+  Continue. Chats are kept per space (the title menu lists them); the activity log button shows
+  every tool call with its time, tab and target. Stop interrupts the turn.
 - **Background tabs** are unloaded after 30 minutes off screen (not Keep alive tabs, and not
   pages you've edited), keeping their history; they reload when selected. Only the 15 most
   recently shown background tabs stay loaded for longer than a minute (sites allowed to notify

@@ -12,22 +12,24 @@ final class BrowserWebView: WKWebView {
     /// The user's last click or key press in the page (app links honor a remembered "Open" only
     /// right after one).
     private(set) var lastUserInput: Date?
+    /// Set while the agent's tools deliver events: those aren't the user's input.
+    var deliveringAgentInput = false
     /// The user edited something in the page since it last loaded (typed, pasted, dropped,
     /// dictated), so it isn't hibernated: the text may be unsaved.
     var editedSinceLoad = false
 
     override func mouseDown(with event: NSEvent) {
-        lastUserInput = Date()
+        if !deliveringAgentInput { lastUserInput = Date() }
         super.mouseDown(with: event)
     }
 
     override func otherMouseDown(with event: NSEvent) {
-        lastUserInput = Date()
+        if !deliveringAgentInput { lastUserInput = Date() }
         super.otherMouseDown(with: event)
     }
 
     override func keyDown(with event: NSEvent) {
-        lastUserInput = Date()
+        if !deliveringAgentInput { lastUserInput = Date() }
         super.keyDown(with: event)
     }
 

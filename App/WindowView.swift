@@ -226,8 +226,10 @@ private struct SpaceView: View {
                     BookmarksBar(window: window, spaceID: space.id)
                 }
                 RoutingBars(routing: browser.routing, window: window)
-                TabPage(window: window, tab: tab, color: space.color)
-                    .id(tab.id)
+                AgentDocked(window: window, space: space) {
+                    TabPage(window: window, tab: tab, color: space.color)
+                        .id(tab.id)
+                }
             } else {
                 VStack(spacing: 10) {
                     Text("No tabs in \(space.def.name)").foregroundStyle(.secondary)
@@ -344,6 +346,7 @@ private struct Toolbar: View {
             .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .textBackgroundColor)))
             .overlay(RoundedRectangle(cornerRadius: 8).stroke(addressFocused ? Color.accentColor.opacity(0.7) : Color(nsColor: .separatorColor)))
             DownloadsToolbarItem(downloads: browser.downloads, window: window)
+            AgentDockControl(window: window)
         }
         .buttonStyle(.borderless)
         .padding(.horizontal, 10)
@@ -468,6 +471,38 @@ private struct DownloadsToolbarItem: View {
     var body: some View {
         if !downloads.items.isEmpty || window.downloadsShown {
             DownloadsButton(downloads: downloads, shown: $window.downloadsShown)
+        }
+    }
+}
+
+/// The page with the agent panel beside it (right) or under it (bottom), as the window's dock
+/// control says.
+private struct AgentDocked<Page: View>: View {
+    @EnvironmentObject private var browser: BrowserState
+    @ObservedObject var window: WindowState
+    @ObservedObject var space: SpaceState
+    @ViewBuilder let page: () -> Page
+
+    var body: some View {
+        switch window.agentDock {
+        case .right:
+            HStack(spacing: 0) {
+                page()
+                AgentPanel(agent: browser.agent, session: browser.agent.session(space.id), space: space, dock: .right)
+                    .frame(width: 330)
+                    .overlay(alignment: .leading) { Rectangle().fill(space.color.opacity(0.3)).frame(width: 1) }
+            }
+        case .bottom:
+            VStack(spacing: 0) {
+                page()
+                AgentPanel(agent: browser.agent, session: browser.agent.session(space.id), space: space, dock: .bottom)
+                    .frame(height: 230)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(space.color.opacity(0.35)))
+                    .padding([.horizontal, .bottom], 8)
+            }
+        case .hidden:
+            page()
         }
     }
 }

@@ -33,9 +33,13 @@ struct TabGroup: Codable, Hashable, Identifiable {
     var name: String
     var color: GroupColor
     var collapsed: Bool
+    /// The space's Agent group (v1.1): the tabs an agent opened or took over. A space has at most
+    /// one, and it's always last in the strip. A tab in it is driven by the agent (no autofill);
+    /// dragging a tab out of it takes the tab back.
+    var agent: Bool
 
-    init(id: UUID = UUID(), name: String, color: GroupColor, collapsed: Bool = false) {
-        (self.id, self.name, self.color, self.collapsed) = (id, name, color, collapsed)
+    init(id: UUID = UUID(), name: String, color: GroupColor, collapsed: Bool = false, agent: Bool = false) {
+        (self.id, self.name, self.color, self.collapsed, self.agent) = (id, name, color, collapsed, agent)
     }
 
     init(from decoder: Decoder) throws {
@@ -44,6 +48,7 @@ struct TabGroup: Codable, Hashable, Identifiable {
         name = try c.decodeIfPresent(String.self, forKey: .name) ?? ""
         color = try c.decodeIfPresent(GroupColor.self, forKey: .color) ?? .grey
         collapsed = try c.decodeIfPresent(Bool.self, forKey: .collapsed) ?? false
+        agent = try c.decodeIfPresent(Bool.self, forKey: .agent) ?? false
     }
 }
 
@@ -95,6 +100,8 @@ struct TabLayout: Equatable {
     func group(_ id: UUID) -> TabGroup? { groups.first { $0.id == id } }
     func group(of tab: UUID) -> TabGroup? { groupID(of: tab).flatMap { group($0) } }
     func tabs(in group: UUID) -> [UUID] { slots.filter { $0.group == group }.map(\.id) }
+    /// The space's Agent group, if it has one.
+    var agentGroup: TabGroup? { groups.first { $0.agent } }
 
     /// What the strip shows: each group's label followed by its tabs, unless it's collapsed.
     var items: [Item] {
@@ -199,10 +206,15 @@ struct TabLayout: Equatable {
 
     /// Puts tabs into a new group at the position of the leftmost one, keeping their order.
     @discardableResult
-    mutating func createGroup(with ids: [UUID], name: String = "", color: GroupColor? = nil) -> UUID? {
+    mutating func createGroup(with ids: [UUID], name: String = "", color: GroupColor? = nil, agent: Bool = false) -> UUID? {
         let members = slots.map(\.id).filter(ids.contains)
         guard let first = members.first, let at = index(of: first) else { return nil }
-        let group = TabGroup(name: name, color: color ?? nextColor)
+        // One Agent group per space: more agent tabs join it.
+        if agent, let existing = agentGroup {
+            add(members, to: existing.id)
+            return existing.id
+        }
+        let group = TabGroup(name: name, color: color ?? nextColor, agent: agent)
         groups.append(group)
         let moving = slots.filter { members.contains($0.id) }.map { Slot(id: $0.id, group: group.id) }
         var rest = slots.filter { !members.contains($0.id) }
@@ -211,6 +223,17 @@ struct TabLayout: Equatable {
         slots = rest
         normalize()
         return group.id
+    }
+
+    /// Puts a tab in the space's Agent group, making the group (last in the strip) if there's none.
+    @discardableResult
+    mutating func addToAgentGroup(_ id: UUID) -> UUID? {
+        if !contains(id) { insert(id) }
+        if let group = agentGroup {
+            add([id], to: group.id)
+            return group.id
+        }
+        return createGroup(with: [id], name: "Agent", color: .blue, agent: true)
     }
 
     /// Adds tabs to the end of an existing group.
@@ -278,6 +301,10 @@ struct TabLayout: Equatable {
             guard !placed.contains(g) else { continue }
             placed.insert(g)
             out.append(contentsOf: slots.filter { $0.group == g })
+        }
+        // The Agent group stays at the end of the strip.
+        if let agent = groups.first(where: { $0.agent })?.id, out.contains(where: { $0.group == agent }) {
+            out = out.filter { $0.group != agent } + out.filter { $0.group == agent }
         }
         slots = out
         groups.removeAll { !placed.contains($0.id) }

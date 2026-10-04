@@ -75,6 +75,15 @@ enum MainMenu {
         view.addItem(item("Show Bookmarks Bar", #selector(Commands.toggleBookmarksBar), "B", commands))
         view.addItem(item("Show Downloads", #selector(Commands.showDownloads), "l", commands, [.command, .option]))
         view.addItem(.separator())
+        // The agent panel: ⌥⌘A shows or hides it; the dock items say where.
+        view.addItem(item("Show Agent Panel", #selector(Commands.toggleAgentPanel), "a", commands, [.command, .option]))
+        let dockRight = item("Agent Panel on the Right", #selector(Commands.dockAgentPanel(_:)), "", commands)
+        dockRight.tag = 0
+        view.addItem(dockRight)
+        let dockBottom = item("Agent Panel at the Bottom", #selector(Commands.dockAgentPanel(_:)), "", commands)
+        dockBottom.tag = 1
+        view.addItem(dockBottom)
+        view.addItem(.separator())
         view.addItem(item("Actual Size", #selector(Commands.zoomReset), "0", commands))
         view.addItem(item("Zoom In", #selector(Commands.zoomIn), "+", commands))
         // ⌘= is the same key as ⌘+ without Shift.
@@ -264,6 +273,18 @@ final class Commands: NSObject, NSMenuDelegate, NSMenuItemValidation {
         browser.print(tab)
     }
 
+    @objc func toggleAgentPanel() {
+        guard let window else { return }
+        window.agentDock = window.agentDock == .hidden ? (AgentDock.preferred == .hidden ? .right : AgentDock.preferred) : .hidden
+        if window.agentDock != .hidden { AgentDock.preferred = window.agentDock }
+    }
+
+    @objc func dockAgentPanel(_ sender: NSMenuItem) {
+        guard let window else { return }
+        window.agentDock = sender.tag == 1 ? .bottom : .right
+        AgentDock.preferred = window.agentDock
+    }
+
     @objc func toggleBookmarksBar() {
         let key = "showBookmarksBar"
         let shown = UserDefaults.standard.object(forKey: key) as? Bool ?? true
@@ -317,6 +338,12 @@ final class Commands: NSObject, NSMenuDelegate, NSMenuItemValidation {
         case #selector(bookmarkPage): return tab?.url != nil && browser.data != nil
         case #selector(showHistory), #selector(showBookmarks): return browser.data != nil
         case #selector(fillPassword): return tab?.webView != nil && browser.passwords != nil
+        case #selector(toggleAgentPanel):
+            item.title = window?.agentDock == .hidden || window == nil ? "Show Agent Panel" : "Hide Agent Panel"
+            return window != nil
+        case #selector(dockAgentPanel(_:)):
+            item.state = (item.tag == 1 ? AgentDock.bottom : .right) == window?.agentDock ? .on : .off
+            return window != nil
         case #selector(toggleBookmarksBar):
             item.title = (UserDefaults.standard.object(forKey: "showBookmarksBar") as? Bool ?? true) ? "Hide Bookmarks Bar" : "Show Bookmarks Bar"
             return true

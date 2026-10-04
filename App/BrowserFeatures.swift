@@ -176,7 +176,7 @@ extension BrowserState {
     }
 
     func canHibernate(_ tab: Tab) -> Bool {
-        guard let webView = tab.webView, !tab.keepAlive, !tab.isBuilding, !isLinked(tab),
+        guard let webView = tab.webView, !tab.keepAlive, !tab.isBuilding, !isLinked(tab), !agentRecentlyUsed(tab),
               tab.pendingDialogs.isEmpty, !tab.showingDialog, tab.prompts.isEmpty, tab.passwordOffer == nil,
               // An edit since the page loaded may be unsaved (a work item, a review comment).
               (webView as? BrowserWebView)?.editedSinceLoad != true else { return false }
