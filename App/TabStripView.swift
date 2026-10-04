@@ -345,7 +345,8 @@ final class StripContentView: NSView {
         menu.addItem(ActionItem("Add \(noun) to New Group") { [weak self] in
             if let group = browser.createGroup(with: targets, in: tabs) { self?.pendingEdit = group }
         })
-        let others = layout.groups.filter { g in !targets.allSatisfy { layout.groupID(of: $0) == g.id } }
+        // The Agent group only takes tabs an agent opens or acts on.
+        let others = layout.groups.filter { g in !g.agent && !targets.allSatisfy { layout.groupID(of: $0) == g.id } }
         if !others.isEmpty {
             let sub = NSMenu()
             for group in others {
@@ -360,7 +361,15 @@ final class StripContentView: NSView {
             item.submenu = sub
             menu.addItem(item)
         }
-        if targets.contains(where: { layout.groupID(of: $0) != nil }) {
+        if targets.contains(where: { layout.group(of: $0)?.agent == true }) {
+            // The agent may still read the tab, but no longer acts in it.
+            let item = ActionItem("Take \(noun) Back from the Agent") {
+                tabs.update { $0.removeFromGroup(targets) }
+                tabs.marked = []
+            }
+            item.toolTip = "Moves the tab out of the Agent group: the agent stops acting in it, and password autofill works again."
+            menu.addItem(item)
+        } else if targets.contains(where: { layout.groupID(of: $0) != nil }) {
             menu.addItem(ActionItem("Remove \(noun) from Group") {
                 tabs.update { $0.removeFromGroup(targets) }
                 tabs.marked = []
@@ -727,7 +736,14 @@ final class GroupChipView: NSView {
     func configure(group: TabGroup, count: Int) {
         self.group = group
         self.count = count
-        let text = NSMutableAttributedString(string: group.name, attributes: [.font: NSFont.systemFont(ofSize: 11.5, weight: .semibold)])
+        let text = NSMutableAttributedString()
+        if group.agent, let image = NSImage(systemSymbolName: "sparkles", accessibilityDescription: "Agent") {
+            let attachment = NSTextAttachment()
+            attachment.image = image.withSymbolConfiguration(.init(pointSize: 10, weight: .semibold))
+            text.append(NSAttributedString(attachment: attachment))
+            text.append(NSAttributedString(string: " "))
+        }
+        text.append(NSAttributedString(string: group.name, attributes: [.font: NSFont.systemFont(ofSize: 11.5, weight: .semibold)]))
         if group.collapsed {
             text.append(NSAttributedString(string: (group.name.isEmpty ? "" : "  ") + "\(count)",
                                            attributes: [.font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)]))

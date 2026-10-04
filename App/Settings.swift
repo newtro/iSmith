@@ -1,3 +1,4 @@
+import AgentKit
 import AppKit
 import BrowserData
 import SwiftUI
@@ -20,6 +21,8 @@ struct SettingsView: View {
                 .tabItem { Label("Websites", systemImage: "globe") }
             LinkSettings(routing: browser.routing, store: browser.routing.store)
                 .tabItem { Label("Links", systemImage: "arrow.triangle.branch") }
+            AgentSettings()
+                .tabItem { Label("Agents", systemImage: "sparkles") }
         }
         .padding(.top, 6)
     }
@@ -49,6 +52,31 @@ private struct PasswordSettings: View {
                 Text("Passwords are encrypted with a key in your login Keychain. Showing or copying one asks for Touch ID or your Mac password.")
                     .foregroundStyle(.secondary)
             }
+        }
+        .formStyle(.grouped)
+    }
+}
+
+/// The agent panel: the mode new spaces start in, and which backend runs it.
+private struct AgentSettings: View {
+    @EnvironmentObject private var browser: BrowserState
+    @AppStorage(AgentController.defaultModeKey) private var defaultMode = AgentMode.yolo.rawValue
+
+    var body: some View {
+        Form {
+            Picker("Mode for spaces", selection: $defaultMode) {
+                ForEach(AgentMode.allCases) { Text($0.title).tag($0.rawValue) }
+            }
+            Text("Each space keeps its own mode once you change it in the agent panel. Read-only: the agent reads pages and moves between them. Ask: every click, keystroke and command asks you first. Confirm submits: it asks before submitting, sending, deleting or paying. YOLO: it does anything without asking, including shell commands; the activity log is the record.")
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            LabeledContent("Backend") {
+                Text(CodexAppServerBackend.locateExecutable()?.path ?? "Codex isn't installed")
+                    .foregroundStyle(.secondary).textSelection(.enabled)
+            }
+            Text("The agent runs OpenAI's Codex (codex app-server) with your ChatGPT subscription. Its browser tools see only the space it works in and act through that space's tabs; they never get saved passwords, cookies or other spaces. Shell commands (outside Read-only) run in Codex's sandbox, which can read files on this Mac; outside YOLO they may write only the space's own folder.")
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .formStyle(.grouped)
     }

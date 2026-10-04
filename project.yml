@@ -16,6 +16,8 @@ packages:
     path: Packages/Passwords
   BraveImport:
     path: Packages/BraveImport
+  AgentKit:
+    path: Packages/AgentKit
   Sparkle:
     url: https://github.com/sparkle-project/Sparkle
     exactVersion: 2.10.0
@@ -40,6 +42,7 @@ targets:
       - package: Blocking
       - package: Passwords
       - package: BraveImport
+      - package: AgentKit
       - package: Sparkle
     info:
       path: App/Info.plist

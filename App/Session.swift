@@ -74,9 +74,11 @@ struct WindowRecord: Codable, Equatable {
     var frame: String?
     var activeSpace: String?
     var spaces: [SpaceRecord]
+    /// Where the window shows the agent panel; nil in files from before v1.1.
+    var agentDock: AgentDock?
 
-    init(id: UUID, frame: String?, activeSpace: String?, spaces: [SpaceRecord]) {
-        (self.id, self.frame, self.activeSpace, self.spaces) = (id, frame, activeSpace, spaces)
+    init(id: UUID, frame: String?, activeSpace: String?, spaces: [SpaceRecord], agentDock: AgentDock? = nil) {
+        (self.id, self.frame, self.activeSpace, self.spaces, self.agentDock) = (id, frame, activeSpace, spaces, agentDock)
     }
 
     init(from decoder: Decoder) throws {
@@ -85,6 +87,7 @@ struct WindowRecord: Codable, Equatable {
         frame = try c.decodeIfPresent(String.self, forKey: .frame)
         activeSpace = try c.decodeIfPresent(String.self, forKey: .activeSpace)
         spaces = try c.decodeIfPresent([SpaceRecord].self, forKey: .spaces) ?? []
+        agentDock = try c.decodeIfPresent(AgentDock.self, forKey: .agentDock)
     }
 }
 

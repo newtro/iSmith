@@ -76,6 +76,8 @@ final class BrowserState: NSObject, ObservableObject {
     let passwordsProblem: String?
     /// The save bar, autofill popover and ⌘\.
     let passwordUI = PasswordUI()
+    /// The agent panel's engine (v1.1). Codex starts only when a panel first needs it.
+    private(set) lazy var agent = AgentController(browser: self)
     private var blockingObservers: [NSObjectProtocol] = []
     private var hibernationTimer: Timer?
     private var networkMonitor: NWPathMonitor?
@@ -177,6 +179,8 @@ final class BrowserState: NSObject, ObservableObject {
         AppDelegate.flush = { [weak self, sync] in
             self?.quitting = true
             self?.saveSessionNow()
+            // Codex is stopped alongside, not waited for (it also exits when its input closes).
+            if let agent = self?.agent { Task { await agent.shutdown() } }
             await sync.flush()
         }
         sync.bindingChanged = { [weak self] def in
@@ -246,6 +250,10 @@ final class BrowserState: NSObject, ObservableObject {
             let cutoff = Date().addingTimeInterval(-Self.historyKept)
             Task.detached(priority: .background) { try? history.prune(olderThan: cutoff) }
         }
+        if let agentStore = data?.agent {
+            let cutoff = Date().addingTimeInterval(-Self.historyKept)
+            Task.detached(priority: .background) { try? agentStore.pruneActivity(olderThan: cutoff) }
+        }
     }
 
     /// Brings a tab to the front: its window, space and the tab itself (a notification click).
@@ -284,6 +292,7 @@ final class BrowserState: NSObject, ObservableObject {
     func restoreWindow(_ record: WindowRecord) -> WindowState {
         let window = WindowState(id: record.id)
         window.savedFrame = record.frame
+        if let dock = record.agentDock { window.agentDock = dock }
         for spaceRecord in record.spaces {
             let tabs = SpaceTabs.restore(spaceRecord)
             hook(tabs)
@@ -626,7 +635,8 @@ final class BrowserState: NSObject, ObservableObject {
         guard owner(of: tab)?.1.spaceID == spaceID, tab.buildGeneration == generation else { return }
         let keepAlive = KeepAlive.isOn(setting: tab.keepAliveSetting, url: request?.url ?? tab.url)
         configuration.websiteDataStore = store
-        configuration.preferences = Self.preferences(keepAlive: keepAlive)
+        // Agent tabs work in the background, so they aren't throttled either.
+        configuration.preferences = Self.preferences(keepAlive: keepAlive || tab.agentControlled)
         let webView = makeWebView(configuration)
         applyAgentControl(tab, to: webView)
         tab.attach(webView, keepAlive: keepAlive)
@@ -907,8 +917,13 @@ final class BrowserState: NSObject, ObservableObject {
 
     /// Hooks a space's tabs to the badges and the saved session.
     func hook(_ tabs: SpaceTabs) {
-        tabs.changed = { [weak self] in self?.scheduleRefresh() }
+        tabs.changed = { [weak self, weak tabs] in
+            self?.scheduleRefresh()
+            // A tab moved into or out of the Agent group gains or loses agent control.
+            if let tabs { self?.syncAgentControl(tabs) }
+        }
         for tab in tabs.ordered { hook(tab) }
+        syncAgentControl(tabs)
     }
 
     func hook(_ tab: Tab) {

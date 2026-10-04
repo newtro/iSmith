@@ -36,6 +36,8 @@ public final class BrowserDatabase: @unchecked Sendable {
     public let bookmarks: BookmarkStore
     public let sites: SiteSettingsStore
     public let downloads: DownloadStore
+    /// The agent panel's threads, settings and activity log (v1.1).
+    public let agent: AgentStore
 
     let writer: any DatabaseWriter
     private static let log = Logger(subsystem: "com.scottsmith.ismith", category: "browser-data")
@@ -70,6 +72,7 @@ public final class BrowserDatabase: @unchecked Sendable {
         bookmarks = BookmarkStore(writer: writer)
         sites = SiteSettingsStore(writer: writer)
         downloads = DownloadStore(writer: writer)
+        agent = AgentStore(writer: writer)
     }
 
     /// Deletes everything belonging to a space: its history and its bookmarks (roots included;
@@ -78,9 +81,13 @@ public final class BrowserDatabase: @unchecked Sendable {
         try writer.write { db in
             try db.execute(sql: "DELETE FROM history_url WHERE space = ?", arguments: [space])
             try db.execute(sql: "DELETE FROM bookmark WHERE space = ?", arguments: [space])
+            try db.execute(sql: "DELETE FROM agent_thread WHERE space = ?", arguments: [space])
+            try db.execute(sql: "DELETE FROM agent_space WHERE space = ?", arguments: [space])
+            try db.execute(sql: "DELETE FROM agent_activity WHERE space = ?", arguments: [space])
         }
         ChangeNotifier.post(HistoryStore.didChange, object: history, spaces: [space])
         ChangeNotifier.post(BookmarkStore.didChange, object: bookmarks, spaces: [space])
+        ChangeNotifier.post(AgentStore.didChange, object: agent, spaces: [space])
     }
 
     // MARK: Opening
@@ -201,6 +208,39 @@ public final class BrowserDatabase: @unchecked Sendable {
                     error TEXT
                 );
                 CREATE INDEX download_startedAt ON download(startedAt);
+                """)
+        }
+        // v1.1: the agent panel.
+        migrator.registerMigration("v2-agent") { db in
+            try db.execute(sql: """
+                CREATE TABLE agent_thread (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    space TEXT NOT NULL,
+                    backend TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    createdAt REAL NOT NULL,
+                    updatedAt REAL NOT NULL,
+                    model TEXT
+                );
+                CREATE INDEX agent_thread_space ON agent_thread(space, updatedAt);
+                CREATE TABLE agent_space (
+                    space TEXT PRIMARY KEY NOT NULL,
+                    mode TEXT,
+                    workingFolder TEXT,
+                    model TEXT
+                );
+                CREATE TABLE agent_activity (
+                    id INTEGER PRIMARY KEY,
+                    space TEXT NOT NULL,
+                    threadID TEXT,
+                    at REAL NOT NULL,
+                    tool TEXT NOT NULL,
+                    tabTitle TEXT,
+                    tabURL TEXT,
+                    target TEXT NOT NULL,
+                    outcome TEXT NOT NULL
+                );
+                CREATE INDEX agent_activity_space_at ON agent_activity(space, at);
                 """)
         }
         return migrator

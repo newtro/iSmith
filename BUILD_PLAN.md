@@ -18,7 +18,7 @@ biggest single pieces.
 |---|---|
 | Codebase | New Xcode app. The spike's sync engine, vault and config move into a Swift package with real unit tests. `spike/` stays as a reference. |
 | v1 scope | Space rail, top tabs with groups, tinted chrome; browser basics; default browser with link routing; ad and tracker blocking; own password store; Brave import. |
-| Not in v1 | Agent panel, MCP server, page index, setup sync across Macs, space templates, archiving. |
+| Not in v1 | Agent panel (built in v1.1, AGENT_PANEL.md), MCP server, page index, setup sync across Macs, space templates, archiving. |
 | Delivery | Whole v1 at once. |
 | Apple Developer account | Yes. Developer ID signing, notarization, and the passkey entitlement if Apple grants it. |
 | Install and updates | Signed and notarized app in /Applications, auto-updated with Sparkle from GitHub Releases. |
@@ -59,6 +59,7 @@ iSmith/
     Blocking/                 EasyList/EasyPrivacy → WebKit content-rule lists, per-site toggle
     Routing/                  URL-rule engine, rule learning
     BraveImport/              Brave profile discovery, bookmarks and passwords readers
+    AgentKit/                 (v1.1) agent backends: AgentBackend, the Codex app server
   Tools/                      release.sh (sign, notarize, appcast), list-update scripts
   spike/                      the proven prototype (reference only)
 ```
@@ -1207,7 +1208,9 @@ The engineering half is done; the acceptance run on Scott's accounts is next, fo
 
 ## After v1
 
-1. **Built-in agent panel**: a right, bottom or hidden dock. It has the permission modes Read-only,
+1. **Built-in agent panel** (v1.1, built 2026-10-04 with Codex's app server as the first backend;
+   see [AGENT_PANEL.md](AGENT_PANEL.md) for what was built, how the modes are enforced, the
+   security notes and the smoke test): a right, bottom or hidden dock. It has the permission modes Read-only,
    Ask, Confirm submits and YOLO (YOLO is the default), an activity log per space, a group for
    agent tabs, and a hand-off to you for logins.
 

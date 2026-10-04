@@ -83,8 +83,17 @@ final class Tab: ObservableObject, Identifiable {
     /// A submitted sign-in the save bar is asking about. Holds the password only while the bar
     /// is up.
     @Published var passwordOffer: PasswordOffer?
-    /// Driven by an agent (after v1): no autofill or capture in its web views.
+    /// Driven by an agent (v1.1: in the space's Agent group): no autofill or capture in its web
+    /// views. Kept in step with the group by `BrowserState.syncAgentControl`.
     var agentControlled = false
+    /// In the Agent group as of the last sync, so leaving it is noticed.
+    var agentMember = false
+    /// The user took the tab out of the Agent group: the agent may read it but not act on it.
+    var agentReleased = false
+    /// The user is signing in for the agent (the hand-off): autofill is back on meanwhile.
+    var agentHandOff = false
+    /// When an agent last acted in the tab; it isn't hibernated for a while after.
+    var agentUsedAt: Date?
     private var observations: [NSKeyValueObservation] = []
 
     init(id: UUID = UUID(), url: URL?, title: String? = nil, keepAlive: Bool? = nil, history: Data? = nil) {
@@ -279,6 +288,8 @@ final class WindowState: ObservableObject, Identifiable {
     var pendingAddressFocus: UUID?
     /// The downloads panel is open.
     @Published var downloadsShown = false
+    /// Where this window shows the agent panel (saved with the session).
+    @Published var agentDock = AgentDock.preferred
     /// Asks the find bar to take focus (⌘F).
     let findFocusRequests = PassthroughSubject<Void, Never>()
     /// Asks the toolbar to bookmark the page and show its editor (⌘D).
@@ -316,7 +327,8 @@ final class WindowState: ObservableObject, Identifiable {
 
     func record(spaceOrder: [String]) -> WindowRecord {
         WindowRecord(id: id, frame: window?.frameDescriptor ?? savedFrame, activeSpace: activeSpaceID,
-                     spaces: spaceOrder.compactMap { spaces[$0] }.filter { !$0.layout.isEmpty }.map(\.record))
+                     spaces: spaceOrder.compactMap { spaces[$0] }.filter { !$0.layout.isEmpty }.map(\.record),
+                     agentDock: agentDock)
     }
 }
 
