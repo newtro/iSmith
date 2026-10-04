@@ -476,34 +476,106 @@ private struct DownloadsToolbarItem: View {
 }
 
 /// The page with the agent panel beside it (right) or under it (bottom), as the window's dock
-/// control says.
+/// control says. The panel's inner edge drags to resize it; the size is remembered, and a
+/// double-click on the edge restores the default.
 private struct AgentDocked<Page: View>: View {
     @EnvironmentObject private var browser: BrowserState
     @ObservedObject var window: WindowState
     @ObservedObject var space: SpaceState
     @ViewBuilder let page: () -> Page
+    @AppStorage("agentPanelWidth") private var width: Double = AgentPanelSize.defaultWidth
+    @AppStorage("agentPanelHeight") private var height: Double = AgentPanelSize.defaultHeight
 
     var body: some View {
-        switch window.agentDock {
-        case .right:
-            HStack(spacing: 0) {
+        GeometryReader { geo in
+            switch window.agentDock {
+            case .right:
+                let shown = AgentPanelSize.clampWidth(width, available: geo.size.width)
+                HStack(spacing: 0) {
+                    page()
+                    AgentPanel(agent: browser.agent, session: browser.agent.session(space.id), space: space, dock: .right)
+                        .frame(width: shown)
+                        .overlay(alignment: .leading) { Rectangle().fill(space.color.opacity(0.3)).frame(width: 1) }
+                        .overlay(alignment: .leading) {
+                            PanelResizeHandle(axis: .horizontal) { delta in
+                                width = AgentPanelSize.clampWidth(shown - delta, available: geo.size.width)
+                            } reset: { width = AgentPanelSize.defaultWidth }
+                        }
+                }
+            case .bottom:
+                let shown = AgentPanelSize.clampHeight(height, available: geo.size.height)
+                VStack(spacing: 0) {
+                    page()
+                    AgentPanel(agent: browser.agent, session: browser.agent.session(space.id), space: space, dock: .bottom)
+                        .frame(height: shown)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(space.color.opacity(0.35)))
+                        .overlay(alignment: .top) {
+                            PanelResizeHandle(axis: .vertical) { delta in
+                                height = AgentPanelSize.clampHeight(shown - delta, available: geo.size.height)
+                            } reset: { height = AgentPanelSize.defaultHeight }
+                        }
+                        .padding([.horizontal, .bottom], 8)
+                }
+            case .hidden:
                 page()
-                AgentPanel(agent: browser.agent, session: browser.agent.session(space.id), space: space, dock: .right)
-                    .frame(width: 330)
-                    .overlay(alignment: .leading) { Rectangle().fill(space.color.opacity(0.3)).frame(width: 1) }
             }
-        case .bottom:
-            VStack(spacing: 0) {
-                page()
-                AgentPanel(agent: browser.agent, session: browser.agent.session(space.id), space: space, dock: .bottom)
-                    .frame(height: 230)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(space.color.opacity(0.35)))
-                    .padding([.horizontal, .bottom], 8)
-            }
-        case .hidden:
-            page()
         }
+    }
+}
+
+/// Size limits for the agent panel: never so small it's unusable, never more than 70% of the
+/// window, so the page always stays visible.
+enum AgentPanelSize {
+    static let defaultWidth: Double = 330
+    static let defaultHeight: Double = 230
+
+    static func clampWidth(_ value: Double, available: Double) -> Double {
+        min(max(value, 260), max(260, available * 0.7))
+    }
+
+    static func clampHeight(_ value: Double, available: Double) -> Double {
+        min(max(value, 140), max(140, available * 0.7))
+    }
+}
+
+/// A thin, invisible strip on the panel's inner edge with a resize cursor. Reports how far it was
+/// dragged towards the page (negative) or the panel (positive) since the last change.
+private struct PanelResizeHandle: View {
+    enum Axis { case horizontal, vertical }
+    let axis: Axis
+    let changed: (Double) -> Void
+    let reset: () -> Void
+    @State private var last: Double = 0
+    @State private var hovering = false
+
+    var body: some View {
+        Color.clear
+            .frame(width: axis == .horizontal ? 8 : nil, height: axis == .vertical ? 8 : nil)
+            .offset(x: axis == .horizontal ? -4 : 0, y: axis == .vertical ? -4 : 0)
+            .contentShape(Rectangle())
+            .onHover { inside in
+                guard inside != hovering else { return }
+                hovering = inside
+                if inside {
+                    (axis == .horizontal ? NSCursor.resizeLeftRight : NSCursor.resizeUpDown).push()
+                } else {
+                    NSCursor.pop()
+                }
+            }
+            .gesture(
+                DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                    .onChanged { drag in
+                        let total = axis == .horizontal ? drag.translation.width : drag.translation.height
+                        changed(total - last)
+                        last = total
+                    }
+                    .onEnded { _ in last = 0 }
+            )
+            .onTapGesture(count: 2, perform: reset)
+            .onDisappear { if hovering { NSCursor.pop(); hovering = false } }
+            .help("Drag to resize the agent panel; double-click to reset")
+            .accessibilityLabel("Resize agent panel")
     }
 }
 
