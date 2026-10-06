@@ -31,8 +31,11 @@ biggest single pieces.
 
 - **Passwords are global, not per space.** A login for a site autofills in any space. Sign-in
   sessions are already shared, so per-space passwords would add friction for no gain.
-- **Bookmarks belong to spaces.** Brave bookmarks import into a space you pick. A bookmark can be
-  moved or copied to another space.
+- **Bookmarks are shared by all spaces** (changed 2026-10-06; they used to belong to a space).
+  One bookmarks bar, one Bookmarks menu and one bookmarks manager, the same in every space; a
+  bookmark opens in the space you are in. Brave bookmarks import into that one set. The
+  per-space copies an older version kept are merged into one tree by a database migration
+  (`v3-global-bookmarks`; the file is backed up first).
 - **History is per space.** Address-bar suggestions come from the current space first, then the
   other spaces.
 - **Multiple windows.** Each window shows one space at a time. A space's tabs belong to the window
@@ -382,15 +385,15 @@ GitHub) is still to do; it needs his accounts.
   saved history when selected. Restoring a tab isn't recorded as a new visit.
 - **BrowserData** (`Packages/BrowserData`, GRDB 7.11.1 exact, one owner-only `browser.sqlite`):
   history (one row per space and address without the fragment, visits, typed counts, frecency
-  suggestions, inline completion, search, delete, clear, prune at a year), bookmarks (a tree per
-  space with a bar and an "Other Bookmarks" root, dense positions, move and copy across spaces,
-  import of a neutral tree that's idempotent by external id), site settings (permissions per
+  suggestions, inline completion, search, delete, clear, prune at a year), bookmarks (one tree shared by
+  every space since 2026-10-06, with a bar and an "Other Bookmarks" root, dense positions, move
+  and copy, import of a neutral tree that's idempotent by external id), site settings (permissions per
   origin, zoom per host, app-link answers per scheme; global, not per space) and the downloads
   list. Stores post a `didChange` notification on the main queue. A damaged file is moved aside
   and a new one starts; environment errors (locked, disk full) are thrown instead. 34 tests;
   suggestions take about 11 ms with 50,000 pages.
 - **Brave import mapping (P5)**: `BookmarkImportNode` is the neutral input. Map Brave's bar root's
-  children into the space's `.bar` root, "Other bookmarks" into `.other`, and "Mobile bookmarks"
+  children into the `.bar` root, "Other bookmarks" into `.other`, and "Mobile bookmarks"
   into a "Mobile Bookmarks" folder under `.other`. Brave GUIDs go in `externalID`, so a second
   import adds only what's new.
 - **History** is recorded on each main-frame commit and on same-document address changes
@@ -409,7 +412,8 @@ GitHub) is still to do; it needs his accounts.
 - **Bookmarks**: a bar under the toolbar (⌘⇧B toggles it; folders are menus), a Bookmarks menu
   rebuilt when it opens, ⌘D (bookmarks the page on the bar and opens a small editor: name,
   folder, remove; the star shows when the page is bookmarked), and ⌥⌘B a manager window
-  (space dropdown, search, folders, rename/edit, move to folder or space, copy to space, delete).
+  (search, folders, rename/edit, move to folder, delete). The bookmarks are the same in every
+  space (since 2026-10-06).
   `javascript:` bookmarklets run on the page on screen.
 - **Downloads**: `WKDownload` for attachments, types WebKit can't show, `<a download>`, and the
   context menu. Files go to ~/Downloads under a free name ("name (2).ext"; names are cleaned and
@@ -704,7 +708,7 @@ Brave profile and real "Brave Safe Storage" item are still to do.
   sign-in (trusted events) with a corrected username, unchanged sign-ins asking nothing, Never
   for This Site, the popover's rows and 0.5 s delay, a popover pick and ⌘\\ filling, close on
   navigation, the generated password, agent tabs, and reveal/lock in the manager; the import
-  of a fixture profile (bookmark tree into a space, passwords into the store with counts, a
+  of a fixture profile (bookmark tree into the bookmarks, passwords into the store with counts, a
   second import adding nothing, the Keychain not read before Continue or for bookmarks only, a
   wrong key, permission denied, no Brave).
 - **Smoke test** (Dev app on a scratch data folder and a fixture Brave profile, driven by pid
@@ -766,7 +770,8 @@ bar, popover, ⌘\\, manager window) is built: see "P3–P5 app wiring" under P3
 ### P5. Import from Brave (S)
 
 - Find Brave profiles under `~/Library/Application Support/BraveSoftware/Brave-Browser/`.
-- **Bookmarks**: read the `Bookmarks` JSON and import it into the space you pick, keeping folders.
+- **Bookmarks**: read the `Bookmarks` JSON and import it into the bookmarks (shared by every
+  space since 2026-10-06), keeping folders.
 - **Passwords**: read copies of `Login Data` and `Login Data For Account` (Brave locks the
   originals while it runs). Decrypt the `v10` values: AES-128-CBC, with a key derived by
   PBKDF2-SHA1 from the "Brave Safe Storage" Keychain item (account "Brave"), salt `saltysalt`,

@@ -2,9 +2,15 @@ import Foundation
 import GRDB
 import os
 
-/// The browser's own data in one SQLite file, `browser.sqlite`: history and bookmarks (per
-/// space), site settings and the downloads list (global). Spaces are plain string ids such as
-/// "contoso"; this package never checks them against a list.
+/// The browser's own data in one SQLite file, `browser.sqlite`: history (per space), bookmarks,
+/// site settings and the downloads list (shared by every space). Spaces are plain string ids such
+/// as "contoso"; this package never checks them against a list.
+///
+/// Before the migration that merges the old per-space bookmarks into one tree runs on a file that
+/// has some, the file is copied to `browser.before-global-bookmarks-<time>.sqlite` (owner-only).
+/// If that copy can't be made, opening fails with `BrowserDataError.backupFailed` and the file
+/// is left as it was. If the merge itself then fails, opening fails with
+/// `BrowserDataError.migrationFailed` and the file is left as it was too (not moved aside).
 ///
 /// Files are owner-only (folder 0700, database 0600). The file is opened as a GRDB
 /// `DatabasePool` in WAL mode, so every store method is safe to call from any thread, and reads
@@ -75,18 +81,16 @@ public final class BrowserDatabase: @unchecked Sendable {
         agent = AgentStore(writer: writer)
     }
 
-    /// Deletes everything belonging to a space: its history and its bookmarks (roots included;
-    /// they are recreated on next use). Site settings and downloads are global and stay.
+    /// Deletes everything belonging to a space: its history and its agent threads. Bookmarks, site
+    /// settings and downloads are shared by every space and stay.
     public func removeSpace(_ space: String) throws {
         try writer.write { db in
             try db.execute(sql: "DELETE FROM history_url WHERE space = ?", arguments: [space])
-            try db.execute(sql: "DELETE FROM bookmark WHERE space = ?", arguments: [space])
             try db.execute(sql: "DELETE FROM agent_thread WHERE space = ?", arguments: [space])
             try db.execute(sql: "DELETE FROM agent_space WHERE space = ?", arguments: [space])
             try db.execute(sql: "DELETE FROM agent_activity WHERE space = ?", arguments: [space])
         }
         ChangeNotifier.post(HistoryStore.didChange, object: history, spaces: [space])
-        ChangeNotifier.post(BookmarkStore.didChange, object: bookmarks, spaces: [space])
         ChangeNotifier.post(AgentStore.didChange, object: agent, spaces: [space])
     }
 
@@ -96,12 +100,60 @@ public final class BrowserDatabase: @unchecked Sendable {
         try SecureFile.ensureOwnerOnlyFile(url)
         let pool = try DatabasePool(path: url.path, configuration: configuration())
         do {
-            try migrator.migrate(pool)
+            let backup = try backUpBeforeGlobalBookmarks(pool, fileURL: url)
+            do {
+                try migrator.migrate(pool)
+            } catch where backup != nil {
+                // The file read fine and was just copied, so it isn't damaged: don't let the
+                // failure pass for an unreadable file and have it moved aside.
+                throw BrowserDataError.migrationFailed(String(describing: error))
+            }
         } catch {
             try? pool.close()
             throw error
         }
         return pool
+    }
+
+    /// Copies the file aside before "v3-global-bookmarks" merges the per-space bookmarks, when
+    /// there is something to merge: the old schema (a `space` column) with rows. Returns the copy,
+    /// or nil when none was needed. A file that can't even be read throws as any open does (a
+    /// damaged one is then moved aside whole). Once the copy has started, any failure throws
+    /// `BrowserDataError.backupFailed` (never a `DatabaseError`, so the file isn't taken for
+    /// unreadable and moved aside) and the migration doesn't run.
+    @discardableResult
+    static func backUpBeforeGlobalBookmarks(_ pool: DatabasePool, fileURL: URL) throws -> URL? {
+        let needed = try pool.read { db -> Bool in
+            guard try db.tableExists("bookmark"),
+                  try db.columns(in: "bookmark").contains(where: { $0.name == "space" }) else { return false }
+            return try Bool.fetchOne(db, sql: "SELECT EXISTS (SELECT 1 FROM bookmark)") ?? false
+        }
+        guard needed else { return nil }
+        let target = SecureFile.unusedSibling(of: fileURL, tag: "before-global-bookmarks")
+        do {
+            try SecureFile.createOwnerOnlyFile(target)
+        } catch {
+            throw BrowserDataError.backupFailed(String(describing: error))
+        }
+        do {
+            let copy = try DatabaseQueue(path: target.path)
+            do {
+                try pool.backup(to: copy)
+                try copy.close()
+            } catch {
+                try? copy.close()
+                throw error
+            }
+            for side in SecureFile.sideFiles(of: target) where FileManager.default.fileExists(atPath: side.path) {
+                try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: side.path)
+            }
+            log.notice("backed up browser.sqlite before merging bookmarks: \(target.lastPathComponent, privacy: .public)")
+            return target
+        } catch {
+            try? FileManager.default.removeItem(at: target)
+            for side in SecureFile.sideFiles(of: target) { try? FileManager.default.removeItem(at: side) }
+            throw BrowserDataError.backupFailed(String(describing: error))
+        }
     }
 
     /// Whether an open failure means the file itself is bad (damaged, not a database, or a schema
@@ -243,6 +295,11 @@ public final class BrowserDatabase: @unchecked Sendable {
                 CREATE INDEX agent_activity_space_at ON agent_activity(space, at);
                 """)
         }
+        // 2026-10-06: bookmarks are shared by every space. The per-space copies are merged into
+        // one tree (see `BookmarkMerge`; `open` backs the file up first).
+        migrator.registerMigration("v3-global-bookmarks") { db in
+            try BookmarkMerge.migrate(db)
+        }
         return migrator
     }
 }
@@ -259,10 +316,14 @@ public enum BrowserDataError: Error, Equatable, CustomStringConvertible {
     case cannotModifyRoot
     /// A folder can't be moved into itself or one of its own folders.
     case wouldCreateCycle
-    /// The parent folder belongs to a different space than the one named.
-    case spaceMismatch
     /// A value out of range (for example a zoom factor of zero).
     case invalidValue
+    /// The copy of the database made before a migration that rewrites data couldn't be made, so
+    /// the migration didn't run and the file is as it was.
+    case backupFailed(String)
+    /// A migration that rewrites data failed on a file that reads fine (and was backed up). The
+    /// file is left as it was rather than moved aside.
+    case migrationFailed(String)
 
     public var description: String {
         switch self {
@@ -271,8 +332,9 @@ public enum BrowserDataError: Error, Equatable, CustomStringConvertible {
         case .notABookmark: return "A folder has no address."
         case .cannotModifyRoot: return "The Bookmarks Bar and Other Bookmarks folders can't be changed."
         case .wouldCreateCycle: return "A folder can't be moved into itself."
-        case .spaceMismatch: return "The folder belongs to another space."
         case .invalidValue: return "The value is out of range."
+        case .migrationFailed(let why): return "The browser data couldn't be updated, so it was left as it was: \(why)"
+        case .backupFailed(let why): return "The browser data couldn't be backed up before updating it, so it wasn't changed: \(why)"
         }
     }
 }

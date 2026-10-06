@@ -70,10 +70,10 @@ For sign-in problems, also copy the last lines of Settings (⌘,) ▸ Accounts �
 
 ## 5. Brave bookmarks and passwords; autofill on 10 sites
 
-1. File ▸ Import from Brave… Pick your profile, the space for bookmarks (Personal), tick
+1. File ▸ Import from Brave… Pick your profile, tick
    Bookmarks and Passwords, Continue. macOS asks once to let iSmith read Brave's data (Allow) and
    for your Mac password for "Brave Safe Storage" (Always Allow).
-   - See: the result screen's counts. Bookmarks appear in the bar and ⌥⌘B. ⌥⌘P lists the
+   - See: the result screen's counts. Bookmarks appear in the bar (the same in every space) and ⌥⌘B. ⌥⌘P lists the
      passwords.
    - Check the counts: in Brave, Settings ▸ Passwords ▸ Export passwords, and count the CSV's
      rows; iSmith's "added + already there + updated + kept" should match, minus rows reported as

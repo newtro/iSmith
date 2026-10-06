@@ -39,8 +39,9 @@ struct Suggestion: Identifiable, Equatable {
     }
 }
 
-/// Builds the address bar's suggestions: what Return does first, then open tabs, bookmarks and
-/// history (the current space first, then others), then a search. History queries run off the
+/// Builds the address bar's suggestions: what Return does first, then the space's open tabs,
+/// bookmarks (shared by every space, so never labelled with one) and history (the current space
+/// first, then others, labelled), then a search. History queries run off the
 /// main thread; a newer keystroke makes an older answer irrelevant.
 @MainActor
 enum AddressSuggestions {
@@ -61,7 +62,7 @@ enum AddressSuggestions {
         let (visited, completion, marked) = await Task.detached(priority: .userInitiated) { () -> ([HistorySuggestion], String?, [Bookmark]) in
             let visited = (try? history?.suggestions(for: typed, space: space, limit: 8)) ?? []
             let completion = typed.contains(" ") ? nil : (try? history?.inlineCompletion(for: typed, space: space)) ?? nil
-            let marked = (try? bookmarks?.search(typed, space: space, limit: 4)) ?? []
+            let marked = (try? bookmarks?.search(typed, limit: 4)) ?? []
             return (visited, completion, marked)
         }.value
 

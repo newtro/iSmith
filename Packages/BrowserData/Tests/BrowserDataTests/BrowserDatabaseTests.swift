@@ -37,7 +37,7 @@ final class BrowserDatabaseTests: XCTestCase {
         do {
             let db = try BrowserDatabase(fileURL: dbURL)
             try db.history.recordVisit(space: "s", url: URL(string: "https://a.com")!, title: "A")
-            try db.bookmarks.add(space: "s", parent: nil, title: "B", url: "https://b.com")
+            try db.bookmarks.add(parent: nil, title: "B", url: "https://b.com")
             try db.sites.setZoom(1.1, host: "a.com")
         }
         // Loosened permissions are tightened again on open.
@@ -46,10 +46,10 @@ final class BrowserDatabaseTests: XCTestCase {
         XCTAssertNil(db.movedAside)
         XCTAssertEqual(try permissions(dbURL), 0o600)
         XCTAssertEqual(try db.history.visits(space: "s", matching: "", limit: 10).map(\.title), ["A"])
-        XCTAssertEqual(try db.bookmarks.search("b.com", space: "s", limit: 10).count, 1)
+        XCTAssertEqual(try db.bookmarks.search("b.com", limit: 10).count, 1)
         XCTAssertEqual(try db.sites.zoom(host: "a.com"), 1.1)
         let applied = try db.writer.read { try BrowserDatabase.migrator.appliedMigrations($0) }
-        XCTAssertEqual(applied, ["v1", "v2-agent"])
+        XCTAssertEqual(applied, ["v1", "v2-agent", "v3-global-bookmarks"])
         XCTAssertEqual(try db.writer.read { try BrowserDatabase.migrator.hasCompletedMigrations($0) }, true)
     }
 

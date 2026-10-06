@@ -481,7 +481,7 @@ final class BrowserState: NSObject, ObservableObject {
         guard let state = space(id) else { return }
         let alert = NSAlert()
         alert.messageText = "Delete \(state.def.name)?"
-        alert.informativeText = "Closes its tabs in every window and deletes its browsing data. Accounts it uses stay signed in for other spaces."
+        alert.informativeText = "Closes its tabs in every window and deletes its browsing history. Bookmarks are shared by every space and stay. Accounts it uses stay signed in for other spaces."
         alert.addButton(withTitle: "Delete")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }

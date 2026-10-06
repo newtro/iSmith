@@ -77,8 +77,8 @@ iSmith's own per-tab browser tools.
   JSON-RPC over stdio: threads, turns, streamed events, iSmith's dynamic tools, approvals,
   restart and resume). Its tests drive `FakeCodexAppServer`, a stand-in executable in the
   package, so they never use Codex or a subscription.
-- `Packages/BrowserData/`: `browser.sqlite` through GRDB: history and bookmarks per space, site
-  settings (permissions, zoom, app-link answers) and the downloads list. No UI.
+- `Packages/BrowserData/`: `browser.sqlite` through GRDB: history per space, bookmarks (shared by
+  every space), site settings (permissions, zoom, app-link answers) and the downloads list. No UI.
 - `AppTests/`: tests that run inside the signed app.
 - `project.yml`: the XcodeGen spec. `iSmith.xcodeproj` is generated from it and not committed.
 
@@ -129,7 +129,7 @@ seed or runs longer.
 - `browser.sqlite` also holds the agent panel's chats (Codex thread ids, names and dates; the
   messages stay with Codex in `~/.codex`), each space's agent mode, working folder and model, and
   the activity log (what each tool acted on, never typed text or page content; kept a year).
-- `browser.sqlite` holds history and bookmarks (per space), site settings (camera, microphone,
+- `browser.sqlite` holds history (per space), bookmarks (shared by every space), site settings (camera, microphone,
   location and notification answers per site, zoom per site, app-link answers per scheme) and
   the downloads list. History older than a year is removed at launch.
 - On first launch, the Release app imports the spike's config and saved sign-ins from
@@ -171,12 +171,14 @@ seed or runs longer.
   counts update and calls ring. Right-click any tab to turn it on or off (a bolt marks it).
 - **Windows**: ⌘N opens a window; each window shows one space at a time and has its own tabs.
   "Move Tab to New Window" is in the Window menu and a tab's context menu.
-- **Address bar**: suggestions from the space's open tabs, bookmarks and history (other spaces
-  labelled), with the rest of an address completed inline; ↑/↓ and Return, ⌘Return for a new
+- **Address bar**: suggestions from the space's open tabs, bookmarks and history (other spaces'
+  history labelled), with the rest of an address completed inline; ↑/↓ and Return, ⌘Return for a new
   tab. The search engine is in Settings ▸ General.
 - **History and bookmarks**: ⌘Y history (per space, searchable). ⌘D bookmarks the page (the star
   shows it); ⌘⇧B shows or hides the bookmarks bar; ⌥⌘B opens the bookmarks manager; the
-  Bookmarks menu lists the space's bookmarks.
+  Bookmarks menu lists the bookmarks. Bookmarks are shared by every space: one bar, menu and
+  manager everywhere (bookmarks kept per space by versions before 2026-10-06 are merged into one
+  set the first time a newer version opens, after a backup copy of `browser.sqlite`).
 - **Page**: ⌘F find (⌘G, ⇧⌘G), ⌘+ ⌘− ⌘0 zoom (kept per site), ⌘P print. PDFs open in the tab;
   videos go full screen and picture in picture. Right-click a link to open it in a new tab or
   another space, copy it or download it; right-click an image to save it.
@@ -202,8 +204,9 @@ seed or runs longer.
   ⌥⌘P opens the Passwords window: search, weak and reused passwords, edit, add and delete.
   Showing or copying a password asks for Touch ID or your Mac password; copies are cleared from
   the clipboard after a minute and don't go to other devices.
-- **Import from Brave** (offered at first launch, and in the File menu): pick the profile and
-  the space for the bookmarks; passwords go to the password store. macOS asks once for
+- **Import from Brave** (offered at first launch, and in the File menu): pick the profile; the
+  bookmarks go into the bookmarks every space shares (a later import adds only what isn't there
+  yet), passwords into the password store. macOS asks once for
   permission to read Brave's data (Privacy & Security ▸ Files & Folders if you said no) and for
   your Mac password to use the "Brave Safe Storage" key.
 - **Agent panel** (needs Codex: `npm install -g @openai/codex`, then `codex login`): the toolbar's

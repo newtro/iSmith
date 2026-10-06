@@ -77,8 +77,9 @@ extension BrowserState {
         scheduleRefresh()
     }
 
-    /// Bookmarks tabs in the space. Several go into a new folder in Other Bookmarks, named for the
-    /// space and the date; one goes on the bookmarks bar (unless it's already bookmarked).
+    /// Bookmarks tabs in the space. Several go into a new folder in Other Bookmarks (shared by
+    /// every space), named for the space they came from and the date; one goes on the bookmarks
+    /// bar (unless it's already bookmarked).
     /// Returns the folder (or bookmark) made, nil if there was nothing to bookmark.
     @discardableResult
     func bookmarkAll(_ ids: [UUID], in tabs: SpaceTabs) -> Bookmark? {
@@ -89,15 +90,15 @@ extension BrowserState {
         }
         guard !pages.isEmpty else { return nil }
         if pages.count == 1, let (title, url) = pages.first {
-            if let existing = try? store.bookmarks(space: tabs.spaceID, url: url.absoluteString).first { return existing }
-            return try? store.add(space: tabs.spaceID, parent: nil, title: title, url: url.absoluteString)
+            if let existing = try? store.bookmarks(url: url.absoluteString).first { return existing }
+            return try? store.add(parent: nil, title: title, url: url.absoluteString)
         }
         let name = (space(tabs.spaceID)?.def.name ?? "Tabs") + " tabs, "
             + Date().formatted(date: .abbreviated, time: .shortened)
-        guard let other = try? store.root(.other, space: tabs.spaceID),
-              let folder = try? store.addFolder(space: tabs.spaceID, parent: other.id, title: name) else { return nil }
+        guard let other = try? store.root(.other),
+              let folder = try? store.addFolder(parent: other.id, title: name) else { return nil }
         for (title, url) in pages {
-            _ = try? store.add(space: tabs.spaceID, parent: folder.id, title: title, url: url.absoluteString)
+            _ = try? store.add(parent: folder.id, title: title, url: url.absoluteString)
         }
         tabs.marked = []
         return folder

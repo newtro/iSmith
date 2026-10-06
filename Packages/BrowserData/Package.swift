@@ -1,8 +1,8 @@
 // swift-tools-version: 5.10
 import PackageDescription
 
-/// iSmith's browsing data in one SQLite file (`browser.sqlite`): history and bookmarks per space,
-/// site settings (permissions, zoom, app links) and the downloads list. No UI.
+/// iSmith's browsing data in one SQLite file (`browser.sqlite`): history per space, bookmarks (shared
+/// by every space), site settings (permissions, zoom, app links) and the downloads list. No UI.
 let package = Package(
     name: "BrowserData",
     platforms: [.macOS(.v14)],
