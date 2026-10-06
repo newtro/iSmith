@@ -76,6 +76,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         #if DEBUG
         PerfHarness.runIfRequested(browser)
         #endif
+        #if ISMITH_UPDATE_TEST
+        UpdateTestHook.run(browser, updater: updater)
+        #endif
     }
 
     /// The first launch on a data folder offers the Brave import once, if Brave is installed.
@@ -190,12 +193,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         historyWindow?.window?.makeKeyAndOrderFront(nil)
     }
 
-    /// ⌥⌘B: the bookmarks manager, on the current window's space.
+    /// ⌥⌘B: the bookmarks manager (the bookmarks are the same in every space).
     func showBookmarks() {
-        guard let browser, let space = browser.currentWindow?.activeSpaceID ?? browser.spaces.first?.id else { return }
+        guard let browser else { return }
         if bookmarksWindow == nil {
             bookmarksWindow = Self.libraryWindow(title: "Bookmarks", size: NSSize(width: 720, height: 560),
-                                                 view: BookmarksManager(space: space).environmentObject(browser))
+                                                 view: BookmarksManager().environmentObject(browser))
         }
         bookmarksWindow?.showWindow(nil)
         bookmarksWindow?.window?.makeKeyAndOrderFront(nil)

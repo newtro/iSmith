@@ -31,8 +31,11 @@ biggest single pieces.
 
 - **Passwords are global, not per space.** A login for a site autofills in any space. Sign-in
   sessions are already shared, so per-space passwords would add friction for no gain.
-- **Bookmarks belong to spaces.** Brave bookmarks import into a space you pick. A bookmark can be
-  moved or copied to another space.
+- **Bookmarks are shared by all spaces** (changed 2026-10-06; they used to belong to a space).
+  One bookmarks bar, one Bookmarks menu and one bookmarks manager, the same in every space; a
+  bookmark opens in the space you are in. Brave bookmarks import into that one set. The
+  per-space copies an older version kept are merged into one tree by a database migration
+  (`v3-global-bookmarks`; the file is backed up first).
 - **History is per space.** Address-bar suggestions come from the current space first, then the
   other spaces.
 - **Multiple windows.** Each window shows one space at a time. A space's tabs belong to the window
@@ -382,15 +385,15 @@ GitHub) is still to do; it needs his accounts.
   saved history when selected. Restoring a tab isn't recorded as a new visit.
 - **BrowserData** (`Packages/BrowserData`, GRDB 7.11.1 exact, one owner-only `browser.sqlite`):
   history (one row per space and address without the fragment, visits, typed counts, frecency
-  suggestions, inline completion, search, delete, clear, prune at a year), bookmarks (a tree per
-  space with a bar and an "Other Bookmarks" root, dense positions, move and copy across spaces,
-  import of a neutral tree that's idempotent by external id), site settings (permissions per
+  suggestions, inline completion, search, delete, clear, prune at a year), bookmarks (one tree shared by
+  every space since 2026-10-06, with a bar and an "Other Bookmarks" root, dense positions, move
+  and copy, import of a neutral tree that's idempotent by external id), site settings (permissions per
   origin, zoom per host, app-link answers per scheme; global, not per space) and the downloads
   list. Stores post a `didChange` notification on the main queue. A damaged file is moved aside
   and a new one starts; environment errors (locked, disk full) are thrown instead. 34 tests;
   suggestions take about 11 ms with 50,000 pages.
 - **Brave import mapping (P5)**: `BookmarkImportNode` is the neutral input. Map Brave's bar root's
-  children into the space's `.bar` root, "Other bookmarks" into `.other`, and "Mobile bookmarks"
+  children into the `.bar` root, "Other bookmarks" into `.other`, and "Mobile bookmarks"
   into a "Mobile Bookmarks" folder under `.other`. Brave GUIDs go in `externalID`, so a second
   import adds only what's new.
 - **History** is recorded on each main-frame commit and on same-document address changes
@@ -409,7 +412,8 @@ GitHub) is still to do; it needs his accounts.
 - **Bookmarks**: a bar under the toolbar (⌘⇧B toggles it; folders are menus), a Bookmarks menu
   rebuilt when it opens, ⌘D (bookmarks the page on the bar and opens a small editor: name,
   folder, remove; the star shows when the page is bookmarked), and ⌥⌘B a manager window
-  (space dropdown, search, folders, rename/edit, move to folder or space, copy to space, delete).
+  (search, folders, rename/edit, move to folder, delete). The bookmarks are the same in every
+  space (since 2026-10-06).
   `javascript:` bookmarklets run on the page on screen.
 - **Downloads**: `WKDownload` for attachments, types WebKit can't show, `<a download>`, and the
   context menu. Files go to ~/Downloads under a free name ("name (2).ext"; names are cleaned and
@@ -704,7 +708,7 @@ Brave profile and real "Brave Safe Storage" item are still to do.
   sign-in (trusted events) with a corrected username, unchanged sign-ins asking nothing, Never
   for This Site, the popover's rows and 0.5 s delay, a popover pick and ⌘\\ filling, close on
   navigation, the generated password, agent tabs, and reveal/lock in the manager; the import
-  of a fixture profile (bookmark tree into a space, passwords into the store with counts, a
+  of a fixture profile (bookmark tree into the bookmarks, passwords into the store with counts, a
   second import adding nothing, the Keychain not read before Continue or for bookmarks only, a
   wrong key, permission denied, no Brave).
 - **Smoke test** (Dev app on a scratch data folder and a fixture Brave profile, driven by pid
@@ -766,7 +770,8 @@ bar, popover, ⌘\\, manager window) is built: see "P3–P5 app wiring" under P3
 ### P5. Import from Brave (S)
 
 - Find Brave profiles under `~/Library/Application Support/BraveSoftware/Brave-Browser/`.
-- **Bookmarks**: read the `Bookmarks` JSON and import it into the space you pick, keeping folders.
+- **Bookmarks**: read the `Bookmarks` JSON and import it into the bookmarks (shared by every
+  space since 2026-10-06), keeping folders.
 - **Passwords**: read copies of `Login Data` and `Login Data For Account` (Brave locks the
   originals while it runs). Decrypt the `v10` values: AES-128-CBC, with a key derived by
   PBKDF2-SHA1 from the "Brave Safe Storage" Keychain item (account "Brave"), salt `saltysalt`,
@@ -1282,3 +1287,44 @@ The engineering half is done; the acceptance run on Scott's accounts is next, fo
   (the test host can't record the screen itself). Real pointer drags weren't driven: synthesizing
   input into the app's window from outside isn't possible without global input, so the drag
   path is checked through AppKit's title-bar answer and a drop driven in code.
+
+### Saved passwords after updates (2026-10-06)
+
+- **Reported**: after a Sparkle update the Passwords window looked empty and sign-in pages
+  offered nothing, until the passwords were imported from Brave again. No alert was shown.
+- **Checked**: two Release builds with their own bundle id, signed as releases are (archive,
+  then export for Developer ID), updated A→B by Sparkle itself, both "Install and Relaunch" and
+  install-on-quit, with 5, 500 and 1,500 logins. B opened the same file with the same Keychain key
+  and every login decrypted, in the store and in the Passwords window. The Keychain item for the
+  key is the one created on 2026-10-03 and was never replaced, and the installed app logged no
+  "moved aside" or "key unreadable" error at any of the day's four update launches (1.1.2, 1.1.3,
+  1.2.0, 1.2.1). So the update itself doesn't drop or re-key saved passwords; what the user saw
+  isn't explained by the store's opening path.
+- **Fixed** (the silent paths that could look like this):
+  - A file that can't be read just now (locked by another process, a disk or permissions error)
+    used to count as "unreadable" and was moved aside, leaving an empty store. Now only a file
+    sealed with another key, or not a passwords database, is moved aside; anything else is
+    `databaseUnavailable` and the app asks "Try Again".
+  - With no key in the Keychain, the file was moved aside before the new key was saved; if the
+    save then failed and the user tried again, the new empty store opened with no word about
+    the old file. The key is saved first now, and a refused save changes nothing.
+  - Any other error opening the store only logged and turned passwords off; it's an alert now.
+  - Logins that don't decrypt were only a banner in the Passwords window, and autofill read
+    errors were swallowed. At launch the app now says how many of how many don't decrypt, and
+    autofill logs read errors.
+  - Copies set aside earlier (`passwords.unreadable-<time>.sqlite`) are opened at launch: logins
+    that decrypt with the current key and aren't saved yet are added back (the store is backed
+    up first as `passwords.before-restore-<time>.sqlite`; nothing is removed or overwritten, and
+    the copy is only read). Each copy is restored once (marked in the store's `meta` table, so a
+    login deleted afterwards stays deleted), newest copy first. A copy sealed with another key
+    is mentioned once.
+  - browser.sqlite that can't be opened (including a bookmarks migration that failed or
+    couldn't back up first) used to turn history and bookmarks off with only a log line; it's an
+    alert at launch now.
+  - Every launch logs `passwords store opened: N logins, M unreadable, K restored` (counts only)
+    under `com.scottsmith.ismith`/`passwords`, so the next report can be checked against what
+    the file held.
+- `Tools/update-test.sh` repeats the update check (Developer ID builds A and B, a throwaway
+  EdDSA key, a local appcast, Sparkle's installer) on a scratch folder; the builds use
+  `com.scottsmith.ismith.updatetest` and `App/UpdateTestHook.swift`, which only compiles with
+  `ISMITH_UPDATE_TEST`.

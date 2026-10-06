@@ -3,7 +3,7 @@ import BrowserData
 import SwiftUI
 import WebKit
 
-// History (⌘Y) and bookmarks (bar, menu, manager), per space.
+// History (⌘Y, per space) and bookmarks (bar, menu, manager; one set shared by every space).
 
 extension BrowserState {
     /// Opens a bookmark in the window's current space: in the tab on screen, or a new tab. A
@@ -31,17 +31,17 @@ extension BrowserState {
         window.window?.makeKeyAndOrderFront(nil)
     }
 
-    /// ⌘D: the page's bookmark in this space, created on the bookmarks bar if there isn't one.
+    /// ⌘D: the page's bookmark, created on the bookmarks bar if there isn't one.
     func bookmarkForCurrentPage(in window: WindowState) -> Bookmark? {
-        guard let store = data?.bookmarks, let spaceID = window.activeSpaceID, let tab = window.active?.selected,
+        guard let store = data?.bookmarks, let tab = window.active?.selected,
               let url = tab.url, ["http", "https", "file"].contains(url.scheme ?? "") else { return nil }
-        if let existing = try? store.bookmarks(space: spaceID, url: url.absoluteString).first { return existing }
-        return try? store.add(space: spaceID, parent: nil, title: tab.title, url: url.absoluteString)
+        if let existing = try? store.bookmarks(url: url.absoluteString).first { return existing }
+        return try? store.add(parent: nil, title: tab.title, url: url.absoluteString)
     }
 
-    func isBookmarked(_ url: URL?, space: String) -> Bool {
+    func isBookmarked(_ url: URL?) -> Bool {
         guard let url else { return false }
-        return !((try? data?.bookmarks.bookmarks(space: space, url: url.absoluteString)) ?? []).isEmpty
+        return !((try? data?.bookmarks.bookmarks(url: url.absoluteString)) ?? []).isEmpty
     }
 }
 
@@ -165,11 +165,10 @@ struct HistoryView: View {
 
 // MARK: - Bookmarks manager
 
-/// ⌥⌘B: a space's bookmarks as a tree. Rename, change the address, add folders, move between
-/// folders and spaces, copy to another space, delete.
+/// ⌥⌘B: the bookmarks (shared by every space) as a tree. Rename, change the address, add
+/// folders, move between folders, delete. Opening one opens it in the current window's space.
 struct BookmarksManager: View {
     @EnvironmentObject private var browser: BrowserState
-    @State var space: String
     @State private var tree: [BookmarkTree] = []
     @State private var query = ""
     @State private var results: [Bookmark] = []
@@ -182,11 +181,6 @@ struct BookmarksManager: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 10) {
-                Picker("Space", selection: $space) {
-                    ForEach(browser.spaces) { Text($0.def.name).tag($0.id) }
-                }
-                .labelsHidden()
-                .frame(width: 180)
                 TextField("Search bookmarks", text: $query).textFieldStyle(.roundedBorder)
                 Button { newFolder() } label: { Label("New Folder", systemImage: "folder.badge.plus") }
             }
@@ -206,7 +200,6 @@ struct BookmarksManager: View {
             BookmarkEditSheet(bookmark: bookmark) { editing = nil }
         }
         .onAppear(perform: reload)
-        .onChange(of: space) { _, _ in reload() }
         .onChange(of: query) { _, _ in reload() }
         .onReceive(NotificationCenter.default.publisher(for: BookmarkStore.didChange)) { _ in reload() }
     }
@@ -245,18 +238,8 @@ struct BookmarksManager: View {
         if b.root == nil {
             Button(b.isFolder ? "Rename…" : "Edit…") { editing = b }
             Menu("Move to Folder") {
-                ForEach(BookmarkFolders.list(browser.data?.bookmarks, space: space).filter { $0.id != b.id }, id: \.id) { folder in
+                ForEach(BookmarkFolders.list(browser.data?.bookmarks).filter { $0.id != b.id }, id: \.id) { folder in
                     Button(folder.name) { try? browser.data?.bookmarks.move(b.id, to: folder.id, at: nil) }
-                }
-            }
-            Menu("Move to Space") {
-                ForEach(browser.spaces.filter { $0.id != space }) { other in
-                    Button(other.def.name) { moveOrCopy(b, to: other.id, copy: false) }
-                }
-            }
-            Menu("Copy to Space") {
-                ForEach(browser.spaces.filter { $0.id != space }) { other in
-                    Button(other.def.name) { moveOrCopy(b, to: other.id, copy: true) }
                 }
             }
             Divider()
@@ -268,15 +251,15 @@ struct BookmarksManager: View {
     private func reload() {
         let store = browser.data?.bookmarks
         // Both roots exist from the start, so the tree always shows them.
-        _ = try? store?.root(.bar, space: space)
-        _ = try? store?.root(.other, space: space)
-        tree = (try? store?.tree(space: space)) ?? []
-        results = query.isEmpty ? [] : ((try? store?.search(query, space: space, limit: 200)) ?? [])
+        tree = (try? store?.tree()) ?? []
+        results = query.isEmpty ? [] : ((try? store?.search(query, limit: 200)) ?? [])
     }
 
+    /// In a new tab in the current window's space.
     private func open(_ b: Bookmark) {
-        guard let s = b.url, let url = URL(string: s), let window = browser.currentWindow else { return }
-        browser.open(url, space: b.space, in: window)
+        guard let s = b.url, let url = URL(string: s), let window = browser.currentWindow,
+              let space = window.activeSpaceID ?? browser.spaces.first?.id else { return }
+        browser.open(url, space: space, in: window)
     }
 
     private func delete(_ id: Int64) {
@@ -286,13 +269,7 @@ struct BookmarksManager: View {
     private func newFolder(in parent: Int64? = nil) {
         guard let store = browser.data?.bookmarks else { return }
         let target = parent ?? (selection.flatMap { try? store.bookmark(id: $0) }.flatMap { $0.isFolder ? $0.id : $0.parentID })
-        if let folder = try? store.addFolder(space: space, parent: target, title: "New Folder") { editing = folder }
-    }
-
-    /// Into the other space's "Other Bookmarks".
-    private func moveOrCopy(_ b: Bookmark, to other: String, copy: Bool) {
-        guard let store = browser.data?.bookmarks, let root = try? store.root(.other, space: other) else { return }
-        if copy { _ = try? store.copy(b.id, to: root.id, at: nil) } else { try? store.move(b.id, to: root.id, at: nil) }
+        if let folder = try? store.addFolder(parent: target, title: "New Folder") { editing = folder }
     }
 }
 
@@ -328,8 +305,8 @@ private struct BookmarkEditSheet: View {
 
 // MARK: - Bookmarks menu
 
-/// The Bookmarks menu in the menu bar: the current space's bar and other bookmarks, rebuilt each
-/// time it opens.
+/// The Bookmarks menu in the menu bar: the bookmarks bar and other bookmarks (the same in every
+/// space), rebuilt each time it opens. Bookmarks open in the current window's space.
 @MainActor
 final class BookmarksMenu: NSObject, NSMenuDelegate {
     private let browser: BrowserState
@@ -342,8 +319,8 @@ final class BookmarksMenu: NSObject, NSMenuDelegate {
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         while menu.items.count > fixedCount { menu.removeItem(at: fixedCount) }
-        guard let window = browser.currentWindow, let space = window.activeSpaceID,
-              let tree = try? browser.data?.bookmarks.tree(space: space) else { return }
+        guard let window = browser.currentWindow, window.activeSpaceID != nil,
+              let tree = try? browser.data?.bookmarks.tree() else { return }
         menu.addItem(.separator())
         for root in tree {
             if root.bookmark.root == .bar {

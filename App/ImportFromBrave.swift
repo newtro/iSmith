@@ -5,7 +5,8 @@ import Passwords
 import SwiftUI
 
 // P5: bookmarks and passwords from Brave. The BraveImport package reads Brave (read-only); this
-// maps its bookmark tree into a space's bookmarks (BrowserData) and its logins into the P4
+// maps its bookmark tree into iSmith's bookmarks (BrowserData; one set shared by every space)
+// and its logins into the P4
 // password store, and draws the first-run screen and File ▸ Import from Brave….
 //
 // The "Brave Safe Storage" Keychain item is only read once the user starts a password import,
@@ -13,7 +14,6 @@ import SwiftUI
 
 /// What an import did, for the result screen.
 struct BookmarkImportSummary: Equatable {
-    var space: String
     /// In the Brave profile.
     var bookmarksInBrave = 0
     var foldersInBrave = 0
@@ -92,8 +92,8 @@ enum BraveImporter {
         }
     }
 
-    /// Brave's roots mapped to a space's (BrowserData's rule): the bookmarks bar's contents into
-    /// the space's bar, "Other bookmarks" into Other Bookmarks, and "Mobile bookmarks" (and any
+    /// Brave's roots mapped to iSmith's (BrowserData's rule): the bookmarks bar's contents into
+    /// the bookmarks bar, "Other bookmarks" into Other Bookmarks, and "Mobile bookmarks" (and any
     /// root this version doesn't know) as a folder of its own in Other Bookmarks. Folders and
     /// order are kept; Brave's ids make a second import add only what's new.
     static func plan(_ bookmarks: BraveBookmarks) -> (bar: [BookmarkImportNode], other: [BookmarkImportNode]) {
@@ -116,13 +116,13 @@ enum BraveImporter {
         return (bar, other)
     }
 
-    static func importBookmarks(_ bookmarks: BraveBookmarks, space: String, spaceName: String,
-                                into store: BookmarkStore) throws -> BookmarkImportSummary {
+    /// Into the bookmarks every space shares. What's already there (by Brave's id, wherever it
+    /// was put since) isn't added again.
+    static func importBookmarks(_ bookmarks: BraveBookmarks, into store: BookmarkStore) throws -> BookmarkImportSummary {
         let (bar, other) = plan(bookmarks)
-        var summary = BookmarkImportSummary(space: spaceName, bookmarksInBrave: bookmarks.bookmarkCount,
-                                            foldersInBrave: bookmarks.folderCount)
+        var summary = BookmarkImportSummary(bookmarksInBrave: bookmarks.bookmarkCount, foldersInBrave: bookmarks.folderCount)
         for (nodes, root) in [(bar, BookmarkRoot.bar), (other, .other)] where !nodes.isEmpty {
-            let result = try store.importTree(nodes, space: space, into: store.root(root, space: space).id)
+            let result = try store.importTree(nodes, into: store.root(root).id)
             summary.bookmarksAdded += result.bookmarksAdded
             summary.foldersAdded += result.foldersAdded
             summary.alreadyThere += result.skipped
@@ -227,7 +227,6 @@ final class ImportFromBraveModel: ObservableObject {
     @Published var profileID = ""
     @Published var importBookmarks = true
     @Published var importPasswords = true
-    @Published var spaceID: String
     @Published private(set) var bookmarkSummary: BookmarkImportSummary?
     @Published private(set) var passwordSummary: PasswordImportSummary?
     @Published private(set) var passwordProblem: String?
@@ -237,7 +236,6 @@ final class ImportFromBraveModel: ObservableObject {
         self.browser = browser
         self.firstRun = firstRun
         self.root = root
-        spaceID = browser.currentWindow?.activeSpaceID ?? browser.spaces.first?.id ?? ""
     }
 
     var profile: BraveProfile? { profiles.first { $0.id == profileID }?.profile }
@@ -293,11 +291,11 @@ final class ImportFromBraveModel: ObservableObject {
         bookmarkSummary = nil
         passwordSummary = nil
         passwordProblem = nil
-        if importBookmarks, let store = browser.data?.bookmarks, let space = browser.space(spaceID) {
+        if importBookmarks, let store = browser.data?.bookmarks {
             phase = .importing("Importing bookmarks…")
             do {
                 let bookmarks = try BookmarksReader.read(profile: profile)
-                bookmarkSummary = try BraveImporter.importBookmarks(bookmarks, space: space.id, spaceName: space.def.name, into: store)
+                bookmarkSummary = try BraveImporter.importBookmarks(bookmarks, into: store)
             } catch BraveAccessError.permissionDenied {
                 phase = .permissionDenied
                 return
@@ -438,11 +436,7 @@ struct ImportFromBraveView: View {
             }
             .onChange(of: model.profileID) { _, _ in model.profileChanged() }
             Toggle("Bookmarks", isOn: $model.importBookmarks).disabled(!model.canImportBookmarks)
-            Picker("Into space", selection: $model.spaceID) {
-                ForEach(browser.spaces) { space in Text(space.def.name).tag(space.id) }
-            }
-            .disabled(!model.importBookmarks)
-            Text("The bookmarks bar goes to the space's bookmarks bar, everything else to Other Bookmarks, folders and all.")
+            Text("Bookmarks work in every space. The bookmarks bar goes to the bookmarks bar, everything else to Other Bookmarks, folders and all. Ones already imported aren't added again.")
                 .font(.caption).foregroundStyle(.secondary)
             Toggle("Passwords", isOn: $model.importPasswords).disabled(!model.canImportPasswords)
             Text(model.canImportPasswords ? "Passwords work in every space."
@@ -499,7 +493,7 @@ struct ImportFromBraveView: View {
         VStack(alignment: .leading, spacing: 10) {
             if let b = model.bookmarkSummary {
                 Label {
-                    Text("Bookmarks: \(b.bookmarksAdded) added to \(b.space), in \(b.foldersAdded) new folder\(b.foldersAdded == 1 ? "" : "s").")
+                    Text("Bookmarks: \(b.bookmarksAdded) added, in \(b.foldersAdded) new folder\(b.foldersAdded == 1 ? "" : "s").")
                     + Text(b.alreadyThere > 0 ? " \(b.alreadyThere) were already there." : "")
                     + Text(" Brave has \(b.bookmarksInBrave) bookmark\(b.bookmarksInBrave == 1 ? "" : "s") in \(b.foldersInBrave) folder\(b.foldersInBrave == 1 ? "" : "s").")
                 } icon: { Image(systemName: "book") }

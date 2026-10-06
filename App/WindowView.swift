@@ -251,7 +251,7 @@ private struct SpaceView: View {
                     .background { if topInset > 0 { WindowDragArea() } }
                     .id(tab.id)
                 if showBookmarksBar, browser.data != nil {
-                    BookmarksBar(window: window, spaceID: space.id)
+                    BookmarksBar(window: window)
                 }
                 RoutingBars(routing: browser.routing, window: window)
                 AgentDocked(window: window, space: space) {
@@ -365,7 +365,7 @@ private struct Toolbar: View {
                     }
                     .help("Bookmark this page  ⌘D")
                     .popover(item: $editingBookmark, arrowEdge: .bottom) { bookmark in
-                        BookmarkEditor(spaceID: space.id, bookmark: bookmark) { editingBookmark = nil }
+                        BookmarkEditor(bookmark: bookmark) { editingBookmark = nil }
                     }
                 }
             }
@@ -477,7 +477,7 @@ private struct Toolbar: View {
     }
 
     private func updateBookmarked(_ url: URL? = nil) {
-        bookmarked = browser.isBookmarked(url ?? tab.url, space: space.id)
+        bookmarked = browser.isBookmarked(url ?? tab.url)
     }
 
     private var exceptions: [String] {

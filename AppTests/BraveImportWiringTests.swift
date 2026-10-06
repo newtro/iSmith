@@ -122,7 +122,6 @@ final class BraveImportWiringTests: XCTestCase {
         XCTAssertEqual(model.profiles.first?.bookmarks, 4)
         XCTAssertTrue(model.importBookmarks)
         XCTAssertTrue(model.importPasswords)
-        model.spaceID = wired.spaceID
 
         // "Import" with passwords first explains macOS's Keychain prompt; nothing is read yet.
         model.start()
@@ -134,9 +133,9 @@ final class BraveImportWiringTests: XCTestCase {
 
         // Bookmarks: the bar into the space's bar, the rest into Other Bookmarks, folders kept.
         let bookmarks = try XCTUnwrap(model.bookmarkSummary)
-        XCTAssertEqual(bookmarks, BookmarkImportSummary(space: "Fixture", bookmarksInBrave: 4, foldersInBrave: 1,
+        XCTAssertEqual(bookmarks, BookmarkImportSummary(bookmarksInBrave: 4, foldersInBrave: 1,
                                                         bookmarksAdded: 4, foldersAdded: 2, alreadyThere: 0))
-        let tree = try XCTUnwrap(browser.data?.bookmarks.tree(space: wired.spaceID))
+        let tree = try XCTUnwrap(browser.data?.bookmarks.tree())
         let bar = try XCTUnwrap(tree.first { $0.bookmark.root == .bar })
         let other = try XCTUnwrap(tree.first { $0.bookmark.root == .other })
         XCTAssertEqual(titles(bar.children), ["GitHub", "Work/[DevOps]"])
@@ -168,7 +167,7 @@ final class BraveImportWiringTests: XCTestCase {
         XCTAssertEqual(model.passwordSummary?.unchanged, 2)
         XCTAssertEqual(model.passwordSummary?.imported, 0)
         XCTAssertEqual(try store.allLogins().count, 3)
-        let again = try XCTUnwrap(browser.data?.bookmarks.tree(space: wired.spaceID))
+        let again = try XCTUnwrap(browser.data?.bookmarks.tree())
         XCTAssertEqual(titles(try XCTUnwrap(again.first { $0.bookmark.root == .bar }).children), ["GitHub", "Work/[DevOps]"])
     }
 
@@ -178,7 +177,6 @@ final class BraveImportWiringTests: XCTestCase {
         let model = ImportFromBraveModel(browser: wired.browser, firstRun: false, root: root)
         model.safeStorage = { safeStorage }
         await model.load()
-        model.spaceID = wired.spaceID
         model.importPasswords = false
         model.start()
         let done = await eventually { model.phase == .done }
@@ -186,6 +184,32 @@ final class BraveImportWiringTests: XCTestCase {
         XCTAssertEqual(safeStorage.calls, 0)
         XCTAssertNil(model.passwordSummary)
         XCTAssertEqual(model.bookmarkSummary?.bookmarksAdded, 4)
+    }
+
+    /// Bookmarks are shared by every space, so there's no space to pick: an import goes into the
+    /// one set, and importing again adds only what isn't there (by Brave's id), even if the user
+    /// moved an imported bookmark to another folder.
+    func testReimportAddsOnlyMissingBookmarks() async throws {
+        let store = try XCTUnwrap(wired.browser.data?.bookmarks)
+        let model = ImportFromBraveModel(browser: wired.browser, firstRun: false, root: root)
+        await model.load()
+        model.importPasswords = false
+        await model.run(passwords: false)
+        XCTAssertEqual(model.bookmarkSummary?.bookmarksAdded, 4)
+
+        let bar = try XCTUnwrap(store.tree().first { $0.bookmark.root == .bar })
+        let github = try XCTUnwrap(bar.children.first { $0.bookmark.title == "GitHub" })
+        try store.move(github.bookmark.id, to: store.root(.other).id, at: 0)
+        let work = try XCTUnwrap(bar.children.first { $0.bookmark.title == "Work" })
+        try store.delete(XCTUnwrap(work.children.first).bookmark.id)
+
+        await model.run(passwords: false)
+        XCTAssertEqual(model.bookmarkSummary?.bookmarksAdded, 1, "only the deleted DevOps comes back")
+        XCTAssertEqual(model.bookmarkSummary?.foldersAdded, 0)
+        let tree = try store.tree()
+        XCTAssertEqual(titles(try XCTUnwrap(tree.first { $0.bookmark.root == .bar }).children), ["Work/[DevOps]"])
+        XCTAssertEqual(titles(try XCTUnwrap(tree.first { $0.bookmark.root == .other }).children),
+                       ["GitHub", "Etsy", "Mobile Bookmarks/[News]"])
     }
 
     /// A wrong Safe Storage key (another install's) is explained, and nothing is saved.

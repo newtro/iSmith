@@ -1,4 +1,5 @@
 import AppKit
+import os
 import Passwords
 import SignInSync
 import SwiftUI
@@ -43,24 +44,128 @@ extension BrowserState {
     /// Opens the passwords store with this build's Keychain key. If the Keychain can't be read
     /// (locked, or access denied), asks "Try Again" or continues without passwords, as for the
     /// vault; nothing on disk is touched. Errors carry no secrets.
-    static func openPasswordStore(fileURL: URL, keyStore: KeyStore) -> (store: PasswordStore?, problem: String?) {
+    /// Any failure is said out loud: an alert with "Try Again", never a silently empty store.
+    static func openPasswordStore(fileURL: URL, keyStore: KeyStore,
+                                  ask: (String) -> Bool = BrowserState.askToRetryPasswords) -> (store: PasswordStore?, problem: String?) {
         while true {
+            let why: String
             do {
                 return (try PasswordStore(fileURL: fileURL, keyStore: keyStore), nil)
-            } catch PasswordStoreError.keychainUnavailable(let why) {
-                let alert = NSAlert()
-                alert.messageText = "iSmith can't open its saved passwords"
-                alert.informativeText = "The passwords key couldn't be read from the Keychain (\(why)). Unlock the login Keychain or allow iSmith to use it, then try again. Nothing has been changed."
-                alert.addButton(withTitle: "Try Again")
-                alert.addButton(withTitle: "Continue Without Passwords")
-                if alert.runModal() != .alertFirstButtonReturn {
-                    return (nil, "Saved passwords are off for this session: the Keychain couldn't be read.")
-                }
+            } catch PasswordStoreError.keychainUnavailable(let reason) {
+                why = "The passwords key couldn't be read from the Keychain (\(reason)). Unlock the login Keychain or allow \(AppIdentity.displayName) to use it, then try again."
+            } catch PasswordStoreError.databaseUnavailable(let reason) {
+                why = "The saved passwords file couldn't be read just now (\(reason)). If another copy of \(AppIdentity.displayName) is still quitting, wait a moment and try again."
             } catch {
-                NSLog("iSmith: the passwords store couldn't be opened (\(error)); autofill is off")
-                return (nil, "Saved passwords couldn't be opened: \(error)")
+                why = "The saved passwords file couldn't be opened (\((error as? PasswordStoreError)?.description ?? String(describing: error)))."
+            }
+            Self.passwordsLog.error("passwords store not opened: \(why, privacy: .public)")
+            if !ask(why) {
+                return (nil, "Saved passwords are off for this session. \(why) Nothing has been changed; quit and reopen \(AppIdentity.displayName) to try again.")
             }
         }
+    }
+
+    static let passwordsLog = Logger(subsystem: "com.scottsmith.ismith", category: "passwords")
+
+    /// "Try Again" (true) or "Continue Without Passwords" (false).
+    static func askToRetryPasswords(_ why: String) -> Bool {
+        let alert = NSAlert()
+        alert.messageText = "\(AppIdentity.displayName) can't open its saved passwords"
+        alert.informativeText = "\(why) Nothing has been changed."
+        alert.addButton(withTitle: "Try Again")
+        alert.addButton(withTitle: "Continue Without Passwords")
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    /// What the launch found in the passwords store, said once at launch: a file moved aside,
+    /// logins restored from an earlier copy set aside, and logins that don't decrypt. Every
+    /// launch also logs the counts (never a secret), so "my passwords are gone" can be checked
+    /// against what the file held.
+    struct PasswordLaunchReport: Equatable {
+        var health: PasswordStore.Health?
+        var movedAside: URL?
+        /// Earlier copies set aside whose logins were added back, and how many.
+        var restored: [(copy: URL, count: Int, backup: URL?)] = []
+        /// Earlier copies sealed with another key: nothing in them can be read.
+        var unopenable: [URL] = []
+
+        static func == (a: Self, b: Self) -> Bool {
+            a.health == b.health && a.movedAside == b.movedAside && a.unopenable == b.unopenable
+                && a.restored.map(\.copy) == b.restored.map(\.copy) && a.restored.map(\.count) == b.restored.map(\.count)
+        }
+
+        /// The alert's text, or nil when there's nothing to say.
+        var message: (title: String, text: String)? {
+            var parts: [String] = []
+            if let movedAside {
+                parts.append("The saved passwords file couldn't be decrypted with the key in your Keychain, so a new one was started. The old file was kept at \(movedAside.path).")
+            }
+            for item in restored {
+                parts.append("\(item.count) saved login\(item.count == 1 ? "" : "s") from an earlier copy (\(item.copy.lastPathComponent)) were added back."
+                             + (item.backup.map { " The passwords file as it was before is at \($0.path)." } ?? ""))
+            }
+            if let health, health.unreadable > 0 {
+                parts.append("\(health.unreadable) of \(health.rows) saved login\(health.rows == 1 ? "" : "s") can't be decrypted with the key in your Keychain. They're kept in the file; nothing was deleted.")
+            }
+            if !unopenable.isEmpty {
+                parts.append("\(unopenable.count == 1 ? "An earlier copy" : "\(unopenable.count) earlier copies") of the passwords file can't be opened with the current key and \(unopenable.count == 1 ? "was" : "were") left as \(unopenable.count == 1 ? "it was" : "they were"): \(unopenable.map(\.lastPathComponent).joined(separator: ", ")).")
+            }
+            guard !parts.isEmpty else { return nil }
+            let title = movedAside != nil || (health?.unreadable ?? 0) > 0 ? "Some saved passwords couldn't be opened" : "Saved passwords were restored"
+            return (title, parts.joined(separator: "\n\n"))
+        }
+    }
+
+    /// Checks the store after it opened: adds back logins from earlier copies set aside (only
+    /// those that decrypt with the current key and aren't already saved; a backup is made
+    /// first), counts what doesn't decrypt, and logs the counts. `reported` holds the copies
+    /// already told about (copies with another key are mentioned once).
+    static func checkPasswordStore(_ store: PasswordStore, reported: inout Set<String>) -> PasswordLaunchReport {
+        var report = PasswordLaunchReport(movedAside: store.movedAside)
+        for copy in PasswordStore.setAsideCopies(of: store.fileURL) where copy != store.movedAside {
+            do {
+                // Once per copy: a login deleted after it was restored stays deleted.
+                if try store.wasRecovered(copy) { continue }
+                if let result = try store.recover(from: copy) {
+                    if result.restored > 0 { report.restored.append((copy, result.restored, result.backup)) }
+                } else if !reported.contains(copy.lastPathComponent) {
+                    report.unopenable.append(copy)
+                }
+                reported.insert(copy.lastPathComponent)
+            } catch {
+                // Tried again at the next launch (and reported then if it's sealed with another key).
+                passwordsLog.error("an earlier copy of the passwords file couldn't be read: \(String(describing: error), privacy: .public)")
+            }
+        }
+        if let aside = store.movedAside { reported.insert(aside.lastPathComponent) }
+        do {
+            let health = try store.health()
+            report.health = health
+            passwordsLog.notice("passwords store opened: \(health.rows, privacy: .public) logins, \(health.unreadable, privacy: .public) unreadable, \(report.restored.reduce(0) { $0 + $1.count }, privacy: .public) restored")
+        } catch {
+            passwordsLog.error("passwords store couldn't be counted: \(String(describing: error), privacy: .public)")
+        }
+        return report
+    }
+
+    /// Copies of the passwords file already mentioned, so each is reported once.
+    static let reportedCopiesKey = "passwordsReportedCopies"
+
+    /// At launch: the report above, shown as one alert when there's something to say.
+    func reportPasswordStoreAtLaunch() {
+        guard let store = passwords?.store else { return }
+        let known = Set(UserDefaults.standard.stringArray(forKey: Self.reportedCopiesKey) ?? [])
+        var reported = known
+        let report = Self.checkPasswordStore(store, reported: &reported)
+        if reported != known { UserDefaults.standard.set(reported.sorted(), forKey: Self.reportedCopiesKey) }
+        passwordsLaunchReport = report
+        guard let message = report.message else { return }
+        let alert = NSAlert()
+        alert.messageText = message.title
+        alert.informativeText = message.text
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Open Passwords")
+        if alert.runModal() == .alertSecondButtonReturn { openPasswords?() }
     }
 
     // MARK: Save bar

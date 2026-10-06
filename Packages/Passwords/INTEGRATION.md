@@ -16,14 +16,24 @@ func openPasswords(dataDir: URL?) -> PasswordAutofill? {
                                   keyStore: KeychainKeyStore(service: AppIdentity.passwordsKeyService,
                                                             account: "passwords", label: "iSmith passwords key"))
     } catch {
-        // `.keychainUnavailable`: same handling as the vault ("Try Again", or run without
-        // passwords). Nothing on disk was touched. Other errors: the folder couldn't be written.
+        // `.keychainUnavailable` or `.databaseUnavailable` (the file is locked or can't be read
+        // just now): same handling as the vault ("Try Again", or run without passwords). Nothing
+        // on disk was touched. Say every error out loud: a store that silently fails to open
+        // looks exactly like "no saved passwords".
         return nil
     }
     if let aside = store.movedAside {
         // Tell the user once: saved passwords couldn't be opened and were kept at `aside`.
         _ = aside
     }
+    // Earlier copies set aside: add back what opens with the current key (backs the store up
+    // first; never removes anything), then report what doesn't decrypt.
+    // Each copy once (newest first): a login deleted after it was restored must stay deleted.
+    for copy in PasswordStore.setAsideCopies(of: store.fileURL)
+    where copy != store.movedAside && (try? store.wasRecovered(copy)) == false {
+        _ = try? store.recover(from: copy)   // nil: sealed with another key; throws if locked
+    }
+    let health = try store.health()          // rows and unreadable rows: report unreadable > 0
     let autofill = PasswordAutofill(store: store)   // one for the whole app; passwords are global
     autofill.delegate = passwordUI                  // see "Delegate events" below
     return autofill

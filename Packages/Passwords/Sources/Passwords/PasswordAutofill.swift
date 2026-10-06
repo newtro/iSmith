@@ -378,7 +378,14 @@ public final class PasswordAutofill {
             rectInWebView = CGRect(x: rect.minX * scale, y: rect.minY * scale,
                                    width: rect.width * scale, height: rect.height * scale)
         }
-        let matches = (try? store.logins(for: frame.origin)) ?? []
+        let matches: [LoginMatch]
+        do {
+            matches = try store.logins(for: frame.origin)
+        } catch {
+            // Not silent: an unreadable store looks exactly like "no saved logins" otherwise.
+            Self.log.error("saved logins couldn't be read for a focused field: \(String(describing: error), privacy: .public)")
+            matches = []
+        }
         let tab = state(for: webView)
         var suggested: UUID?
         if let chosen = tab.chosen, Date().timeIntervalSince(chosen.date) < usernameStepLifetime,

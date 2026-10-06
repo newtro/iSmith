@@ -149,12 +149,12 @@ struct PageProblemView: View {
 
 // MARK: - Bookmarks bar
 
-/// The bookmarks bar: the space's "Bookmarks Bar" folder; folders open as menus. Only the items
-/// that fit are shown; the rest are in a » menu at the right end, as in other browsers.
+/// The bookmarks bar: the "Bookmarks Bar" folder, the same in every space; folders open as menus.
+/// Only the items that fit are shown; the rest are in a » menu at the right end, as in other
+/// browsers. Bookmarks open in the window's current space.
 struct BookmarksBar: View {
     @EnvironmentObject private var browser: BrowserState
     @ObservedObject var window: WindowState
-    let spaceID: String
     @State private var items: [BookmarkTree] = []
     /// Each item's natural width, measured off-screen, keyed by bookmark id.
     @State private var widths: [Int64: CGFloat] = [:]
@@ -173,7 +173,7 @@ struct BookmarksBar: View {
                         .font(.caption).foregroundStyle(.tertiary).padding(.leading, 6)
                 }
                 ForEach(items.prefix(shown), id: \.bookmark.id) { node in
-                    BookmarkBarItem(window: window, spaceID: spaceID, node: node)
+                    BookmarkBarItem(window: window, node: node)
                         .fixedSize()
                 }
                 Spacer(minLength: 0)
@@ -198,7 +198,6 @@ struct BookmarksBar: View {
         .background(alignment: .topLeading) { measurer }
         .padding(.bottom, 4)
         .onAppear(perform: reload)
-        .onChange(of: spaceID) { _, _ in reload() }
         .onReceive(NotificationCenter.default.publisher(for: BookmarkStore.didChange)) { _ in reload() }
     }
 
@@ -206,7 +205,7 @@ struct BookmarksBar: View {
     private var measurer: some View {
         HStack(spacing: Self.spacing) {
             ForEach(items, id: \.bookmark.id) { node in
-                BookmarkBarItem(window: window, spaceID: spaceID, node: node)
+                BookmarkBarItem(window: window, node: node)
                     .fixedSize()
                     .background(GeometryReader { proxy in
                         Color.clear.preference(key: BookmarkWidths.self, value: [node.bookmark.id: proxy.size.width])
@@ -235,7 +234,7 @@ struct BookmarksBar: View {
     }
 
     private func reload() {
-        let tree = (try? browser.data?.bookmarks.tree(space: spaceID)) ?? []
+        let tree = (try? browser.data?.bookmarks.tree()) ?? []
         items = tree.first { $0.bookmark.root == .bar }?.children ?? []
     }
 }
@@ -250,7 +249,6 @@ private struct BookmarkWidths: PreferenceKey {
 private struct BookmarkBarItem: View {
     @EnvironmentObject private var browser: BrowserState
     @ObservedObject var window: WindowState
-    let spaceID: String
     let node: BookmarkTree
 
     var body: some View {
@@ -313,15 +311,13 @@ struct BookmarkMenuContent: View {
 /// ⌘D and the star: name the bookmark and pick its folder, or remove it.
 struct BookmarkEditor: View {
     @EnvironmentObject private var browser: BrowserState
-    let spaceID: String
     let bookmark: Bookmark
     let done: () -> Void
     @State private var title: String
     @State private var folder: Int64
     @State private var folders: [(id: Int64, name: String)] = []
 
-    init(spaceID: String, bookmark: Bookmark, done: @escaping () -> Void) {
-        self.spaceID = spaceID
+    init(bookmark: Bookmark, done: @escaping () -> Void) {
         self.bookmark = bookmark
         self.done = done
         _title = State(initialValue: bookmark.title)
@@ -346,7 +342,7 @@ struct BookmarkEditor: View {
         }
         .padding(14)
         .frame(width: 300)
-        .onAppear { folders = BookmarkFolders.list(browser.data?.bookmarks, space: spaceID) }
+        .onAppear { folders = BookmarkFolders.list(browser.data?.bookmarks) }
     }
 
     private func save() {
@@ -357,9 +353,9 @@ struct BookmarkEditor: View {
     }
 }
 
-/// Every folder of a space, indented by depth, for pickers.
+/// Every bookmark folder, indented by depth, for pickers.
 enum BookmarkFolders {
-    static func list(_ store: BookmarkStore?, space: String) -> [(id: Int64, name: String)] {
+    static func list(_ store: BookmarkStore?) -> [(id: Int64, name: String)] {
         var out: [(Int64, String)] = []
         func walk(_ nodes: [BookmarkTree], depth: Int) {
             for node in nodes where node.bookmark.isFolder {
@@ -367,7 +363,7 @@ enum BookmarkFolders {
                 walk(node.children, depth: depth + 1)
             }
         }
-        walk((try? store?.tree(space: space)) ?? [], depth: 0)
+        walk((try? store?.tree()) ?? [], depth: 0)
         return out.map { (id: $0.0, name: $0.1) }
     }
 }

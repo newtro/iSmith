@@ -232,6 +232,133 @@ final class PasswordStoreTests: XCTestCase {
         XCTAssertTrue(try reopened.logins(for: Origin(string: "https://evil.example")!).isEmpty, "the moved row doesn't open")
         XCTAssertEqual(try reopened.unreadableCount(), 1)
         XCTAssertEqual(try reopened.allLogins().count, 1)
+        XCTAssertEqual(try reopened.health(), PasswordStore.Health(rows: 2, unreadable: 1), "counted, never silently dropped")
+    }
+
+    // MARK: Reopening (an app update relaunches on the same file and key)
+
+    func testReopeningKeepsEveryLoginReadable() throws {
+        let keys = InMemoryKeyStore()
+        let store = try PasswordStore(fileURL: dbURL, keyStore: keys)
+        let origins = ["https://example.com", "https://EXAMPLE.com.", "https://bücher.example", "http://localhost:3000",
+                       "https://[::1]:8443", "http://10.0.0.5", "https://login.microsoftonline.com:443",
+                       "https://dev.azure.com", "https://a.b.c.d.example.co.uk"].map { Origin(string: $0)! }
+        var saved: [Login] = []
+        for i in 0..<300 {
+            saved.append(try store.add(origin: origins[i % origins.count], username: "user\(i)", password: "pw-\(i)",
+                                       date: Date(timeIntervalSince1970: 1_600_000_000 + Double(i))))
+        }
+        // A new process: the same file and the same Keychain key.
+        let reopened = try PasswordStore(fileURL: dbURL, keyStore: keys)
+        XCTAssertNil(reopened.movedAside)
+        XCTAssertEqual(try reopened.health(), PasswordStore.Health(rows: 300, unreadable: 0))
+        XCTAssertEqual(try reopened.allLogins().count, 300)
+        for login in saved {
+            XCTAssertTrue(try reopened.logins(for: login.origin).contains { $0.login.id == login.id && $0.kind == .exact },
+                          "\(login.origin) is offered after reopening")
+        }
+    }
+
+    func testLockedDatabaseIsLeftAloneNotMovedAside() throws {
+        let keys = InMemoryKeyStore()
+        try PasswordStore(fileURL: dbURL, keyStore: keys).add(origin: example, username: "a", password: "b")
+        // Another process (an older copy of the app still quitting, say) holds a write lock.
+        var config = Configuration()
+        config.allowsUnsafeTransactions = true
+        let other = try DatabaseQueue(path: dbURL.path, configuration: config)
+        try other.writeWithoutTransaction { db in try db.execute(sql: "BEGIN EXCLUSIVE") }
+        XCTAssertThrowsError(try PasswordStore(fileURL: dbURL, keyStore: keys)) {
+            guard case .databaseUnavailable = $0 as? PasswordStoreError else { return XCTFail("\($0)") }
+        }
+        XCTAssertTrue(PasswordStore.setAsideCopies(of: dbURL).isEmpty, "nothing was moved aside")
+        try other.writeWithoutTransaction { db in try db.execute(sql: "COMMIT") }
+        try other.close()
+        let store = try PasswordStore(fileURL: dbURL, keyStore: keys)
+        XCTAssertNil(store.movedAside)
+        XCTAssertEqual(try store.allLogins().count, 1)
+    }
+
+    func testMissingKeyThatCantBeSavedTouchesNothing() throws {
+        try PasswordStore(fileURL: dbURL, keyStore: InMemoryKeyStore()).add(origin: example, username: "a", password: "b")
+        let before = try Data(contentsOf: dbURL)
+        XCTAssertThrowsError(try PasswordStore(fileURL: dbURL, keyStore: NoKeyRefusingSaves())) {
+            guard case .keychainUnavailable = $0 as? PasswordStoreError else { return XCTFail("\($0)") }
+        }
+        XCTAssertEqual(try Data(contentsOf: dbURL), before, "the file stays where it is")
+        XCTAssertTrue(PasswordStore.setAsideCopies(of: dbURL).isEmpty)
+    }
+
+    // MARK: Recovering a copy set aside
+
+    func testRecoverAddsLoginsFromACopySetAsideWithoutLosingAny() throws {
+        let keys = InMemoryKeyStore()
+        let first = try PasswordStore(fileURL: dbURL, keyStore: keys)
+        for i in 0..<5 { try first.add(origin: Origin(string: "https://site\(i).example")!, username: "u\(i)", password: "old-\(i)") }
+        try first.setNeverSave(other)
+        // The file was moved aside (as an unreadable file would be) and a new one started.
+        let aside = dir.appendingPathComponent("passwords.unreadable-100.sqlite")
+        try FileManager.default.moveItem(at: dbURL, to: aside)
+        let asideBytes = try Data(contentsOf: aside)
+        let store = try PasswordStore(fileURL: dbURL, keyStore: keys)
+        XCTAssertEqual(PasswordStore.setAsideCopies(of: dbURL), [aside])
+        try store.add(origin: Origin(string: "https://site0.example")!, username: "u0", password: "newer")
+        try store.add(origin: Origin(string: "https://fresh.example")!, username: "f", password: "f")
+
+        let result = try XCTUnwrap(try store.recover(from: aside))
+        XCTAssertEqual(result.restored, 4)
+        XCTAssertEqual(result.alreadyThere, 1, "site0/u0 keeps the store's newer password")
+        XCTAssertEqual(result.unreadable, 0)
+        let backup = try XCTUnwrap(result.backup)
+        XCTAssertEqual(try permissions(backup), 0o600)
+        XCTAssertEqual(try PasswordStore(fileURL: backup, keyStore: keys).allLogins().count, 2, "the backup is the store before restoring")
+
+        let all = try store.allLogins()
+        XCTAssertEqual(all.count, 6)
+        XCTAssertEqual(all.first { $0.username == "u0" }?.password, "newer")
+        XCTAssertTrue(try store.isNeverSave(other))
+        XCTAssertEqual(try Data(contentsOf: aside), asideBytes, "the copy is only read")
+
+        let again = try XCTUnwrap(try store.recover(from: aside))
+        XCTAssertEqual(again.restored, 0)
+        XCTAssertNil(again.backup, "nothing to add, nothing backed up")
+        XCTAssertEqual(try store.allLogins().count, 6)
+    }
+
+    func testEachCopyIsRecoveredOnceAndNewestFirst() throws {
+        let keys = InMemoryKeyStore()
+        let site = Origin(string: "https://site.example")!
+        let older = dir.appendingPathComponent("passwords.unreadable-100.sqlite")
+        let newer = dir.appendingPathComponent("passwords.unreadable-200.sqlite")
+        let sameSecond = dir.appendingPathComponent("passwords.unreadable-200-2.sqlite")
+        for (copy, password) in [(older, "old"), (newer, "new"), (sameSecond, "newest")] {
+            let store = try PasswordStore(fileURL: dbURL, keyStore: keys)
+            try store.add(origin: site, username: "me", password: password)
+            try FileManager.default.moveItem(at: dbURL, to: copy)
+        }
+        XCTAssertEqual(PasswordStore.setAsideCopies(of: dbURL), [sameSecond, newer, older], "newest first")
+
+        let store = try PasswordStore(fileURL: dbURL, keyStore: keys)
+        for copy in PasswordStore.setAsideCopies(of: dbURL) where try !store.wasRecovered(copy) {
+            _ = try store.recover(from: copy)
+        }
+        XCTAssertEqual(try store.allLogins().map(\.password), ["newest"], "the newest copy's password wins")
+        XCTAssertTrue(try PasswordStore.setAsideCopies(of: dbURL).allSatisfy { try store.wasRecovered($0) })
+
+        // Deleted after it was restored: the next launch leaves it deleted.
+        try store.delete(id: try XCTUnwrap(store.allLogins().first).id)
+        let relaunched = try PasswordStore(fileURL: dbURL, keyStore: keys)
+        XCTAssertTrue(try PasswordStore.setAsideCopies(of: dbURL).allSatisfy { try relaunched.wasRecovered($0) })
+        XCTAssertTrue(try relaunched.allLogins().isEmpty)
+    }
+
+    func testRecoverIgnoresACopySealedWithAnotherKey() throws {
+        try PasswordStore(fileURL: dbURL, keyStore: InMemoryKeyStore()).add(origin: example, username: "a", password: "b")
+        let aside = dir.appendingPathComponent("passwords.unreadable-100.sqlite")
+        try FileManager.default.moveItem(at: dbURL, to: aside)
+        let store = try PasswordStore(fileURL: dbURL, keyStore: InMemoryKeyStore())
+        XCTAssertNil(try store.recover(from: aside))
+        XCTAssertTrue(try store.allLogins().isEmpty)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: dir.path).filter { $0.contains("before-restore") }, [])
     }
 
     func testKeychainKeyStoreForPasswordsIsSeparate() {
@@ -240,6 +367,13 @@ final class PasswordStoreTests: XCTestCase {
         XCTAssertNotEqual(store.service, KeychainKeyStore.vaultService)
         XCTAssertEqual(store.label, "iSmith passwords key")
     }
+}
+
+/// A Keychain with no key that refuses to save one.
+private struct NoKeyRefusingSaves: KeyStore {
+    struct Refused: Error {}
+    func loadKey() throws -> SymmetricKey? { nil }
+    func saveKey(_ key: SymmetricKey) throws { throw Refused() }
 }
 
 private struct FailingKeyStore: KeyStore {
