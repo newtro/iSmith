@@ -93,7 +93,7 @@ final class TabStripView: NSView {
     // The strip doubles as the title bar: drag empty space to move the window, double-click it for
     // a new tab.
     override func mouseDown(with event: NSEvent) {
-        if event.clickCount == 2 { browser.newTab(in: windowState) } else { window?.performDrag(with: event) }
+        if event.clickCount == 2 { browser.newTab(in: windowState) } else { window?.dragWindow(with: event) }
     }
 
     override var mouseDownCanMoveWindow: Bool { false }
@@ -1242,7 +1242,7 @@ final class VerticalTabsView: NSView {
 
     // As in the strip: empty space moves the window; a double-click opens a tab.
     override func mouseDown(with event: NSEvent) {
-        if event.clickCount == 2 { browser.newTab(in: windowState) } else { window?.performDrag(with: event) }
+        if event.clickCount == 2 { browser.newTab(in: windowState) } else { window?.dragWindow(with: event) }
     }
 
     override var mouseDownCanMoveWindow: Bool { false }

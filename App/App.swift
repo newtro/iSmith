@@ -254,6 +254,11 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
                               backing: .buffered, defer: false)
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
+        // The tab strip lives in the title bar. If the window were movable, the window server would
+        // start a window move from any press there before the tab saw it, so dragging a tab moved
+        // the whole window. The window is never movable by itself; empty chrome starts a move
+        // explicitly (`NSWindow.dragWindow(with:)`).
+        window.isMovable = false
         window.title = "iSmith"
         window.isReleasedWhenClosed = false
         window.isRestorable = false
@@ -297,4 +302,14 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
 
     func windowDidMove(_ notification: Notification) { browser.scheduleRefresh() }
     func windowDidEndLiveResize(_ notification: Notification) { browser.scheduleRefresh() }
+}
+
+extension NSWindow {
+    /// Moves the window with the mouse, for chrome that acts as the title bar. iSmith windows aren't
+    /// movable on their own (see `BrowserWindowController`), so this allows it just for this drag.
+    func dragWindow(with event: NSEvent) {
+        isMovable = true
+        performDrag(with: event)
+        isMovable = false
+    }
 }

@@ -645,7 +645,7 @@ struct WindowDragArea: NSViewRepresentable {
         override var mouseDownCanMoveWindow: Bool { true }
 
         override func mouseDown(with event: NSEvent) {
-            if event.clickCount == 2 { window?.performZoom(nil) } else { window?.performDrag(with: event) }
+            if event.clickCount == 2 { window?.performZoom(nil) } else { window?.dragWindow(with: event) }
         }
     }
 }
