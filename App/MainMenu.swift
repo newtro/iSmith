@@ -244,7 +244,7 @@ final class Commands: NSObject, NSMenuDelegate, NSMenuItemValidation {
         guard let tabs, let id = tabs.layout.selected else { return }
         let targets = tabs.targets(for: id)
         // An agent's tab is pinned again when it's taken back, not while the agent has it.
-        if tabs.layout.group(of: id)?.agent == true { return NSSound.beep() }
+        if targets.contains(where: { tabs.layout.group(of: $0)?.agent == true }) { return NSSound.beep() }
         if tabs.layout.isPinned(id) { browser.unpin(targets, in: tabs) } else { browser.pin(targets, in: tabs) }
     }
 

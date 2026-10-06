@@ -470,11 +470,12 @@ struct TabSelection: Equatable {
             if marked.contains(id) { marked.remove(id) } else { marked.insert(id) }
             return nil
         case .shift, .commandShift:
-            let start = anchor.flatMap { layout.contains($0) ? $0 : nil } ?? selected ?? id
-            // Over the tabs on screen: tabs in a collapsed group between the two aren't picked.
+            // Over the tabs on screen only: tabs in a collapsed group are never picked. The range
+            // starts at the anchor, or the selected tab, or the clicked tab, whichever is visible.
             let visible = layout.visibleIDs
-            let order = visible.contains(start) && visible.contains(id) ? visible : layout.ids
-            guard let a = order.firstIndex(of: start), let b = order.firstIndex(of: id) else { return nil }
+            let start = [anchor, selected, id].compactMap { $0 }.first(where: visible.contains) ?? id
+            guard let a = visible.firstIndex(of: start), let b = visible.firstIndex(of: id) else { return nil }
+            let order = visible
             let range = Set(order[min(a, b)...max(a, b)])
             marked = kind == .commandShift ? marked.union(range) : range
             if let selected { marked.remove(selected) }
@@ -491,8 +492,10 @@ struct TabSelection: Equatable {
     }
 
     /// Drops marks for tabs that are gone.
+    /// Drops marks for tabs that are gone or hidden in a collapsed group, and such an anchor.
     mutating func prune(_ layout: TabLayout) {
-        marked = marked.filter { layout.contains($0) && $0 != layout.selected }
-        if let anchor, !layout.contains(anchor) { self.anchor = nil }
+        let visible = Set(layout.visibleIDs)
+        marked = marked.filter { visible.contains($0) && $0 != layout.selected }
+        if let anchor, !visible.contains(anchor) { self.anchor = nil }
     }
 }

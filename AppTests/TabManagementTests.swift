@@ -158,6 +158,16 @@ final class TabManagementTests: XCTestCase {
         var s = TabSelection()
         _ = s.click(ids[4], .shift, in: l)
         XCTAssertEqual(s.targets(for: ids[4], in: l), [ids[0], ids[1], ids[4]], "hidden tabs aren't picked")
+        // An anchor inside a group that collapses afterwards doesn't reach into it either.
+        var m = layout()
+        let h = m.createGroup(with: [ids[1], ids[2]], name: "H")!
+        var t = TabSelection()
+        _ = t.click(ids[2], .command, in: m)
+        m.setCollapsed(h, true)
+        t.prune(m)
+        XCTAssertTrue(t.marked.isEmpty, "a hidden tab drops out of the selection")
+        _ = t.click(ids[5], .shift, in: m)
+        XCTAssertEqual(t.targets(for: ids[5], in: m), [ids[0], ids[3], ids[4], ids[5]])
     }
 
     func testAgentTakingAPinnedTabPinsItAgainWhenTakenBack() {
@@ -241,6 +251,8 @@ final class TabManagementTests: XCTestCase {
         XCTAssertTrue(Favicons.sameSite(URL(string: "https://static.contoso.com/i.png")!, as: page))
         XCTAssertFalse(Favicons.sameSite(URL(string: "https://tracker.example/i.png")!, as: page), "another site's icon isn't fetched")
         XCTAssertFalse(Favicons.sameSite(URL(string: "data:image/png;base64,AAAA")!, as: page))
+        XCTAssertFalse(Favicons.sameSite(URL(string: "http://192.168.1.5/i.png")!, as: URL(string: "http://203.0.113.5/")!),
+                       "addresses must match exactly")
         XCTAssertEqual(Favicons.key(URL(string: "http://127.0.0.1:8080/x")), "http://127.0.0.1:8080")
         XCTAssertNil(Favicons.key(URL(string: "file:///tmp/x.html")))
 

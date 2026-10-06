@@ -8,8 +8,8 @@ import WebKit
 /// site for anything (it shows a letter until it loads). The icon is the one the page names
 /// (`<link rel="icon">`) when it's on the page's own site, otherwise the origin's `/favicon.ico`.
 ///
-/// Fetches carry no cookies (an ephemeral session, so no space's session goes with them), stop
-/// at `maxBytes` and `timeout`, and are decoded by ImageIO as a small thumbnail of a raster type
+/// If that icon can't be had, `/favicon.ico` is tried. Fetches carry no cookies (an ephemeral
+/// session, so no space's session goes with them), stop at `maxBytes` and `timeout`, and are decoded by ImageIO as a small thumbnail of a raster type
 /// only (PNG, ICO, JPEG, GIF, WebP, BMP): never SVG or PDF, and never an image larger than
 /// `maxPixels`, so a hostile icon can't use much memory or reach a complex decoder.
 @MainActor
@@ -34,7 +34,7 @@ final class Favicons: ObservableObject {
         return URLSession(configuration: configuration)
     }()
 
-    static let maxBytes = 256 * 1024
+    static let maxBytes = 1024 * 1024
     static let maxPixels = 1024 * 1024
     static let timeout: TimeInterval = 15
     static let allowedTypes: Set<String> = [UTType.png, .ico, .jpeg, .gif, .webP, .bmp].map(\.identifier).reduce(into: []) { $0.insert($1) }
@@ -57,6 +57,10 @@ final class Favicons: ObservableObject {
     static func sameSite(_ icon: URL, as page: URL) -> Bool {
         guard ["http", "https"].contains(icon.scheme?.lowercased() ?? ""),
               let a = icon.host?.lowercased(), let b = page.host?.lowercased() else { return false }
+        // An address (not a name) must match exactly.
+        if a.allSatisfy({ $0.isNumber || $0 == "." || $0 == ":" }) || b.allSatisfy({ $0.isNumber || $0 == "." || $0 == ":" }) {
+            return a == b
+        }
         func site(_ host: String) -> String { host.split(separator: ".").suffix(2).joined(separator: ".") }
         return a == b || site(a) == site(b)
     }
@@ -79,42 +83,73 @@ final class Favicons: ObservableObject {
                Self.sameSite(named, as: page) {
                 source = named
             }
-            if let source { self.fetch(source, for: key) }
+            if let source { self.fetch(source, for: key, fallback: URL(string: "/favicon.ico", relativeTo: page)?.absoluteURL) }
         }
     }
 
-    private func fetch(_ url: URL, for key: String) {
+    /// Fetches `url` (then `fallback`, the origin's `/favicon.ico`, if that fails). An address
+    /// that failed isn't asked again for a while.
+    private func fetch(_ url: URL, for key: String, fallback: URL?) {
         guard !loading.contains(key), sources[key] != url || images[key] == nil else { return }
-        if images[key] == nil, let at = failed[key], Date().timeIntervalSince(at) < 15 * 60 { return }
+        let candidates = ([url] + (fallback.map { $0 == url ? [] : [$0] } ?? [])).filter { candidate in
+            guard let at = failed[candidate.absoluteString] else { return true }
+            return Date().timeIntervalSince(at) >= 15 * 60
+        }
+        guard !candidates.isEmpty else { return }
         loading.insert(key)
         let session = session
         Task { [weak self] in
-            let image = await Self.download(url, session: session).flatMap(Self.decode)
+            var found: (URL, NSImage)?
+            var failures: [URL] = []
+            for candidate in candidates {
+                if let image = await Self.load(candidate, session: session) {
+                    found = (candidate, image)
+                    break
+                }
+                failures.append(candidate)
+            }
             guard let self else { return }
             self.loading.remove(key)
-            if let image {
+            for failure in failures { self.failed[failure.absoluteString] = Date() }
+            if let (source, image) = found {
                 self.images[key] = image
-                self.sources[key] = url
-                self.failed[key] = nil
+                self.sources[key] = source
+                self.failed[source.absoluteString] = nil
                 self.generation += 1
-            } else if self.images[key] == nil {
-                self.failed[key] = Date()
             }
         }
+    }
+
+    /// Downloads and decodes an icon off the main thread.
+    nonisolated static func load(_ url: URL, session: URLSession) async -> NSImage? {
+        await Task.detached(priority: .utility) {
+            await download(url, session: session).flatMap(decode)
+        }.value
     }
 
     /// The response body, or nil past `maxBytes` (stopping there) or on an error status.
     nonisolated static func download(_ url: URL, session: URLSession) async -> Data? {
         guard let (bytes, response) = try? await session.bytes(from: url) else { return nil }
-        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) { return nil }
-        if response.expectedContentLength > Int64(maxBytes) { return nil }
+        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            bytes.task.cancel()
+            return nil
+        }
+        if response.expectedContentLength > Int64(maxBytes) {
+            bytes.task.cancel()
+            return nil
+        }
         var data = Data()
+        data.reserveCapacity(min(maxBytes, max(0, Int(response.expectedContentLength))))
         do {
             for try await byte in bytes {
                 data.append(byte)
-                if data.count > maxBytes { return nil }
+                if data.count > maxBytes {
+                    bytes.task.cancel()
+                    return nil
+                }
             }
         } catch {
+            bytes.task.cancel()
             return nil
         }
         return data

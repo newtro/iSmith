@@ -1254,7 +1254,7 @@ The engineering half is done; the acceptance run on Scott's accounts is next, fo
 - **Site icons** (`Favicons.swift`): kept in memory per origin and fetched only when a page has
   loaded in a tab (a restored tab shows a letter until it loads): the page's `<link rel=icon>`
   if it's on the same site, else the origin's `/favicon.ico`. No cookies (ephemeral session),
-  streamed with a 256 KB cap and a 15-second limit, and decoded by ImageIO as a 64-pixel
+  streamed with a 1 MB cap and a 15-second limit (then `/favicon.ico` if the named icon fails), and decoded by ImageIO as a 64-pixel
   thumbnail of a raster type only (no SVG or PDF; nothing over a million pixels).
 - **Picking several tabs** (`TabSelection`): ⌘-click adds or removes a tab, ⇧-click picks the
   range of visible tabs from the last clicked tab (⌘⇧-click adds the range), a click on a picked tab keeps the

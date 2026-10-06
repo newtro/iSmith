@@ -333,9 +333,14 @@ final class StripContentView: NSView {
     func keepPageFocus() {
         guard let window else { return }
         DispatchQueue.main.async { [weak self, weak window] in
-            guard let window, window.firstResponder === window || window.firstResponder == nil,
-                  let webView = self?.tabs?.selected?.webView, webView.window === window else { return }
-            window.makeFirstResponder(webView)
+            guard let self, let window, window.firstResponder === window || window.firstResponder == nil,
+                  let tab = self.tabs?.selected else { return }
+            if tab.url == nil {
+                // An empty tab: the keyboard goes to its address bar.
+                self.windowState.focusAddress(of: tab.id)
+            } else if let webView = tab.webView, webView.window === window {
+                window.makeFirstResponder(webView)
+            }
         }
     }
 
@@ -751,6 +756,7 @@ final class TabItemView: NSControl, NSDraggingSource {
     /// still says it accepts first responder, because AppKit only treats an enabled control that
     /// does as blocking window moves in the title bar.
     override func becomeFirstResponder() -> Bool { false }
+    override var canBecomeKeyView: Bool { false }
 
     private func updateIcon() {
         iconView.image = Favicons.shared.image(for: tab)
@@ -991,6 +997,7 @@ final class GroupChipView: NSControl {
     required init?(coder: NSCoder) { fatalError() }
 
     override func becomeFirstResponder() -> Bool { false }
+    override var canBecomeKeyView: Bool { false }
 
     private var vertical: Bool { strip?.axis == .vertical }
 
