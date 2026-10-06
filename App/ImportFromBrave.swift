@@ -217,7 +217,9 @@ final class ImportFromBraveModel: ObservableObject {
 
     let browser: BrowserState
     let firstRun: Bool
-    let root: URL
+    /// Brave's profile folder. Starts at Brave's usual place; "Choose Brave's Folder…" can replace
+    /// it with the folder the user picked (the pick is what grants access, see `chooseBraveFolder`).
+    private(set) var root: URL
     /// The "Brave Safe Storage" password; the real Keychain item in the app, a fixed one in tests.
     var safeStorage: () -> SafeStoragePasswordSource = BraveImporter.safeStorage
     @Published private(set) var phase: Phase = .loading
@@ -333,6 +335,26 @@ final class ImportFromBraveModel: ObservableObject {
         phase = .done
     }
 
+    /// macOS keeps another app's data folder behind a per-app access list (`com.apple.macl`), so
+    /// reading Brave's folder is refused until the user picks it in an Open dialog: the pick adds
+    /// iSmith to the list, and macOS remembers it for later imports. There's no switch for this in
+    /// System Settings, so the dialog is the way to allow it (Full Disk Access also works).
+    func chooseBraveFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = false
+        panel.directoryURL = BraveProfiles.defaultRoot
+        panel.prompt = "Allow"
+        panel.message = "Brave's data folder is selected. Click Allow to let \(AppIdentity.displayName) read its bookmarks and passwords. Brave isn't changed."
+        guard panel.runModal() == .OK, var picked = panel.url else { return }
+        // Picking the BraveSoftware folder above it means its Brave-Browser folder.
+        if picked.lastPathComponent == "BraveSoftware" { picked.appendPathComponent("Brave-Browser", isDirectory: true) }
+        root = picked
+        Task { await load() }
+    }
+
     static func explain(_ error: Error) -> String {
         switch error {
         case SafeStorageError.denied:
@@ -350,11 +372,8 @@ final class ImportFromBraveModel: ObservableObject {
         }
     }
 
-    /// System Settings ▸ Privacy & Security ▸ Files & Folders. On macOS 15 and later, reading
-    /// another app's data is the "App Data" permission (`kTCCServiceSystemPolicyAppDataDetailed`):
-    /// macOS asks "Allow iSmith to access your Brave Browser data?", and if that was declined,
-    /// it's turned on under Files & Folders. Full Disk Access also covers it.
-    static let filesAndFoldersURL = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders")!
+    /// System Settings ▸ Privacy & Security ▸ Full Disk Access, the alternative to picking Brave's
+    /// folder. (Files & Folders doesn't list this kind of access, so it isn't offered.)
     static let fullDiskAccessURL = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")!
 }
 
@@ -462,18 +481,16 @@ struct ImportFromBraveView: View {
     private var permission: some View {
         VStack(alignment: .leading, spacing: 12) {
             Label("macOS is keeping Brave's data private", systemImage: "hand.raised").font(.headline)
-            Text("macOS lets an app read another app's data only with your permission. Allow \(AppIdentity.displayName) to access your Brave Browser data in System Settings ▸ Privacy & Security ▸ Files & Folders (or give it Full Disk Access), then click Try Again.")
+            Text("macOS lets an app read another app's data only after you point it there yourself. Click Choose Brave's Folder…: Brave's data folder is already selected, so just click Allow. macOS remembers this for later imports.")
                 .fixedSize(horizontal: false, vertical: true)
-            Text("If macOS asked \"Allow \(AppIdentity.displayName) to access your Brave Browser data?\" and you clicked Don't Allow, the switch is in that list. You may need to quit and reopen \(AppIdentity.displayName) after changing it.")
+            Text("Or give \(AppIdentity.displayName) Full Disk Access: in System Settings ▸ Privacy & Security ▸ Full Disk Access, click +, choose \(AppIdentity.displayName) in Applications, turn it on, then quit and reopen \(AppIdentity.displayName).")
                 .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            HStack {
-                Button("Open Files & Folders Settings") { NSWorkspace.shared.open(ImportFromBraveModel.filesAndFoldersURL) }
-                Button("Full Disk Access…") { NSWorkspace.shared.open(ImportFromBraveModel.fullDiskAccessURL) }
-                    .buttonStyle(.link)
-            }
+            Button("Full Disk Access Settings…") { NSWorkspace.shared.open(ImportFromBraveModel.fullDiskAccessURL) }
+                .buttonStyle(.link)
             buttons {
                 Button(model.firstRun ? "Not Now" : "Close") { model.close() }
-                Button("Try Again") { Task { await model.load() } }.keyboardShortcut(.defaultAction)
+                Button("Try Again") { Task { await model.load() } }
+                Button("Choose Brave's Folder…") { model.chooseBraveFolder() }.keyboardShortcut(.defaultAction)
             }
         }
     }

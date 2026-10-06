@@ -214,8 +214,8 @@ final class BraveImportWiringTests: XCTestCase {
         chmod(root.path, 0o755)
         await model.load()
         XCTAssertEqual(model.phase, .choose)
-        XCTAssertEqual(ImportFromBraveModel.filesAndFoldersURL.absoluteString,
-                       "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders")
+        XCTAssertEqual(ImportFromBraveModel.fullDiskAccessURL.absoluteString,
+                       "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")
     }
 
     func testNoBrave() async {
