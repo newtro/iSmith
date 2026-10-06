@@ -121,6 +121,7 @@ private struct WebsiteSettings: View {
     @EnvironmentObject private var browser: BrowserState
     @State private var permissions: [SitePermissionEntry] = []
     @State private var appLinks: [(scheme: String, decision: AppLinkDecision)] = []
+    @State private var siteAppLinks: [(scheme: String, site: String)] = []
     @State private var zooms: [(host: String, factor: Double)] = []
 
     var body: some View {
@@ -139,6 +140,22 @@ private struct WebsiteSettings: View {
                         .labelsHidden().fixedSize()
                         Button { remove(entry) } label: { Image(systemName: "minus.circle") }
                             .buttonStyle(.borderless).help("Forget; the site asks again")
+                    }
+                }
+            }
+            if !siteAppLinks.isEmpty {
+                Section("Sites that open apps without a click") {
+                    ForEach(siteAppLinks, id: \.site) { link in
+                        HStack {
+                            Text(link.site)
+                            Text("→ \(link.scheme):").foregroundStyle(.secondary)
+                            Spacer()
+                            Button {
+                                try? browser.data?.sites.setSiteMayOpenApp(false, scheme: link.scheme, site: link.site)
+                                reload()
+                            } label: { Image(systemName: "minus.circle") }
+                                .buttonStyle(.borderless).help("Forget; iSmith asks again")
+                        }
                     }
                 }
             }
@@ -183,6 +200,7 @@ private struct WebsiteSettings: View {
         let sites = browser.data?.sites
         permissions = ((try? sites?.allDecisions()) ?? []).sorted { ($0.origin, $0.permission.rawValue) < ($1.origin, $1.permission.rawValue) }
         appLinks = ((try? sites?.allAppLinkDecisions()) ?? [:]).map { ($0.key, $0.value) }.sorted { $0.scheme < $1.scheme }
+        siteAppLinks = (try? sites?.allSiteAppLinks()) ?? []
         zooms = ((try? sites?.allZooms()) ?? [:]).map { ($0.key, $0.value) }.sorted { $0.host < $1.host }
     }
 

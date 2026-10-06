@@ -18,6 +18,9 @@ struct PromptBar: View {
                 if let deny = prompt.denyTitle {
                     Button(deny) { browser.answer(prompt, .deny, in: tab) }
                 }
+                if let always = prompt.alwaysTitle {
+                    Button(always) { browser.answer(prompt, .always, in: tab) }
+                }
                 Button(prompt.allowTitle) { browser.answer(prompt, .allow, in: tab) }
                     .buttonStyle(.borderedProminent)
                 if tab.prompts.count > 1 {

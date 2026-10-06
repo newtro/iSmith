@@ -300,6 +300,18 @@ public final class BrowserDatabase: @unchecked Sendable {
         migrator.registerMigration("v3-global-bookmarks") { db in
             try BookmarkMerge.migrate(db)
         }
+        // "Always open from this site": a site whose redirects to an app scheme open the app
+        // without a click (sign-in hand-offs such as claude.ai → the Claude app).
+        migrator.registerMigration("v4-site-app-links") { db in
+            try db.execute(sql: """
+                CREATE TABLE site_app_link (
+                    scheme TEXT NOT NULL,
+                    site TEXT NOT NULL,
+                    updated REAL NOT NULL,
+                    PRIMARY KEY (scheme, site)
+                )
+                """)
+        }
         return migrator
     }
 }

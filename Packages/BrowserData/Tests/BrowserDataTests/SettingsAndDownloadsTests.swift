@@ -72,6 +72,18 @@ final class SettingsAndDownloadsTests: XCTestCase {
         XCTAssertEqual(try sites.allAppLinkDecisions(), ["zoommtg": .block])
     }
 
+    func testSiteMayOpenApp() throws {
+        let sites = db.sites
+        XCTAssertFalse(try sites.siteMayOpenApp(scheme: "claude", site: "claude.ai"))
+        try sites.setSiteMayOpenApp(true, scheme: "Claude:", site: "Claude.AI")
+        XCTAssertTrue(try sites.siteMayOpenApp(scheme: "claude", site: "claude.ai"))
+        XCTAssertFalse(try sites.siteMayOpenApp(scheme: "claude", site: "evil.example"), "only the site that was allowed")
+        XCTAssertFalse(try sites.siteMayOpenApp(scheme: "msteams", site: "claude.ai"), "only the scheme that was allowed")
+        XCTAssertEqual(try sites.allSiteAppLinks().map { "\($0.site) \($0.scheme)" }, ["claude.ai claude"])
+        try sites.setSiteMayOpenApp(false, scheme: "claude", site: "claude.ai")
+        XCTAssertFalse(try sites.siteMayOpenApp(scheme: "claude", site: "claude.ai"))
+    }
+
     func testDownloads() throws {
         let store = db.downloads
         let t0 = Date(timeIntervalSince1970: 1_800_000_000)

@@ -149,6 +149,38 @@ public final class SiteSettingsStore: @unchecked Sendable {
         }
     }
 
+    /// Whether `site` (a host) may open `scheme` links without a click.
+    public func siteMayOpenApp(scheme: String, site: String) throws -> Bool {
+        try writer.read { db in
+            try Bool.fetchOne(db, sql: "SELECT 1 FROM site_app_link WHERE scheme = ? AND site = ?",
+                              arguments: [Self.normalize(scheme: scheme), site.lowercased()]) ?? false
+        }
+    }
+
+    /// Lets `site` open `scheme` links without a click, or (false) stops it.
+    public func setSiteMayOpenApp(_ allowed: Bool, scheme: String, site: String) throws {
+        let scheme = Self.normalize(scheme: scheme), site = site.lowercased()
+        try writer.write { db in
+            if allowed {
+                try db.execute(sql: """
+                    INSERT INTO site_app_link (scheme, site, updated) VALUES (?, ?, ?)
+                    ON CONFLICT (scheme, site) DO UPDATE SET updated = excluded.updated
+                    """, arguments: [scheme, site, Date().seconds])
+            } else {
+                try db.execute(sql: "DELETE FROM site_app_link WHERE scheme = ? AND site = ?", arguments: [scheme, site])
+            }
+        }
+        ChangeNotifier.post(Self.didChange, object: self, spaces: nil)
+    }
+
+    /// Every site allowed to open an app without a click, sorted.
+    public func allSiteAppLinks() throws -> [(scheme: String, site: String)] {
+        try writer.read { db in
+            try Row.fetchAll(db, sql: "SELECT scheme, site FROM site_app_link ORDER BY site, scheme")
+                .map { ($0["scheme"] as String, $0["site"] as String) }
+        }
+    }
+
     private static func normalize(scheme: String) -> String {
         var s = scheme.lowercased().trimmingCharacters(in: .whitespaces)
         if s.hasSuffix(":") { s.removeLast() }

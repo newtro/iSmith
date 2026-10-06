@@ -440,7 +440,7 @@ extension BrowserState {
         guard let (_, _, tab) = owner(of: webView) else { return decided(false) }
         ask(SitePrompt(key: "permission:\(permission.rawValue):\(key)", symbol: symbol, message: message, allowTitle: "Allow") { [weak self] answer in
             switch answer {
-            case .allow:
+            case .allow, .always:
                 try? self?.data?.sites.setDecision(.allow, for: permission, origin: key)
                 decided(true)
             case .deny:
@@ -465,8 +465,17 @@ extension BrowserState {
         let sourceFrame = action?.sourceFrame as WKFrameInfo?
         let source = sourceFrame?.securityOrigin.host
         let sameSite = sourceFrame?.isMainFrame ?? true || source?.lowercased() == webView.url?.host?.lowercased()
-        let clicked = sameSite && hadRecentInput(webView, tab: tab)
-        let site = (source?.isEmpty == false ? source : nil) ?? webView.url?.host ?? "This page"
+        // The site asking: a web page's host only, never the app link's own (a first load that
+        // redirects straight to the app has no page yet, so it can't be remembered).
+        let web: Set<String> = ["http", "https"]
+        let sourceHost = sourceFrame.flatMap { web.contains($0.securityOrigin.protocol.lowercased()) ? $0.securityOrigin.host : nil }
+        let pageHost = webView.url.flatMap { web.contains($0.scheme?.lowercased() ?? "") ? $0.host : nil }
+        let host = (sourceHost?.isEmpty == false ? sourceHost : nil) ?? (pageHost?.isEmpty == false ? pageHost : nil)
+        let site = host ?? "This page"
+        // A site the user said may always open this app (a sign-in hand-off redirecting to it)
+        // counts as a click, so a redirect with no click opens the app as Brave and Chrome do.
+        let siteAllowed = host.map { (try? data?.sites.siteMayOpenApp(scheme: scheme, site: $0)) ?? false } ?? false
+        let clicked = (sameSite && hadRecentInput(webView, tab: tab)) || siteAllowed
         switch AppLinks.plan(AppLinks.decide(url, stored: stored ?? nil, appFor: AppLinks.defaultApp), clicked: clicked) {
         case .none:
             return
@@ -482,11 +491,18 @@ extension BrowserState {
             let message = remember
                 ? "\(site) wants to open \(name). iSmith will remember your answer for “\(scheme):” links you click."
                 : "\(site) wants to open \(name)."
+            // Without a click (a redirect after signing in), offer to always let this site open
+            // the app.
+            let always = !remember && host != nil ? "Always Open from \(site)" : nil
             ask(SitePrompt(key: "app:\(scheme)", symbol: "arrow.up.forward.app", message: message,
-                           allowTitle: "Open \(name)", denyTitle: remember ? "Don't Open" : "Not Now") { [weak self] answer in
+                           allowTitle: "Open \(name)", denyTitle: remember ? "Don't Open" : "Not Now",
+                           alwaysTitle: always) { [weak self] answer in
                 switch answer {
                 case .allow:
                     if remember { try? self?.data?.sites.setAppLinkDecision(.open, scheme: scheme) }
+                    NSWorkspace.shared.open(url)
+                case .always:
+                    if let host { try? self?.data?.sites.setSiteMayOpenApp(true, scheme: scheme, site: host) }
                     NSWorkspace.shared.open(url)
                 case .deny:
                     if remember { try? self?.data?.sites.setAppLinkDecision(.block, scheme: scheme) }

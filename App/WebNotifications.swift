@@ -145,7 +145,7 @@ final class WebNotifications: NSObject {
             ask(webView, host, origin) { continuation.resume(returning: $0) }
         }
         switch answer {
-        case .allow:
+        case .allow, .always:
             saveDecision(origin, true)
             poster.requestAuthorization()
             return "granted"

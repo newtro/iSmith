@@ -7,7 +7,8 @@ import WebKit
 /// How a site prompt was answered. `dismissed` (the tab closed or navigated away) is never
 /// remembered.
 enum PromptAnswer {
-    case allow, deny, dismissed
+    /// `always`: allow, and remember it (only offered when the prompt has an `alwaysTitle`).
+    case allow, always, deny, dismissed
 }
 
 /// A question from a page, shown as a bar over the page rather than a modal dialog, so a page in
@@ -21,12 +22,15 @@ final class SitePrompt: Identifiable {
     let message: String
     let allowTitle: String
     let denyTitle: String?
+    /// A third button that allows and remembers, or nil.
+    let alwaysTitle: String?
     /// Prompts with the same key in one tab are asked once; later requests wait for that answer.
     let key: String
     private var handlers: [(PromptAnswer) -> Void]
 
     init(key: String, symbol: String, message: String, allowTitle: String, denyTitle: String? = "Don't Allow",
-         handler: @escaping (PromptAnswer) -> Void) {
+         alwaysTitle: String? = nil, handler: @escaping (PromptAnswer) -> Void) {
+        self.alwaysTitle = alwaysTitle
         self.key = key
         self.symbol = symbol
         self.message = message
