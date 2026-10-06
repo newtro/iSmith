@@ -132,6 +132,8 @@ final class StripContentView: NSView {
     /// A group just created from a menu: its editor opens once its label is on screen.
     var pendingEdit: UUID?
     private var popover: NSPopover?
+    /// The tab being dragged over this strip, dimmed until the drag leaves or ends.
+    private weak var dimmed: TabItemView?
 
     static let gap: CGFloat = 4
     static let maxTab: CGFloat = 200
@@ -279,12 +281,29 @@ final class StripContentView: NSView {
         return (nil, nil, (ordered.last?.frame.maxX ?? 0) + 2)
     }
 
+    /// The insertion marker: a bar in the accent color (or the group's, for a drop into a group)
+    /// where the tab will land. The dragged tab itself is dimmed meanwhile.
     private func showIndicator(_ target: (before: UUID?, group: UUID?, x: CGFloat)) {
         let color = target.group.flatMap { tabs?.layout.group($0)?.color.nsColor } ?? .controlAccentColor
         indicator.layer?.backgroundColor = color.cgColor
-        indicator.frame = NSRect(x: max(0, target.x - 1), y: 6, width: 2, height: bounds.height - 12)
+        indicator.layer?.cornerRadius = 1.5
+        indicator.frame = NSRect(x: max(0, target.x - 1.5), y: 4, width: 3, height: bounds.height - 8)
         indicator.isHidden = false
+        if case let .tab(id, _, _) = browser.drag, let view = tabViews[id] {
+            if dimmed !== view { dimmed?.alphaValue = 1 }
+            dimmed = view
+            view.alphaValue = 0.45
+        }
     }
+
+    private func hideIndicator() {
+        indicator.isHidden = true
+        dimmed?.alphaValue = 1
+        dimmed = nil
+    }
+
+    /// Whether the insertion marker is showing, and where (for tests).
+    var indicatorFrame: NSRect? { indicator.isHidden ? nil : indicator.frame }
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
         draggingUpdated(sender)
@@ -292,7 +311,7 @@ final class StripContentView: NSView {
 
     override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
         guard case .tab = browser.drag, tabs != nil else {
-            indicator.isHidden = true
+            hideIndicator()
             return []
         }
         showIndicator(dropTarget(at: convert(sender.draggingLocation, from: nil)))
@@ -300,15 +319,15 @@ final class StripContentView: NSView {
     }
 
     override func draggingExited(_ sender: NSDraggingInfo?) {
-        indicator.isHidden = true
+        hideIndicator()
     }
 
     override func concludeDragOperation(_ sender: NSDraggingInfo?) {
-        indicator.isHidden = true
+        hideIndicator()
     }
 
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        indicator.isHidden = true
+        hideIndicator()
         guard case let .tab(id, windowID, spaceID) = browser.drag, let tabs,
               let source = browser.windows.first(where: { $0.id == windowID }) else { return false }
         let target = dropTarget(at: convert(sender.draggingLocation, from: nil))
@@ -474,7 +493,13 @@ final class StripContentView: NSView {
 
 /// One tab in the strip: loading spinner or Keep alive mark, title, close button. The group's
 /// color runs along its bottom edge.
-final class TabItemView: NSView, NSDraggingSource {
+///
+/// An `NSControl`, not a plain view, because the strip sits in the window's title bar (the window
+/// has a full-size content view): there, AppKit hands a drag to the window server as a window
+/// move unless the view under the mouse is a control. A plain view doesn't stop it, even with
+/// `mouseDownCanMoveWindow` false, so dragging a tab moved the window. Empty strip space is still a
+/// plain view, so it still moves the window.
+final class TabItemView: NSControl, NSDraggingSource {
     let tab: Tab
     private weak var strip: StripContentView?
     private(set) var group: TabGroup?
@@ -700,6 +725,7 @@ final class TabItemView: NSView, NSDraggingSource {
     /// A tab dropped outside every iSmith window opens in a new window there.
     func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
         defer { Self.dragging = nil }
+        alphaValue = 1
         guard let strip else { return }
         let browser = strip.browser
         let drag = browser.drag
@@ -713,8 +739,9 @@ final class TabItemView: NSView, NSDraggingSource {
 }
 
 /// A group's label: its name on its color, and the tab count when collapsed. Click to collapse
-/// or expand; right-click to rename, recolor, ungroup or close.
-final class GroupChipView: NSView {
+/// or expand; right-click to rename, recolor, ungroup or close. A control for the same reason as
+/// `TabItemView`: in the title bar only a control keeps a drag from moving the window.
+final class GroupChipView: NSControl {
     private weak var strip: StripContentView?
     private(set) var group = TabGroup(name: "", color: .grey)
     private var count = 0
