@@ -6,6 +6,15 @@
     <description>iSmith updates</description>
     <language>en</language>
     <item>
+      <title>Version 1.2.0</title>
+      <pubDate>Tue, 06 Oct 2026 16:41:06 GMT</pubDate>
+      <sparkle:version>83</sparkle:version>
+      <sparkle:shortVersionString>1.2.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <sparkle:releaseNotesLink>https://github.com/newtro/iSmith/releases/tag/v1.2.0</sparkle:releaseNotesLink>
+      <enclosure url="https://github.com/newtro/iSmith/releases/download/v1.2.0/iSmith-1.2.0.zip" type="application/octet-stream" sparkle:edSignature="BQClhOIMf291nDGIVFBxU7AO3zoQGdtLJDG53Nbd0aA5JJtNSR766NZF/tJV2I3+vZfFoBJbivHgb9uAaIpFDA==" length="9146953"/>
+    </item>
+    <item>
       <title>Version 1.1.3</title>
       <pubDate>Tue, 06 Oct 2026 14:24:58 GMT</pubDate>
       <sparkle:version>77</sparkle:version>
