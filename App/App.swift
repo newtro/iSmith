@@ -76,6 +76,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         #if DEBUG
         PerfHarness.runIfRequested(browser)
         #endif
+        #if ISMITH_UPDATE_TEST
+        UpdateTestHook.run(browser, updater: updater)
+        #endif
     }
 
     /// The first launch on a data folder offers the Brave import once, if Brave is installed.

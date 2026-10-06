@@ -1287,3 +1287,39 @@ The engineering half is done; the acceptance run on Scott's accounts is next, fo
   (the test host can't record the screen itself). Real pointer drags weren't driven: synthesizing
   input into the app's window from outside isn't possible without global input, so the drag
   path is checked through AppKit's title-bar answer and a drop driven in code.
+
+### Saved passwords after updates (2026-10-06)
+
+- **Reported**: after a Sparkle update the Passwords window looked empty and sign-in pages
+  offered nothing, until the passwords were imported from Brave again. No alert was shown.
+- **Checked**: two Release builds with their own bundle id, signed as releases are (archive,
+  then export for Developer ID), updated A→B by Sparkle itself, both "Install and Relaunch" and
+  install-on-quit, with 5, 500 and 1,500 logins. B opened the same file with the same Keychain key
+  and every login decrypted, in the store and in the Passwords window. The Keychain item for the
+  key is the one created on 2026-10-03 and was never replaced, and the installed app logged no
+  "moved aside" or "key unreadable" error at any of the day's four update launches (1.1.2, 1.1.3,
+  1.2.0, 1.2.1). So the update itself doesn't drop or re-key saved passwords; what the user saw
+  isn't explained by the store's opening path.
+- **Fixed** (the silent paths that could look like this):
+  - A file that can't be read just now (locked by another process, a disk or permissions error)
+    used to count as "unreadable" and was moved aside, leaving an empty store. Now only a file
+    sealed with another key, or not a passwords database, is moved aside; anything else is
+    `databaseUnavailable` and the app asks "Try Again".
+  - With no key in the Keychain, the file was moved aside before the new key was saved; if the
+    save then failed and the user tried again, the new empty store opened with no word about
+    the old file. The key is saved first now, and a refused save changes nothing.
+  - Any other error opening the store only logged and turned passwords off; it's an alert now.
+  - Logins that don't decrypt were only a banner in the Passwords window, and autofill read
+    errors were swallowed. At launch the app now says how many of how many don't decrypt, and
+    autofill logs read errors.
+  - Copies set aside earlier (`passwords.unreadable-<time>.sqlite`) are opened at launch: logins
+    that decrypt with the current key and aren't saved yet are added back (the store is backed
+    up first as `passwords.before-restore-<time>.sqlite`; nothing is removed or overwritten, and
+    the copy is only read). A copy sealed with another key is mentioned once.
+  - Every launch logs `passwords store opened: N logins, M unreadable, K restored` (counts only)
+    under `com.scottsmith.ismith`/`passwords`, so the next report can be checked against what
+    the file held.
+- `Tools/update-test.sh` repeats the update check (Developer ID builds A and B, a throwaway
+  EdDSA key, a local appcast, Sparkle's installer) on a scratch folder; the builds use
+  `com.scottsmith.ismith.updatetest` and `App/UpdateTestHook.swift`, which only compiles with
+  `ISMITH_UPDATE_TEST`.

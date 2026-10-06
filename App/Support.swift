@@ -81,6 +81,13 @@ struct AppPaths {
         if let dir = ProcessInfo.processInfo.environment["ISMITH_DATA_DIR"], !dir.isEmpty {
             return AppPaths(dataDir: URL(fileURLWithPath: dir, isDirectory: true), spikeDir: nil)
         }
+        #if ISMITH_UPDATE_TEST
+        // The update test (UpdateTestHook) is relaunched by Sparkle, without our environment.
+        if let dir = UserDefaults.standard.string(forKey: "UTDataDir"), !dir.isEmpty {
+            return AppPaths(dataDir: URL(fileURLWithPath: dir, isDirectory: true), spikeDir: nil)
+        }
+        fatalError("UTDataDir isn't set: an update-test build never uses the real data folder")
+        #endif
         return AppPaths(dataDir: support.appendingPathComponent(AppIdentity.dataFolderName, isDirectory: true),
                         spikeDir: AppIdentity.importsSpike ? support.appendingPathComponent("iSmithSpike", isDirectory: true) : nil)
     }

@@ -74,6 +74,8 @@ final class BrowserState: NSObject, ObservableObject {
     /// opened (`passwordsProblem` says why); pages then work without it.
     let passwords: PasswordAutofill?
     let passwordsProblem: String?
+    /// What the launch check found in the passwords store (`reportPasswordStoreAtLaunch`).
+    var passwordsLaunchReport: PasswordLaunchReport?
     /// The save bar, autofill popover and ⌘\.
     let passwordUI = PasswordUI()
     /// The agent panel's engine (v1.1). Codex starts only when a panel first needs it.
@@ -240,12 +242,9 @@ final class BrowserState: NSObject, ObservableObject {
         }
         networkMonitor = watchNetwork()
         memoryPressure = watchMemoryPressure()
-        if let aside = passwords?.store.movedAside {
-            let alert = NSAlert()
-            alert.messageText = "Saved passwords couldn't be opened"
-            alert.informativeText = "iSmith couldn't decrypt its saved passwords with the key in your Keychain, so it started a new password store. The old file was kept at \(aside.path)."
-            alert.runModal()
-        }
+        // A file moved aside, logins restored from an earlier copy, or logins that don't
+        // decrypt are said at once, never left as a silently empty list.
+        reportPasswordStoreAtLaunch()
         if let history = data?.history {
             let cutoff = Date().addingTimeInterval(-Self.historyKept)
             Task.detached(priority: .background) { try? history.prune(olderThan: cutoff) }

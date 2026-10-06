@@ -66,6 +66,9 @@ iSmith's own per-tab browser tools.
   spaces in "iSmith Dev" on a scratch data folder, with the memory of the app and its WebKit
   processes at each stage and the space-switch times. `Tools/memory.py [pid]`: the memory of a
   running iSmith (default: the installed one) and only its own WebKit processes; read-only.
+- `Tools/update-test.sh [logins]`: checks that saved passwords survive a real Sparkle update
+  between two Developer ID builds (their own bundle id, Keychain items and scratch folder; the
+  seeding hook `App/UpdateTestHook.swift` only compiles in those builds).
 - `Packages/Passwords/`: the password store and autofill core (the app's UI is in `App/`): encrypted logins in
   SQLite, origin matching, the capture and fill script, and the `PasswordAutofill` controller.
   [INTEGRATION.md](Packages/Passwords/INTEGRATION.md) lists the app's hook points.
@@ -115,7 +118,12 @@ seed or runs longer.
   encrypted with AES-GCM. Its key is in the login Keychain under `<bundle id>.vault-key`
   (`com.scottsmith.ismith.vault-key` for the installed app).
 - `passwords.sqlite` holds saved logins, each username and password sealed with AES-GCM under
-  its own Keychain key, `<bundle id>.passwords-key`. Passwords are global, not per space.
+  its own Keychain key, `<bundle id>.passwords-key`. Passwords are global, not per space. A
+  file sealed with another key is kept aside as `passwords.unreadable-<time>.sqlite`; a file that
+  can't be read just now is left alone and the app asks to try again. At launch, logins from a
+  copy set aside that open with the current key are added back (the store is backed up first as
+  `passwords.before-restore-<time>.sqlite`), logins that don't decrypt are reported, and the
+  counts are logged (`passwords store opened: …`, never a username or password).
 - `config.json` is what each space is: name, color, accounts, and the rail's order.
 - `session.json` is what's open: windows → spaces → tab groups → tabs, with each tab's URL,
   title, Keep alive setting, pin and back/forward history, and each window's tab layout

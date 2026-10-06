@@ -14,6 +14,9 @@ public enum PasswordStoreError: Error, Equatable, CustomStringConvertible {
     case encryptionFailed
     case unreadableRow
     case invalidOrigin
+    /// The database file exists but couldn't be read just now (locked by another process, a
+    /// permissions or disk error). Nothing was changed; try again.
+    case databaseUnavailable(String)
 
     public var description: String {
         switch self {
@@ -23,6 +26,7 @@ public enum PasswordStoreError: Error, Equatable, CustomStringConvertible {
         case .encryptionFailed: return "The login could not be encrypted."
         case .unreadableRow: return "The login could not be decrypted."
         case .invalidOrigin: return "The site address is not an http or https origin."
+        case .databaseUnavailable(let why): return "The saved passwords file could not be read (\(why))."
         }
     }
 }
@@ -73,12 +77,17 @@ public final class PasswordStore: @unchecked Sendable {
             throw PasswordStoreError.keychainUnavailable(String(describing: error))
         }
 
-        var movedAside: URL?
-        if FileManager.default.fileExists(atPath: fileURL.path), !Self.isUsable(fileURL, key: key) {
-            movedAside = try SecureFile.moveAside(fileURL, reason: "unreadable")
-            Self.log.error("passwords database could not be opened with the Keychain key; moved aside")
+        // What's on disk is judged before anything changes. A file that can't be read right now
+        // (locked, a disk or permissions error) is left alone: only a file that is definitely not
+        // a passwords database, or is sealed with another key, is ever moved aside.
+        let exists = FileManager.default.fileExists(atPath: fileURL.path)
+        if exists, case .unavailable(let why) = Self.inspect(fileURL, key: key) {
+            Self.log.error("passwords database could not be read; nothing changed")
+            throw PasswordStoreError.databaseUnavailable(why)
         }
 
+        // A first run (or a missing key) gets a new key, saved before any file is moved, so a
+        // Keychain that refuses the new key leaves everything as it was.
         if key == nil {
             let fresh = SymmetricKey(size: .bits256)
             do {
@@ -94,6 +103,19 @@ public final class PasswordStore: @unchecked Sendable {
             }
         }
         guard let key else { throw PasswordStoreError.keychainUnavailable("no key") }
+
+        var movedAside: URL?
+        if exists {
+            switch Self.inspect(fileURL, key: key) {
+            case .usable:
+                break
+            case .unavailable(let why):
+                throw PasswordStoreError.databaseUnavailable(why)
+            case .wrongKey, .notOurs:
+                movedAside = try SecureFile.moveAside(fileURL, reason: "unreadable")
+                Self.log.error("passwords database could not be opened with the Keychain key; moved aside")
+            }
+        }
         self.key = key
         self.movedAside = movedAside
 
@@ -143,27 +165,166 @@ public final class PasswordStore: @unchecked Sendable {
         return migrator
     }
 
-    /// Whether an existing database file opens with this key: its key check verifies, or it has
-    /// no key check and no logins yet. A missing key can open only an empty database.
-    private static func isUsable(_ url: URL, key: SymmetricKey?) -> Bool {
+    enum Inspection: Equatable {
+        /// Opens with this key: its key check verifies, or it holds no logins yet.
+        case usable
+        /// Holds logins sealed with another key (or, without a key, any logins at all).
+        case wrongKey
+        /// Not a SQLite database, damaged, or not a passwords database.
+        case notOurs
+        /// Couldn't be read just now (locked, a disk or permissions error); says nothing about
+        /// the file itself.
+        case unavailable(String)
+    }
+
+    /// What an existing database file is, judged by reading it. A missing key can open only an
+    /// empty database.
+    static func inspect(_ url: URL, key: SymmetricKey?, readOnly: Bool = false) -> Inspection {
         do {
-            let queue = try DatabaseQueue(path: url.path, configuration: configuration())
+            var config = configuration()
+            config.readonly = readOnly
+            let queue = try DatabaseQueue(path: url.path, configuration: config)
             defer { try? queue.close() }
             return try queue.read { db in
                 guard try db.tableExists("meta"), try db.tableExists("login") else {
                     // Created but never migrated (or not ours): usable only if it holds nothing.
-                    return try String.fetchAll(db, sql: "SELECT name FROM sqlite_master WHERE type = 'table'")
+                    let empty = try String.fetchAll(db, sql: "SELECT name FROM sqlite_master WHERE type = 'table'")
                         .allSatisfy { $0.hasPrefix("sqlite_") || $0 == "grdb_migrations" }
+                    return empty ? .usable : .notOurs
                 }
                 if let check = try Data.fetchOne(db, sql: "SELECT value FROM meta WHERE key = 'keyCheck'") {
-                    guard let key else { return false }
-                    return LoginCrypto.verifyKeyCheck(check, key: key)
+                    guard let key else { return .wrongKey }
+                    return LoginCrypto.verifyKeyCheck(check, key: key) ? .usable : .wrongKey
                 }
-                return try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM login") == 0
+                return try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM login") == 0 ? .usable : .wrongKey
+            }
+        } catch let error as DatabaseError {
+            switch error.resultCode {
+            case .SQLITE_NOTADB, .SQLITE_CORRUPT, .SQLITE_FORMAT, .SQLITE_ERROR:
+                // Not a database, damaged, or tables we can't read ("no such column").
+                return .notOurs
+            default:
+                // Busy, locked, can't open, I/O or permission errors: nothing to do with the file.
+                return .unavailable("SQLite error \(error.resultCode.rawValue)")
             }
         } catch {
-            return false
+            return .unavailable(String(describing: type(of: error)))
         }
+    }
+
+    // MARK: Health
+
+    /// How many rows the file holds and how many of them decrypt. Counts only; nothing secret.
+    public struct Health: Equatable, Sendable {
+        public var rows: Int
+        public var unreadable: Int
+        public var readable: Int { rows - unreadable }
+
+        public init(rows: Int, unreadable: Int) {
+            self.rows = rows
+            self.unreadable = unreadable
+        }
+    }
+
+    public func health() throws -> Health {
+        try dbQueue.read { db in
+            let rows = try Row.fetchAll(db, sql: "SELECT * FROM login")
+            return Health(rows: rows.count, unreadable: rows.filter { decode($0) == nil }.count)
+        }
+    }
+
+    // MARK: Copies set aside
+
+    /// Earlier copies of the store that were moved aside (`passwords.unreadable-<time>.sqlite`),
+    /// oldest first.
+    public static func setAsideCopies(of fileURL: URL) -> [URL] {
+        let dir = fileURL.deletingLastPathComponent()
+        let base = fileURL.deletingPathExtension().lastPathComponent + ".unreadable-"
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
+        return names.filter { $0.hasPrefix(base) && $0.hasSuffix("." + fileURL.pathExtension) }
+            .sorted()
+            .map { dir.appendingPathComponent($0) }
+    }
+
+    /// What `recover(from:)` did.
+    public struct Recovery: Equatable, Sendable {
+        /// Logins added to the store from the copy.
+        public var restored = 0
+        /// Logins of the copy the store already has (same id, or same site and username).
+        public var alreadyThere = 0
+        /// Rows of the copy that don't decrypt with this store's key.
+        public var unreadable = 0
+        /// The store as it was before the logins were added (only when some were).
+        public var backup: URL?
+    }
+
+    /// Adds the logins of an earlier copy of the store (one moved aside) that open with this
+    /// store's key and aren't in the store yet. Nothing is removed or overwritten: a login the
+    /// store already has (by id, or by site and username) keeps the store's version, and the copy
+    /// itself is only read. Before anything is added the store is backed up next to itself as
+    /// `passwords.before-restore-<time>.sqlite`. Returns nil when the copy was sealed with another
+    /// key (or isn't a passwords database), so nothing in it can be read.
+    public func recover(from copy: URL) throws -> Recovery? {
+        guard Self.inspect(copy, key: key, readOnly: true) == .usable else { return nil }
+        var config = Self.configuration()
+        config.readonly = true
+        let source = try DatabaseQueue(path: copy.path, configuration: config)
+        defer { try? source.close() }
+        let (rows, neverSave) = try source.read { db -> ([Row], [Row]) in
+            guard try db.tableExists("login") else { return ([], []) }
+            let never = try db.tableExists("neverSave") ? try Row.fetchAll(db, sql: "SELECT * FROM neverSave") : []
+            return (try Row.fetchAll(db, sql: "SELECT * FROM login"), never)
+        }
+        var result = Recovery()
+        var toAdd: [Login] = []
+        try dbQueue.read { db in
+            for row in rows {
+                guard let login = decode(row) else {
+                    result.unreadable += 1
+                    continue
+                }
+                let sameID = (try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM login WHERE id = ?", arguments: [login.id.uuidString]) ?? 0) > 0
+                let sameLogin = try existing(db, origin: login.origin, username: login.username) != nil
+                if sameID || sameLogin || toAdd.contains(where: { $0.origin == login.origin && $0.username == login.username }) {
+                    result.alreadyThere += 1
+                } else {
+                    toAdd.append(login)
+                }
+            }
+        }
+        guard !toAdd.isEmpty || !neverSave.isEmpty else { return result }
+        if !toAdd.isEmpty { result.backup = try backUp(reason: "before-restore") }
+        try dbQueue.write { db in
+            for login in toAdd { try insert(db, login) }
+            for row in neverSave {
+                let origin: String? = row["origin"]
+                let created: Double? = row["created"]
+                guard let origin, Origin(string: origin) != nil else { continue }
+                try db.execute(sql: "INSERT OR IGNORE INTO neverSave (origin, created) VALUES (?, ?)",
+                               arguments: [origin, created ?? Date().timeIntervalSince1970])
+            }
+        }
+        result.restored = toAdd.count
+        Self.log.notice("restored \(result.restored, privacy: .public) logins from a copy set aside; \(result.alreadyThere, privacy: .public) already there, \(result.unreadable, privacy: .public) unreadable")
+        return result
+    }
+
+    /// A consistent copy of the store next to it, owner-only from the start.
+    func backUp(reason: String) throws -> URL {
+        let stamp = Int(Date().timeIntervalSince1970)
+        let base = fileURL.deletingPathExtension()
+        var target = base.appendingPathExtension("\(reason)-\(stamp).\(fileURL.pathExtension)")
+        var n = 2
+        while FileManager.default.fileExists(atPath: target.path) {
+            target = base.appendingPathExtension("\(reason)-\(stamp)-\(n).\(fileURL.pathExtension)")
+            n += 1
+        }
+        // The empty file is made 0600 first, so the copy is never readable by others.
+        try SecureFile.ensureOwnerOnlyFile(target)
+        let destination = try DatabaseQueue(path: target.path, configuration: Self.configuration())
+        try dbQueue.backup(to: destination)
+        try destination.close()
+        return target
     }
 
     // MARK: Reading
