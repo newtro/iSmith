@@ -49,7 +49,7 @@ final class BrowserDatabaseTests: XCTestCase {
         XCTAssertEqual(try db.bookmarks.search("b.com", limit: 10).count, 1)
         XCTAssertEqual(try db.sites.zoom(host: "a.com"), 1.1)
         let applied = try db.writer.read { try BrowserDatabase.migrator.appliedMigrations($0) }
-        XCTAssertEqual(applied, ["v1", "v2-agent", "v3-global-bookmarks"])
+        XCTAssertEqual(applied, ["v1", "v2-agent", "v3-global-bookmarks", "v4-site-app-links"])
         XCTAssertEqual(try db.writer.read { try BrowserDatabase.migrator.hasCompletedMigrations($0) }, true)
     }
 

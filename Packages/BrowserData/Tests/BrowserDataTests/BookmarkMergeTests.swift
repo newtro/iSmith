@@ -265,7 +265,7 @@ final class BookmarkMergeTests: XCTestCase {
         XCTAssertEqual(try backups(), [])
         XCTAssertEqual(try db.bookmarks.tree().map(\.children.count), [0, 0])
         XCTAssertEqual(try db.writer.read { try BrowserDatabase.migrator.appliedMigrations($0) },
-                       ["v1", "v2-agent", "v3-global-bookmarks"])
+                       ["v1", "v2-agent", "v3-global-bookmarks", "v4-site-app-links"])
         try db.bookmarks.add(parent: nil, title: "A", url: "https://a.example/")
         let reopened = try BrowserDatabase(fileURL: dbURL)
         XCTAssertEqual(try reopened.bookmarks.tree()[0].children.map(\.bookmark.title), ["A"])
