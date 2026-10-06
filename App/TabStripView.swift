@@ -328,6 +328,17 @@ final class StripContentView: NSView {
 
     func view(for id: UUID) -> TabItemView? { tabViews[id] }
 
+    /// After a click on a tab or a group label: if AppKit took the keyboard away from everything
+    /// (a refused first responder leaves it with the window), it goes to the page on screen.
+    func keepPageFocus() {
+        guard let window else { return }
+        DispatchQueue.main.async { [weak self, weak window] in
+            guard let window, window.firstResponder === window || window.firstResponder == nil,
+                  let webView = self?.tabs?.selected?.webView, webView.window === window else { return }
+            window.makeFirstResponder(webView)
+        }
+    }
+
     // MARK: - Dropping tabs
 
     private func marker(at position: CGFloat) -> NSRect {
@@ -571,7 +582,8 @@ enum TabMenu {
         menu.addItem(ActionItem(many ? "Duplicate \(noun)" : "Duplicate") { browser.duplicate(targets, in: tabs, window: window) })
         if targets.allSatisfy(layout.isPinned) {
             menu.addItem(ActionItem("Unpin \(noun)") { browser.unpin(targets, in: tabs) })
-        } else {
+        } else if !targets.contains(where: { layout.group(of: $0)?.agent == true }) {
+            // An agent's tab is pinned again when it's taken back, not while the agent has it.
             menu.addItem(ActionItem("Pin \(noun)") { browser.pin(targets, in: tabs) })
         }
         if !many, let tab {
@@ -735,6 +747,11 @@ final class TabItemView: NSControl, NSDraggingSource {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
 
+    /// A tab never holds the keyboard: a click leaves it with the page (see `keepPageFocus`). It
+    /// still says it accepts first responder, because AppKit only treats an enabled control that
+    /// does as blocking window moves in the title bar.
+    override func becomeFirstResponder() -> Bool { false }
+
     private func updateIcon() {
         iconView.image = Favicons.shared.image(for: tab)
     }
@@ -876,6 +893,7 @@ final class TabItemView: NSControl, NSDraggingSource {
             ? (flags.contains(.shift) ? .commandShift : .command)
             : (flags.contains(.shift) ? .shift : .plain)
         if let select = tabs.click(tab.id, kind) { strip.browser.selectTab(select, in: tabs) }
+        strip.keepPageFocus()
     }
 
     override func mouseDragged(with event: NSEvent) {
@@ -972,6 +990,8 @@ final class GroupChipView: NSControl {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
 
+    override func becomeFirstResponder() -> Bool { false }
+
     private var vertical: Bool { strip?.axis == .vertical }
 
     func configure(group: TabGroup, count: Int) {
@@ -1050,6 +1070,7 @@ final class GroupChipView: NSControl {
     override func mouseDown(with event: NSEvent) {
         guard let strip, let tabs = strip.tabs else { return }
         strip.browser.toggleCollapsed(group.id, in: tabs, window: strip.windowState)
+        strip.keepPageFocus()
     }
 
     override func menu(for event: NSEvent) -> NSMenu? {

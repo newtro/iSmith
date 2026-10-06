@@ -101,9 +101,14 @@ struct TabOverview: View {
         .frame(width: 640, height: 480)
         .onAppear {
             highlighted = tabs.layout.selected ?? results.first?.id
-            picked = tabs.selection.marked
+            if let selected = tabs.layout.selected {
+                let strip = tabs.targets(for: selected)
+                picked = strip.count > 1 ? Set(strip) : []
+            }
         }
         .onChange(of: query) { _, _ in
+            // Picks hidden by the filter are dropped, so the actions only touch tabs on screen.
+            picked.formIntersection(results.map(\.id))
             // The highlight stays on a visible tab.
             if let h = highlighted, results.contains(where: { $0.id == h }) { return }
             highlighted = results.first?.id
@@ -164,7 +169,7 @@ struct TabOverview: View {
 
     private var footer: some View {
         HStack(spacing: 10) {
-            Text(picked.isEmpty ? "↑↓ move · Return opens · ⇧↑↓ or ⌘-click picks · Esc closes"
+            Text(picked.isEmpty ? "↑↓ move · Return opens · ⇧↑↓ or ⌘-click picks · ⌘⌫ closes tabs · Esc"
                  : "\(picked.count) picked")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -231,7 +236,8 @@ struct TabOverview: View {
 
     private func pickRange(to id: UUID) {
         let ids = results.map(\.id)
-        let start = anchor ?? highlighted ?? id
+        // The anchor may have been filtered out: start again from the highlighted row.
+        let start = [anchor, highlighted].compactMap { $0 }.first(where: ids.contains) ?? id
         guard let a = ids.firstIndex(of: start), let b = ids.firstIndex(of: id) else { return }
         picked = Set(ids[min(a, b)...max(a, b)])
         anchor = start
@@ -331,7 +337,9 @@ struct OverviewSearchField: NSViewRepresentable {
             case #selector(NSResponder.moveDownAndModifySelection(_:)): return parent.command(.move(1, extend: true))
             case #selector(NSResponder.insertNewline(_:)): return parent.command(.open)
             case #selector(NSResponder.cancelOperation(_:)): return parent.command(.cancel)
-            case #selector(NSResponder.deleteToBeginningOfLine(_:)): return parent.command(.close)
+            // ⌘⌫ clears typed text first; in an empty field it closes tabs.
+            case #selector(NSResponder.deleteToBeginningOfLine(_:)):
+                return textView.string.isEmpty ? parent.command(.close) : false
             default: return false
             }
         }

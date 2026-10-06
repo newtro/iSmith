@@ -67,6 +67,7 @@ final class TabDragTests: XCTestCase {
             let frame = item.convert(item.bounds, to: nil)
             XCTAssertGreaterThan(frame.maxY, window.frame.height - titleBarHeight, "\(type(of: item)) reaches into the title bar")
             XCTAssertEqual(blocksWindowMove(item), item.bounds, "a drag on a \(type(of: item)) never moves the window")
+            XCTAssertFalse(item.becomeFirstResponder(), "a \(type(of: item)) never takes the keyboard from the page")
             // The mouse goes to the tab (its title label passes clicks on to it).
             let hit = try XCTUnwrap(window.contentView?.superview?.hitTest(NSPoint(x: frame.midX, y: frame.midY)))
             XCTAssertTrue(hit === item || hit.isDescendant(of: item), "a click lands on the \(type(of: item)), not \(type(of: hit))")

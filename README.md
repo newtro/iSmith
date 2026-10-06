@@ -160,7 +160,8 @@ seed or runs longer.
   new group, another space or a new window, bookmark them into a folder, sort them by site,
   duplicate, pin or reload them.
 - **Tab overview**: ⌘⇧A lists the space's tabs; type to filter by title, site or group, ↑↓ and
-  Return to go to one, ⇧↑↓ or ⌘-click to pick several, ⌘⌫ to close them, "Move To" to move them.
+  Return to go to one, ⇧↑↓ or ⌘-click to pick several, ⌘⌫ (with the search field empty) to
+  close them, "Move To" to move them.
 - **Vertical tabs**: View ▸ Use Vertical Tabs (per window) or Settings ▸ General ▸ Tabs shows
   the space's tabs in a sidebar beside the rail: pinned tabs on top, groups as sections that
   collapse, the same drag and drop and menus. The top strip hides.

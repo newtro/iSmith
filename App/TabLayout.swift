@@ -78,6 +78,9 @@ struct TabLayout: Equatable {
     private(set) var slots: [Slot] = []
     private(set) var groups: [TabGroup] = []
     private(set) var selected: UUID?
+    /// Pinned tabs an agent took over (moving them into the Agent group unpins them): taking one
+    /// back pins it again. Not saved.
+    private(set) var unpinnedForAgent: Set<UUID> = []
 
     init() {}
 
@@ -107,6 +110,15 @@ struct TabLayout: Equatable {
     func isPinned(_ id: UUID) -> Bool { slots.first { $0.id == id }?.pinned == true }
     var pinnedIDs: [UUID] { slots.filter(\.pinned).map(\.id) }
     var pinnedCount: Int { slots.prefix { $0.pinned }.count }
+    /// The tabs on screen, in order (not those in collapsed groups).
+    var visibleIDs: [UUID] {
+        items.compactMap { item in
+            switch item {
+            case let .pinned(id), let .tab(id, _): return id
+            case .group: return nil
+            }
+        }
+    }
     /// The space's Agent group, if it has one.
     var agentGroup: TabGroup? { groups.first { $0.agent } }
 
@@ -325,6 +337,7 @@ struct TabLayout: Equatable {
     @discardableResult
     mutating func addToAgentGroup(_ id: UUID) -> UUID? {
         if !contains(id) { insert(id) }
+        if isPinned(id) { unpinnedForAgent.insert(id) }
         if let group = agentGroup {
             add([id], to: group.id)
             return group.id
@@ -346,7 +359,10 @@ struct TabLayout: Equatable {
             guard let g = groupID(of: id) else { continue }
             let after = slots.lastIndex { $0.group == g }.map { $0 + 1 } ?? slots.count
             let anchor = after < slots.count ? slots[after].id : nil
+            // A pinned tab the agent had goes back among the pinned tabs.
+            let repin = unpinnedForAgent.contains(id)
             move(id, before: anchor, group: nil)
+            if repin { pin([id]) }
         }
     }
 
@@ -406,6 +422,10 @@ struct TabLayout: Equatable {
         slots = out
         groups.removeAll { !placed.contains($0.id) }
         if let selected, !contains(selected) { self.selected = slots.first?.id }
+        if !unpinnedForAgent.isEmpty {
+            let agentTabs = Set(slots.filter { s in s.group.map { g in groups.contains { $0.id == g && $0.agent } } == true }.map(\.id))
+            unpinnedForAgent.formIntersection(agentTabs)
+        }
     }
 }
 
@@ -431,9 +451,10 @@ struct TabSelection: Equatable {
         let selected = layout.selected
         switch kind {
         case .plain:
-            if !marked.contains(id) { marked = [] }
+            let wasPicked = marked.contains(id)
+            if !wasPicked { marked = [] }
             marked.remove(id)
-            if let selected, selected != id, !marked.isEmpty { marked.insert(selected) }
+            if wasPicked, let selected, selected != id { marked.insert(selected) }
             anchor = id
             return id == selected ? nil : id
         case .command:
@@ -450,8 +471,11 @@ struct TabSelection: Equatable {
             return nil
         case .shift, .commandShift:
             let start = anchor.flatMap { layout.contains($0) ? $0 : nil } ?? selected ?? id
-            guard let a = layout.index(of: start), let b = layout.index(of: id) else { return nil }
-            let range = Set(layout.ids[min(a, b)...max(a, b)])
+            // Over the tabs on screen: tabs in a collapsed group between the two aren't picked.
+            let visible = layout.visibleIDs
+            let order = visible.contains(start) && visible.contains(id) ? visible : layout.ids
+            guard let a = order.firstIndex(of: start), let b = order.firstIndex(of: id) else { return nil }
+            let range = Set(order[min(a, b)...max(a, b)])
             marked = kind == .commandShift ? marked.union(range) : range
             if let selected { marked.remove(selected) }
             return nil

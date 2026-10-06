@@ -93,14 +93,15 @@ private struct GeneralSettings: View {
             Picker("Search engine", selection: $engine) {
                 ForEach(SearchEngine.allCases) { Text($0.name).tag($0.rawValue) }
             }
-            Picker("Tabs", selection: $verticalTabs) {
-                Text("Across the top").tag(false)
-                Text("In a sidebar (vertical)").tag(true)
-            }
-            .onChange(of: verticalTabs) { _, vertical in
-                // Every open window follows; View ▸ Use Vertical Tabs changes one window.
+            // Picking here applies to every open window and new ones; View ▸ Use Vertical Tabs
+            // changes one window (and the default, which this shows).
+            Picker("Tabs", selection: Binding(get: { verticalTabs }, set: { vertical in
+                verticalTabs = vertical
                 for window in browser.windows { window.verticalTabs = vertical }
                 browser.scheduleRefresh()
+            })) {
+                Text("Across the top").tag(false)
+                Text("In a sidebar (vertical)").tag(true)
             }
             Toggle("Show the bookmarks bar", isOn: $showBookmarksBar)
             LabeledContent("Downloads go to") {

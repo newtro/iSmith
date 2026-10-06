@@ -141,6 +141,37 @@ final class TabManagementTests: XCTestCase {
         XCTAssertEqual(s.targets(for: ids[3], in: l), Array(ids[1...5]))
         XCTAssertEqual(s.click(ids[0], .plain, in: l), ids[0])
         XCTAssertTrue(s.marked.isEmpty)
+        // Two tabs: a plain click on the picked one keeps both.
+        l.select(ids[0])
+        var two = TabSelection()
+        _ = two.click(ids[2], .command, in: l)
+        XCTAssertEqual(two.click(ids[2], .plain, in: l), ids[2])
+        l.select(ids[2])
+        two.prune(l)
+        XCTAssertEqual(two.targets(for: ids[2], in: l), [ids[0], ids[2]])
+    }
+
+    func testShiftClickSkipsTabsInCollapsedGroups() {
+        var l = layout()
+        let g = l.createGroup(with: [ids[2], ids[3]], name: "G")!
+        l.setCollapsed(g, true)
+        var s = TabSelection()
+        _ = s.click(ids[4], .shift, in: l)
+        XCTAssertEqual(s.targets(for: ids[4], in: l), [ids[0], ids[1], ids[4]], "hidden tabs aren't picked")
+    }
+
+    func testAgentTakingAPinnedTabPinsItAgainWhenTakenBack() {
+        var l = layout()
+        l.pin([ids[1]])
+        l.addToAgentGroup(ids[1])
+        XCTAssertFalse(l.isPinned(ids[1]))
+        XCTAssertTrue(l.group(of: ids[1])?.agent == true)
+        l.removeFromGroup([ids[1]])
+        XCTAssertTrue(l.isPinned(ids[1]), "taking it back pins it again")
+        XCTAssertTrue(l.unpinnedForAgent.isEmpty)
+        l.addToAgentGroup(ids[3])
+        l.removeFromGroup([ids[3]])
+        XCTAssertFalse(l.isPinned(ids[3]), "a tab that wasn't pinned stays unpinned")
     }
 
     func testShiftClickWithoutAnAnchorStartsAtTheSelectedTab() {
@@ -201,6 +232,30 @@ final class TabManagementTests: XCTestCase {
         XCTAssertEqual(TabSearch.filter(entries, query: "store etsy").map(\.id), [ids[1]], "group names count; every word must match")
         XCTAssertEqual(TabSearch.filter(entries, query: "github pull").map(\.id), [ids[2]])
         XCTAssertTrue(TabSearch.filter(entries, query: "store github").isEmpty)
+    }
+
+    // MARK: Site icons
+
+    func testIconsComeOnlyFromTheSiteAndOnlyAsSmallRasterImages() throws {
+        let page = URL(string: "https://mail.contoso.com/inbox")!
+        XCTAssertTrue(Favicons.sameSite(URL(string: "https://static.contoso.com/i.png")!, as: page))
+        XCTAssertFalse(Favicons.sameSite(URL(string: "https://tracker.example/i.png")!, as: page), "another site's icon isn't fetched")
+        XCTAssertFalse(Favicons.sameSite(URL(string: "data:image/png;base64,AAAA")!, as: page))
+        XCTAssertEqual(Favicons.key(URL(string: "http://127.0.0.1:8080/x")), "http://127.0.0.1:8080")
+        XCTAssertNil(Favicons.key(URL(string: "file:///tmp/x.html")))
+
+        func png(_ width: Int, _ height: Int) -> Data {
+            let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height, bitsPerSample: 8,
+                                       samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
+                                       bytesPerRow: 0, bitsPerPixel: 0)!
+            return rep.representation(using: .png, properties: [:])!
+        }
+        let small = try XCTUnwrap(Favicons.decode(png(48, 48)))
+        XCTAssertEqual(small.size, NSSize(width: 16, height: 16))
+        XCTAssertNil(Favicons.decode(png(2048, 1024)), "a huge image isn't decoded")
+        let svg = Data(#"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><rect width="16" height="16"/></svg>"#.utf8)
+        XCTAssertNil(Favicons.decode(svg), "SVG isn't decoded in the app")
+        XCTAssertNil(Favicons.decode(Data("not an image".utf8)))
     }
 
     // MARK: Saving

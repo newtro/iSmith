@@ -15,15 +15,16 @@ final class TabSmokeShots: XCTestCase {
         let out = URL(fileURLWithPath: folder, isDirectory: true)
         try FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
 
-        let sites: [(String, String)] = [("Mail (3)", "#2563eb"), ("Boards", "#16a34a"), ("Repos", "#7c3aed"),
-                                         ("Wiki", "#ea580c"), ("Calendar", "#dc2626"), ("Docs", "#0891b2"),
-                                         ("Pipelines", "#ca8a04")]
+        let sites: [(String, NSColor)] = [("(3) Contoso Mail", .systemBlue), ("Contoso Boards", .systemGreen),
+                                          ("Contoso Repos", .systemPurple), ("Contoso Wiki", .systemOrange),
+                                          ("Contoso Calendar", .systemRed), ("Contoso Docs", .systemTeal),
+                                          ("Contoso Pipelines", .systemYellow)]
         var servers: [TestHTTPServer] = []
         for (title, color) in sites {
-            let icon = #"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><rect width="16" height="16" rx="4" fill="\#(color)"/><text x="8" y="12" font-size="11" font-family="Helvetica" font-weight="bold" text-anchor="middle" fill="white">\#(title.prefix(1))</text></svg>"#
+            let letter = String(title.replacingOccurrences(of: "(3) ", with: "").dropFirst("Contoso ".count).prefix(1))
             let server = try TestHTTPServer(routes: [
-                "/": .html("<html><head><title>Contoso \(title)</title><link rel=icon href=/icon.svg></head><body style='font:28px -apple-system;padding:40px'><h1>Contoso \(title)</h1><p>A fixture page.</p></body></html>"),
-                "/icon.svg": .init(type: "image/svg+xml", body: Data(icon.utf8)),
+                "/": .html("<html><head><title>\(title)</title><link rel=icon href=/icon.png></head><body style='font:28px -apple-system;padding:40px'><h1>\(title)</h1><p>A fixture page.</p></body></html>"),
+                "/icon.png": .init(type: "image/png", body: Self.icon(letter, color)),
             ])
             try await server.start()
             servers.append(server)
@@ -120,5 +121,20 @@ final class TabSmokeShots: XCTestCase {
 
         nsWindow.orderOut(nil)
         await wired.tearDown()
+    }
+
+    /// A 32-pixel PNG: a letter on a colored tile.
+    private static func icon(_ letter: String, _ color: NSColor) -> Data {
+        let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 32, pixelsHigh: 32, bitsPerSample: 8, samplesPerPixel: 4,
+                                   hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        color.setFill()
+        NSBezierPath(roundedRect: NSRect(x: 0, y: 0, width: 32, height: 32), xRadius: 8, yRadius: 8).fill()
+        let attributes: [NSAttributedString.Key: Any] = [.font: NSFont.boldSystemFont(ofSize: 20), .foregroundColor: NSColor.white]
+        let size = letter.size(withAttributes: attributes)
+        letter.draw(at: NSPoint(x: 16 - size.width / 2, y: 16 - size.height / 2), withAttributes: attributes)
+        NSGraphicsContext.restoreGraphicsState()
+        return rep.representation(using: .png, properties: [:])!
     }
 }

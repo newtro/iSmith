@@ -1237,22 +1237,27 @@ The engineering half is done; the acceptance run on Scott's accounts is next, fo
   unless the view under the mouse is a control (`NSControl`, which reports an opaque rect for
   window moves); `mouseDownCanMoveWindow` doesn't count there. Tabs and group labels were plain
   `NSView`s, so the window server moved the window. They are `NSControl`s now; empty strip space
-  is still a plain view and still moves the window. `TabDragTests` checks every tab and label in
+  is still a plain view and still moves the window. AppKit only counts an enabled control that
+  accepts first responder, so the tabs keep `acceptsFirstResponder` but refuse
+  `becomeFirstResponder`, and a click hands the keyboard back to the page if AppKit left it with
+  the window. `TabDragTests` checks every tab and label in
   a real window against AppKit's own answer (`_opaqueRectForWindowMoveWhenInTitlebar`, read only
   in the test), and drives a drop through the strip. The insertion marker is a 3-point bar (the
   group's color for a drop into a group) and the dragged tab dims.
 - **Pinned tabs**: a flag on the layout slot (`TabLayout.Slot.pinned`, saved as `pinned: true`
   on the tab in session.json, per space). Pinned tabs come first and are never in a group; a
   drop among them pins, a drop elsewhere unpins; grouping a pinned tab or an agent taking it
-  over unpins it. They show the site icon only, with the page's unread count. **⌘W on a pinned
+  over unpins it (taking it back from the agent pins it again; not saved across a relaunch). They show the site icon only, with the page's unread count. **⌘W on a pinned
   tab doesn't close it** (as in Safari): it selects the first unpinned tab (a beep if there's
   none); its context menu, middle-click and the overview still close it. "Close Other Tabs" and
   "Close Tabs to the Right" leave pinned tabs alone.
-- **Site icons** (`Favicons.swift`): kept in memory per origin, from the page's
-  `<link rel=icon>` after it loads, else `/favicon.ico`, fetched without cookies (ephemeral
-  session), at most 512 KB; a letter tile otherwise.
+- **Site icons** (`Favicons.swift`): kept in memory per origin and fetched only when a page has
+  loaded in a tab (a restored tab shows a letter until it loads): the page's `<link rel=icon>`
+  if it's on the same site, else the origin's `/favicon.ico`. No cookies (ephemeral session),
+  streamed with a 256 KB cap and a 15-second limit, and decoded by ImageIO as a 64-pixel
+  thumbnail of a raster type only (no SVG or PDF; nothing over a million pixels).
 - **Picking several tabs** (`TabSelection`): ⌘-click adds or removes a tab, ⇧-click picks the
-  range from the last clicked tab (⌘⇧-click adds the range), a click on a picked tab keeps the
+  range of visible tabs from the last clicked tab (⌘⇧-click adds the range), a click on a picked tab keeps the
   selection, any other click clears it. The selected tab always belongs to the selection, so its
   menu acts on all of them. The context menu (`TabMenu`, shared by the strip, sidebar and
   overview): reload, duplicate, pin/unpin, new group, add to group, move to space, move to new
@@ -1263,7 +1268,8 @@ The engineering half is done; the acceptance run on Scott's accounts is next, fo
   wins over the "Search man Page Index" service on the same keys): a sheet listing the space's
   tabs with icon, title, site, group and pin. Typing filters (every word in the title, site or
   group name; case and accents ignored); ↑↓ move, Return goes to the tab, Esc clears the picks
-  then closes; ⇧↑↓, ⌘-click and ⇧-click pick several; ⌘⌫ or "Close" closes them; "Move To"
+  then closes; ⇧↑↓, ⌘-click and ⇧-click pick several (it opens with the strip's selection);
+  ⌘⌫ in an empty search field, or "Close", closes them; "Move To"
   moves them to a group, a new group, a space or a new window.
 - **Vertical tabs**: per window (`WindowRecord.verticalTabs`), toggled in View ▸ Use Vertical
   Tabs (which also becomes the default for new windows) or Settings ▸ General ▸ Tabs (all open
