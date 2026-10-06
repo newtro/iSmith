@@ -1315,7 +1315,12 @@ The engineering half is done; the acceptance run on Scott's accounts is next, fo
   - Copies set aside earlier (`passwords.unreadable-<time>.sqlite`) are opened at launch: logins
     that decrypt with the current key and aren't saved yet are added back (the store is backed
     up first as `passwords.before-restore-<time>.sqlite`; nothing is removed or overwritten, and
-    the copy is only read). A copy sealed with another key is mentioned once.
+    the copy is only read). Each copy is restored once (marked in the store's `meta` table, so a
+    login deleted afterwards stays deleted), newest copy first. A copy sealed with another key
+    is mentioned once.
+  - browser.sqlite that can't be opened (including a bookmarks migration that failed or
+    couldn't back up first) used to turn history and bookmarks off with only a log line; it's an
+    alert at launch now.
   - Every launch logs `passwords store opened: N logins, M unreadable, K restored` (counts only)
     under `com.scottsmith.ismith`/`passwords`, so the next report can be checked against what
     the file held.

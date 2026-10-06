@@ -241,9 +241,24 @@ public final class PasswordStore: @unchecked Sendable {
         let dir = fileURL.deletingLastPathComponent()
         let base = fileURL.deletingPathExtension().lastPathComponent + ".unreadable-"
         let names = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
+        // "unreadable-<stamp>[-<n>].sqlite": newest first, so when two copies hold the same login
+        // the newer one is the one restored.
+        func order(_ name: String) -> (Int, Int) {
+            let middle = name.dropFirst(base.count).dropLast(fileURL.pathExtension.count + 1)
+            let parts = middle.split(separator: "-").map { Int($0) ?? 0 }
+            return (parts.first ?? 0, parts.count > 1 ? parts[1] : 1)
+        }
         return names.filter { $0.hasPrefix(base) && $0.hasSuffix("." + fileURL.pathExtension) }
-            .sorted()
+            .sorted { order($0) > order($1) }
             .map { dir.appendingPathComponent($0) }
+    }
+
+    /// Whether `recover(from:)` already went through this copy. Each copy is restored once, so
+    /// a login deleted after it was restored doesn't come back at the next launch.
+    public func wasRecovered(_ copy: URL) throws -> Bool {
+        try dbQueue.read { db in
+            try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM meta WHERE key = ?", arguments: ["recovered:" + copy.lastPathComponent]) ?? 0 > 0
+        }
     }
 
     /// What `recover(from:)` did.
@@ -263,9 +278,15 @@ public final class PasswordStore: @unchecked Sendable {
     /// store already has (by id, or by site and username) keeps the store's version, and the copy
     /// itself is only read. Before anything is added the store is backed up next to itself as
     /// `passwords.before-restore-<time>.sqlite`. Returns nil when the copy was sealed with another
-    /// key (or isn't a passwords database), so nothing in it can be read.
+    /// key (or isn't a passwords database), so nothing in it can be read; throws
+    /// `databaseUnavailable` when it can't be read just now. The copy is marked as gone through
+    /// (`wasRecovered`); callers restore each copy once.
     public func recover(from copy: URL) throws -> Recovery? {
-        guard Self.inspect(copy, key: key, readOnly: true) == .usable else { return nil }
+        switch Self.inspect(copy, key: key, readOnly: true) {
+        case .usable: break
+        case .wrongKey, .notOurs: return nil
+        case .unavailable(let why): throw PasswordStoreError.databaseUnavailable(why)
+        }
         var config = Self.configuration()
         config.readonly = true
         let source = try DatabaseQueue(path: copy.path, configuration: config)
@@ -292,9 +313,11 @@ public final class PasswordStore: @unchecked Sendable {
                 }
             }
         }
-        guard !toAdd.isEmpty || !neverSave.isEmpty else { return result }
+        let marker = "recovered:" + copy.lastPathComponent
         if !toAdd.isEmpty { result.backup = try backUp(reason: "before-restore") }
         try dbQueue.write { db in
+            try db.execute(sql: "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                           arguments: [marker, Data(String(Date().timeIntervalSince1970).utf8)])
             for login in toAdd { try insert(db, login) }
             for row in neverSave {
                 let origin: String? = row["origin"]

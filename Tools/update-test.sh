@@ -9,7 +9,8 @@
 # Developer ID; not notarized, so they only run on this Mac) and compiled with ISMITH_UPDATE_TEST,
 # which adds App/UpdateTestHook.swift: it seeds logins and writes a report of what the store holds.
 #
-# 1. Builds A (9.0.0) and B (9.0.1), a throwaway EdDSA key, and a local appcast offering B.
+# 1. Builds A (9.0.0) and B (9.0.1) from a copy of the sources (build/update-test/src; the repo's
+#    project and Info.plist are left alone), a throwaway EdDSA key, and a local appcast offering B.
 # 2. Launches A: it seeds the logins and its updater downloads B in the background.
 # 3. Quits A: Sparkle's installer replaces the app in place. Launches B.
 # 4. Passes when B opens the same store with every login readable.
@@ -25,21 +26,22 @@ step() { print -P "%B==> $1%b" }
 
 rm -rf "$OUT"; mkdir -p "$OUT/feed" "$OUT/data" "$OUT/reports" "$OUT/install"
 
-step "Throwaway update key and test project"
+stop_server() { [[ -n "${SERVER:-}" ]] && kill "$SERVER" 2>/dev/null || true }
+trap stop_server EXIT INT TERM HUP
+
+step "Throwaway update key and a test copy of the sources"
 openssl genpkey -algorithm ed25519 -out "$OUT/ed.pem"
 openssl pkey -in "$OUT/ed.pem" -outform DER | tail -c 32 | base64 > "$OUT/ed-priv.b64"
 PUB="$(openssl pkey -in "$OUT/ed.pem" -pubout -outform DER | tail -c 32 | base64)"
+# The test identity lives only in this copy: the repo's project and App/Info.plist are never
+# regenerated, so an interrupted run can't leave a build of the real app with the test identity.
+rsync -a --exclude /build --exclude .build --exclude /.git --exclude /.claude --exclude /iSmith.xcodeproj \
+  --exclude /spike "$ROOT/" "$OUT/src/"
 sed -e "s|PRODUCT_BUNDLE_IDENTIFIER: com.scottsmith.ismith$|PRODUCT_BUNDLE_IDENTIFIER: $ID|" \
     -e "s|SUFeedURL: .*|SUFeedURL: http://127.0.0.1:$PORT/appcast.xml|" \
-    -e "s|SUPublicEDKey: .*|SUPublicEDKey: $PUB|" project.yml > "$OUT/project.yml"
-cp "$OUT/project.yml" project-updatetest.yml
-restore() {
-  rm -f project-updatetest.yml
-  xcodegen generate -q
-  [[ -n "${SERVER:-}" ]] && kill "$SERVER" 2>/dev/null || true
-}
-trap restore EXIT
-xcodegen generate -q --spec project-updatetest.yml
+    -e "s|SUPublicEDKey: .*|SUPublicEDKey: $PUB|" project.yml > "$OUT/src/project.yml"
+cd "$OUT/src"
+xcodegen generate -q
 
 cat > "$OUT/ExportOptions.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>

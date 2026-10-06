@@ -124,6 +124,8 @@ extension BrowserState {
         var report = PasswordLaunchReport(movedAside: store.movedAside)
         for copy in PasswordStore.setAsideCopies(of: store.fileURL) where copy != store.movedAside {
             do {
+                // Once per copy: a login deleted after it was restored stays deleted.
+                if try store.wasRecovered(copy) { continue }
                 if let result = try store.recover(from: copy) {
                     if result.restored > 0 { report.restored.append((copy, result.restored, result.backup)) }
                 } else if !reported.contains(copy.lastPathComponent) {

@@ -74,6 +74,8 @@ final class BrowserState: NSObject, ObservableObject {
     /// opened (`passwordsProblem` says why); pages then work without it.
     let passwords: PasswordAutofill?
     let passwordsProblem: String?
+    /// Why browser.sqlite (history and bookmarks) couldn't be opened, said at launch.
+    private(set) var browserDataProblem: String?
     /// What the launch check found in the passwords store (`reportPasswordStoreAtLaunch`).
     var passwordsLaunchReport: PasswordLaunchReport?
     /// The save bar, autofill popover and ⌘\.
@@ -148,6 +150,7 @@ final class BrowserState: NSObject, ObservableObject {
             if let aside = data?.movedAside { NSLog("iSmith: browser.sqlite couldn't be opened; kept a copy at \(aside.path)") }
         } catch {
             NSLog("iSmith: browser.sqlite couldn't be opened (\(error)); history and bookmarks are off")
+            browserDataProblem = (error as? BrowserDataError)?.description ?? String(describing: error)
         }
         self.data = data
         // Made here, not in the windowless XCTest host app; the lists load in `start()`.
@@ -245,6 +248,13 @@ final class BrowserState: NSObject, ObservableObject {
         // A file moved aside, logins restored from an earlier copy, or logins that don't
         // decrypt are said at once, never left as a silently empty list.
         reportPasswordStoreAtLaunch()
+        if let problem = browserDataProblem {
+            // Not silent: otherwise the bookmarks bar and history just look empty.
+            let alert = NSAlert()
+            alert.messageText = "History and bookmarks are off for now"
+            alert.informativeText = "\(problem)\n\nNothing was deleted: browser.sqlite (and any browser.before-*.sqlite backup next to it) is in \(paths.dataDir.path). Quit and reopen \(AppIdentity.displayName) to try again."
+            alert.runModal()
+        }
         if let history = data?.history {
             let cutoff = Date().addingTimeInterval(-Self.historyKept)
             Task.detached(priority: .background) { try? history.prune(olderThan: cutoff) }

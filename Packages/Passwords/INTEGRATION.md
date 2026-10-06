@@ -28,8 +28,10 @@ func openPasswords(dataDir: URL?) -> PasswordAutofill? {
     }
     // Earlier copies set aside: add back what opens with the current key (backs the store up
     // first; never removes anything), then report what doesn't decrypt.
-    for copy in PasswordStore.setAsideCopies(of: store.fileURL) where copy != store.movedAside {
-        _ = try? store.recover(from: copy)   // nil: sealed with another key
+    // Each copy once (newest first): a login deleted after it was restored must stay deleted.
+    for copy in PasswordStore.setAsideCopies(of: store.fileURL)
+    where copy != store.movedAside && (try? store.wasRecovered(copy)) == false {
+        _ = try? store.recover(from: copy)   // nil: sealed with another key; throws if locked
     }
     let health = try store.health()          // rows and unreadable rows: report unreadable > 0
     let autofill = PasswordAutofill(store: store)   // one for the whole app; passwords are global

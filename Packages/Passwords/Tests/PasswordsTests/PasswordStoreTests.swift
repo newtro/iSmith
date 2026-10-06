@@ -324,6 +324,33 @@ final class PasswordStoreTests: XCTestCase {
         XCTAssertEqual(try store.allLogins().count, 6)
     }
 
+    func testEachCopyIsRecoveredOnceAndNewestFirst() throws {
+        let keys = InMemoryKeyStore()
+        let site = Origin(string: "https://site.example")!
+        let older = dir.appendingPathComponent("passwords.unreadable-100.sqlite")
+        let newer = dir.appendingPathComponent("passwords.unreadable-200.sqlite")
+        let sameSecond = dir.appendingPathComponent("passwords.unreadable-200-2.sqlite")
+        for (copy, password) in [(older, "old"), (newer, "new"), (sameSecond, "newest")] {
+            let store = try PasswordStore(fileURL: dbURL, keyStore: keys)
+            try store.add(origin: site, username: "me", password: password)
+            try FileManager.default.moveItem(at: dbURL, to: copy)
+        }
+        XCTAssertEqual(PasswordStore.setAsideCopies(of: dbURL), [sameSecond, newer, older], "newest first")
+
+        let store = try PasswordStore(fileURL: dbURL, keyStore: keys)
+        for copy in PasswordStore.setAsideCopies(of: dbURL) where try !store.wasRecovered(copy) {
+            _ = try store.recover(from: copy)
+        }
+        XCTAssertEqual(try store.allLogins().map(\.password), ["newest"], "the newest copy's password wins")
+        XCTAssertTrue(try PasswordStore.setAsideCopies(of: dbURL).allSatisfy { try store.wasRecovered($0) })
+
+        // Deleted after it was restored: the next launch leaves it deleted.
+        try store.delete(id: try XCTUnwrap(store.allLogins().first).id)
+        let relaunched = try PasswordStore(fileURL: dbURL, keyStore: keys)
+        XCTAssertTrue(try PasswordStore.setAsideCopies(of: dbURL).allSatisfy { try relaunched.wasRecovered($0) })
+        XCTAssertTrue(try relaunched.allLogins().isEmpty)
+    }
+
     func testRecoverIgnoresACopySealedWithAnotherKey() throws {
         try PasswordStore(fileURL: dbURL, keyStore: InMemoryKeyStore()).add(origin: example, username: "a", password: "b")
         let aside = dir.appendingPathComponent("passwords.unreadable-100.sqlite")
