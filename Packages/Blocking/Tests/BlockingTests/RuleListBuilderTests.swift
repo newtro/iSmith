@@ -64,8 +64,8 @@ final class RuleListBuilderTests: XCTestCase {
     }
 
     /// 200 blocking lines across two sources with a limit of 50 rules per list: each list stays
-    /// under the limit, every blocking rule lands in exactly one list, and every list carries
-    /// every exception, including the other source's.
+    /// under the limit, every blocking line lands in exactly one list (as its two rules, see
+    /// `subresourceTypes`), and every list carries every exception, including the other source's.
     func testSplitsIntoListsUnderTheLimitWithExceptionsInEach() throws {
         let alpha = (0..<120).map { "||alpha\($0).example^" } + ["@@||alpha0.example/ok.js"]
         let beta = (0..<80).map { "||beta\($0).example^" } + ["@@||alpha1.example/ok.js", "@@||beta0.example/ok.js"]
@@ -87,7 +87,7 @@ final class RuleListBuilderTests: XCTestCase {
             XCTAssertLessThan(lastBlock, firstException, list.name)
             blocked += actions(rules, "block").map(urlFilter)
         }
-        XCTAssertEqual(blocked.count, 200)
+        XCTAssertEqual(blocked.count, 400)
         XCTAssertEqual(Set(blocked).count, 200)
     }
 
@@ -95,7 +95,8 @@ final class RuleListBuilderTests: XCTestCase {
         let lines = (0..<300).map { "||split\($0).example^" } + ["@@||split0.example/ok.js"]
         let lists = try RuleListBuilder.build(sources: [("split", lines.joined(separator: "\n"))],
                                               safariVersion: .autodetect(), maxRulesPerList: 100)
-        XCTAssertEqual(lists.count, 4)
+        XCTAssertGreaterThan(lists.count, 6, "300 lines make 600 rules")
+        XCTAssertTrue(lists.allSatisfy { $0.ruleCount <= 100 })
         let dir = try TempDir()
         let store = try await WebKitRuleListStore(directory: dir.url)
         for list in lists {

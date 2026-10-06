@@ -76,11 +76,59 @@ public enum RuleListBuilder {
             let parts = try convert(blocking: source.lines[...], globals: globals, globalRules: globalRules,
                                     version: safariVersion, limit: limit)
             for (index, part) in parts.enumerated() {
-                result.append(ConvertedRuleList(name: "\(source.name)-\(index + 1)", json: part.safariRulesJSON,
-                                                ruleCount: part.safariRulesCount, skippedLines: part.errorsCount))
+                result.append(ConvertedRuleList(name: "\(source.name)-\(index + 1)", json: part.json,
+                                                ruleCount: part.ruleCount, skippedLines: part.skippedLines))
             }
         }
         return result
+    }
+
+    /// What a blocking rule blocks unless it names `$document` or `$popup`, as Adblock Plus and
+    /// Brave read it: every load but a page in a tab. WebKit reads a rule with no resource type
+    /// as every type, a tab's page and a `window.open` popup included, and the converter writes
+    /// "every type but X" (`$~image`) with "document" in it. So `||urldefense.com^$third-party`
+    /// stopped Outlook from opening Proofpoint-wrapped links at all. Such a rule keeps its other
+    /// types and gets a twin for documents in frames (ad iframes). A rule that is only
+    /// "document" (`$popup`, `$document`) still blocks pages.
+    static let subresourceTypes = ["image", "style-sheet", "script", "font", "raw", "svg-document", "media"]
+
+    /// A converted list with every blocking rule that would block a page in a tab without saying
+    /// so split as `subresourceTypes` describes, and how many rules the split added.
+    static func withoutPageBlocking(_ json: String) throws -> (json: String, added: Int) {
+        guard let rules = try JSONSerialization.jsonObject(with: Data(json.utf8)) as? [[String: Any]] else {
+            throw CocoaError(.coderReadCorrupt)
+        }
+        var out: [[String: Any]] = []
+        out.reserveCapacity(rules.count * 2)
+        for rule in rules {
+            guard (rule["action"] as? [String: Any])?["type"] as? String == "block",
+                  let trigger = rule["trigger"] as? [String: Any] else {
+                out.append(rule)
+                continue
+            }
+            let context = trigger["load-context"] as? [String]
+            let types = trigger["resource-type"] as? [String] ?? subresourceTypes + ["document"]
+            // Only in frames, or only pages and named as such: nothing to change.
+            guard context != ["child-frame"], types.contains("document"), types != ["document"] else {
+                out.append(rule)
+                continue
+            }
+            var subresources = rule
+            var t = trigger
+            t["resource-type"] = types.filter { $0 != "document" }
+            subresources["trigger"] = t
+            out.append(subresources)
+            // A rule only for top frames blocked nothing in frames to keep.
+            if context != ["top-frame"] {
+                var frames = rule
+                t["resource-type"] = ["document"]
+                t["load-context"] = ["child-frame"]
+                frames["trigger"] = t
+                out.append(frames)
+            }
+        }
+        let data = try JSONSerialization.data(withJSONObject: out, options: [.withoutEscapingSlashes])
+        return (String(decoding: data, as: UTF8.self), out.count - rules.count)
     }
 
     /// Whitespace and the byte-order mark some downloads start with.
@@ -111,15 +159,23 @@ public enum RuleListBuilder {
         return result.safariRulesCount + result.discardedSafariRules
     }
 
+    private struct Part {
+        var json: String
+        var ruleCount: Int
+        var skippedLines: Int
+    }
+
     /// Converts `globals` plus `blocking`; if that's over `limit` rules, splits `blocking` into
     /// pieces sized from the overflow and converts each (recursively, in case a piece is still
     /// too big). Returns the pieces in order.
     private static func convert(blocking: ArraySlice<String>, globals: [String], globalRules: Int,
-                                version: SafariVersion, limit: Int) throws -> [ConversionResult] {
+                                version: SafariVersion, limit: Int) throws -> [Part] {
         let result = ContentBlockerConverter().convertArray(rules: globals + blocking, safariVersion: version,
                                                             advancedBlocking: false)
-        let total = result.safariRulesCount + result.discardedSafariRules
-        if total <= limit { return [result] }
+        let split = try withoutPageBlocking(result.safariRulesJSON)
+        let count = result.safariRulesCount + split.added
+        let total = count + result.discardedSafariRules
+        if total <= limit { return [Part(json: split.json, ruleCount: count, skippedLines: result.errorsCount)] }
         // One line can make several rules, but a single line never makes more than a list holds
         // beyond the exceptions; if it somehow does, stop rather than split forever.
         guard blocking.count >= 2 else {
@@ -131,7 +187,7 @@ public enum RuleListBuilder {
         let needed = Double(max(total - globalRules, 1))
         let pieces = min(blocking.count, max(2, Int((needed / max(room, 1)).rounded(.up))))
         let size = (blocking.count + pieces - 1) / pieces
-        var out: [ConversionResult] = []
+        var out: [Part] = []
         var start = blocking.startIndex
         while start < blocking.endIndex {
             let end = min(start + size, blocking.endIndex)

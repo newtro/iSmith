@@ -164,9 +164,10 @@ public final class BlockingController {
     private var downloadsDir: URL { configuration.directory.appendingPathComponent("lists", isDirectory: true) }
 
     /// What the compiled lists depend on besides the list texts. A change means recompiling.
+    /// Format 2: blocking rules without a type no longer block pages in tabs or popups.
     private var fingerprint: String {
         let names = configuration.sources.map(\.name).joined(separator: ",")
-        return "format 1; converter \(ContentBlockerConverterVersion.library); safari \(SafariVersion.autodetect().doubleValue); "
+        return "format 2; converter \(ContentBlockerConverterVersion.library); safari \(SafariVersion.autodetect().doubleValue); "
             + "limit \(configuration.maxRulesPerList); sources \(names)"
     }
 
