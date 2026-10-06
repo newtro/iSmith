@@ -1227,3 +1227,52 @@ The engineering half is done; the acceptance run on Scott's accounts is next, fo
 3. **Page index**: local text and embeddings per space, searched by you and by agents.
 4. Then setup sync across Macs (iCloud Drive), space templates and archiving. (Per-cookie
    conflict timing was done in P8.)
+5. **Tab management** (built 2026-10-06): the drag fix, pinned tabs, picking several tabs, the
+   tab overview and vertical tabs. Notes below.
+
+### Tab management notes (2026-10-06)
+
+- **Dragging a tab moved the window** (reported on 1.1.3). The strip sits in the title bar of a
+  window with a full-size content view. In the title bar, AppKit turns a drag into a window move
+  unless the view under the mouse is a control (`NSControl`, which reports an opaque rect for
+  window moves); `mouseDownCanMoveWindow` doesn't count there. Tabs and group labels were plain
+  `NSView`s, so the window server moved the window. They are `NSControl`s now; empty strip space
+  is still a plain view and still moves the window. `TabDragTests` checks every tab and label in
+  a real window against AppKit's own answer (`_opaqueRectForWindowMoveWhenInTitlebar`, read only
+  in the test), and drives a drop through the strip. The insertion marker is a 3-point bar (the
+  group's color for a drop into a group) and the dragged tab dims.
+- **Pinned tabs**: a flag on the layout slot (`TabLayout.Slot.pinned`, saved as `pinned: true`
+  on the tab in session.json, per space). Pinned tabs come first and are never in a group; a
+  drop among them pins, a drop elsewhere unpins; grouping a pinned tab or an agent taking it
+  over unpins it. They show the site icon only, with the page's unread count. **⌘W on a pinned
+  tab doesn't close it** (as in Safari): it selects the first unpinned tab (a beep if there's
+  none); its context menu, middle-click and the overview still close it. "Close Other Tabs" and
+  "Close Tabs to the Right" leave pinned tabs alone.
+- **Site icons** (`Favicons.swift`): kept in memory per origin, from the page's
+  `<link rel=icon>` after it loads, else `/favicon.ico`, fetched without cookies (ephemeral
+  session), at most 512 KB; a letter tile otherwise.
+- **Picking several tabs** (`TabSelection`): ⌘-click adds or removes a tab, ⇧-click picks the
+  range from the last clicked tab (⌘⇧-click adds the range), a click on a picked tab keeps the
+  selection, any other click clears it. The selected tab always belongs to the selection, so its
+  menu acts on all of them. The context menu (`TabMenu`, shared by the strip, sidebar and
+  overview): reload, duplicate, pin/unpin, new group, add to group, move to space, move to new
+  window, bookmark (several go into a folder in Other Bookmarks), sort by site (several sort
+  among themselves; one tab sorts its run: the pinned tabs, its group or the ungrouped tabs),
+  close, close others, close to the right. Dragging moves one tab, not the whole selection.
+- **Tab overview** (⌘⇧A, View ▸ Search Tabs…; no other menu item uses it, and an app's own menu
+  wins over the "Search man Page Index" service on the same keys): a sheet listing the space's
+  tabs with icon, title, site, group and pin. Typing filters (every word in the title, site or
+  group name; case and accents ignored); ↑↓ move, Return goes to the tab, Esc clears the picks
+  then closes; ⇧↑↓, ⌘-click and ⇧-click pick several; ⌘⌫ or "Close" closes them; "Move To"
+  moves them to a group, a new group, a space or a new window.
+- **Vertical tabs**: per window (`WindowRecord.verticalTabs`), toggled in View ▸ Use Vertical
+  Tabs (which also becomes the default for new windows) or Settings ▸ General ▸ Tabs (all open
+  windows and new ones). The sidebar is the same `StripContentView` laid out down instead of
+  across: pinned icons in a grid on top, groups as collapsible headers with their tabs
+  indented, the same drops and menus. The strip hides; the toolbar moves up and its empty space
+  drags the window. Switching keeps the page's view in place (one view structure for both).
+- Smoke run: `TabSmokeShots` (skipped unless `ISMITH_SMOKE_SHOTS=<folder>`) opens a real window
+  on local fixture sites and asks an outside watcher for `screencapture -l` shots of that window
+  (the test host can't record the screen itself). Real pointer drags weren't driven: synthesizing
+  input into the app's window from outside isn't possible without global input, so the drag
+  path is checked through AppKit's title-bar answer and a drop driven in code.

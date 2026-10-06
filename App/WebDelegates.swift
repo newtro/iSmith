@@ -271,6 +271,7 @@ extension BrowserState: WKNavigationDelegate {
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        if owner(of: webView) != nil { Favicons.shared.pageLoaded(webView) }
         guard let (_, tabs, tab) = owner(of: webView), let url = webView.url,
               let title = webView.title, !title.isEmpty else { return }
         try? data?.history.updateTitle(space: tabs.spaceID, url: url, title: title)

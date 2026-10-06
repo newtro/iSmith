@@ -56,6 +56,7 @@ struct TabGroup: Codable, Hashable, Identifiable {
 /// selected. Tabs are known only by id here, so the rules can be tested without web views.
 ///
 /// Invariants, restored after every change by `normalize()`:
+/// - pinned tabs come first and are never in a group;
 /// - a group's tabs are next to each other (a group is one run in the strip);
 /// - every group has at least one tab;
 /// - the selection, if any, is one of the tabs.
@@ -63,10 +64,13 @@ struct TabLayout: Equatable {
     struct Slot: Equatable {
         var id: UUID
         var group: UUID?
+        /// Pinned: shown as an icon at the start of the strip (per space, saved).
+        var pinned = false
     }
 
     /// One thing in the strip, left to right.
     enum Item: Equatable {
+        case pinned(UUID)
         case group(TabGroup, count: Int)
         case tab(UUID, group: TabGroup?)
     }
@@ -100,6 +104,9 @@ struct TabLayout: Equatable {
     func group(_ id: UUID) -> TabGroup? { groups.first { $0.id == id } }
     func group(of tab: UUID) -> TabGroup? { groupID(of: tab).flatMap { group($0) } }
     func tabs(in group: UUID) -> [UUID] { slots.filter { $0.group == group }.map(\.id) }
+    func isPinned(_ id: UUID) -> Bool { slots.first { $0.id == id }?.pinned == true }
+    var pinnedIDs: [UUID] { slots.filter(\.pinned).map(\.id) }
+    var pinnedCount: Int { slots.prefix { $0.pinned }.count }
     /// The space's Agent group, if it has one.
     var agentGroup: TabGroup? { groups.first { $0.agent } }
 
@@ -108,6 +115,10 @@ struct TabLayout: Equatable {
         var out: [Item] = []
         var current: UUID?
         for slot in slots {
+            if slot.pinned {
+                out.append(.pinned(slot.id))
+                continue
+            }
             let g = slot.group.flatMap { group($0) }
             if let g, g.id != current {
                 out.append(.group(g, count: tabs(in: g.id).count))
@@ -135,18 +146,28 @@ struct TabLayout: Equatable {
     // MARK: - Tabs
 
     /// Adds a tab before `before` (or at the end of `group`'s run, or at the end of the strip).
-    mutating func insert(_ id: UUID, before: UUID? = nil, group: UUID? = nil) {
+    /// A pinned tab goes among the pinned ones (at their end without a pinned `before`).
+    mutating func insert(_ id: UUID, before: UUID? = nil, group: UUID? = nil, pinned: Bool = false) {
         guard !contains(id) else { return }
-        let group = group.flatMap { self.group($0) == nil ? nil : $0 }
-        slots.insert(Slot(id: id, group: group), at: insertionIndex(before: before, group: group))
+        if pinned {
+            slots.insert(Slot(id: id, group: nil, pinned: true), at: pinnedIndex(before: before))
+        } else {
+            let group = group.flatMap { self.group($0) == nil ? nil : $0 }
+            slots.insert(Slot(id: id, group: group), at: insertionIndex(before: before, group: group))
+        }
         normalize()
     }
 
     /// Adds a tab right after `anchor`, in its group (a link opened from a tab joins its group).
+    /// A tab opened from a pinned tab goes first among the unpinned ones.
     mutating func insert(_ id: UUID, after anchor: UUID) {
         guard let i = index(of: anchor) else { return insert(id) }
         guard !contains(id) else { return }
-        slots.insert(Slot(id: id, group: slots[i].group), at: i + 1)
+        if slots[i].pinned {
+            slots.insert(Slot(id: id, group: nil), at: pinnedCount)
+        } else {
+            slots.insert(Slot(id: id, group: slots[i].group), at: i + 1)
+        }
         normalize()
     }
 
@@ -171,21 +192,35 @@ struct TabLayout: Equatable {
     }
 
     /// Moves a tab before `before` (nil: to the end of `group`, or of the strip) and into `group`
-    /// (nil: out of any group). This is what a drop in the strip does.
-    mutating func move(_ id: UUID, before: UUID?, group: UUID?) {
+    /// (nil: out of any group), pinned or not. This is what a drop in the strip does.
+    mutating func move(_ id: UUID, before: UUID?, group: UUID?, pinned: Bool = false) {
         guard contains(id), before != id else {
-            if before == id { setGroup([id], group) }
+            if before == id { setPlace([id], group: group, pinned: pinned) }
             return
         }
         slots.removeAll { $0.id == id }
-        let group = group.flatMap { self.group($0) == nil ? nil : $0 }
-        slots.insert(Slot(id: id, group: group), at: insertionIndex(before: before, group: group))
+        if pinned {
+            slots.insert(Slot(id: id, group: nil, pinned: true), at: pinnedIndex(before: before))
+        } else {
+            let group = group.flatMap { self.group($0) == nil ? nil : $0 }
+            slots.insert(Slot(id: id, group: group), at: insertionIndex(before: before, group: group))
+        }
         normalize()
     }
 
-    private mutating func setGroup(_ ids: [UUID], _ group: UUID?) {
-        for i in slots.indices where ids.contains(slots[i].id) { slots[i].group = group }
+    private mutating func setPlace(_ ids: [UUID], group: UUID?, pinned: Bool) {
+        let group = pinned ? nil : group.flatMap { self.group($0) == nil ? nil : $0 }
+        for i in slots.indices where ids.contains(slots[i].id) {
+            slots[i].group = group
+            slots[i].pinned = pinned
+        }
         normalize()
+    }
+
+    /// Where a pinned tab goes: before `before` if that's pinned, else at the end of the pinned run.
+    private func pinnedIndex(before: UUID?) -> Int {
+        if let before, let i = index(of: before), slots[i].pinned { return i }
+        return pinnedCount
     }
 
     private func insertionIndex(before: UUID?, group: UUID?) -> Int {
@@ -197,9 +232,70 @@ struct TabLayout: Equatable {
             if let before, let i = index(of: before), (first...(last + 1)).contains(i) { return i }
             return last + 1
         }
-        if let before, let i = index(of: before) { return i }
+        if let before, let i = index(of: before) { return max(i, pinnedCount) }
         if let group, let last = slots.lastIndex(where: { $0.group == group }) { return last + 1 }
         return slots.count
+    }
+
+    // MARK: - Pinned tabs
+
+    /// Pins tabs: they leave their groups and go to the end of the pinned tabs, in strip order.
+    mutating func pin(_ ids: [UUID]) {
+        let moving = slots.filter { ids.contains($0.id) && !$0.pinned }
+        guard !moving.isEmpty else { return }
+        slots.removeAll { s in moving.contains { $0.id == s.id } }
+        slots.insert(contentsOf: moving.map { Slot(id: $0.id, group: nil, pinned: true) }, at: pinnedCount)
+        normalize()
+    }
+
+    /// Unpins tabs: they go first among the unpinned tabs, in strip order.
+    mutating func unpin(_ ids: [UUID]) {
+        let moving = slots.filter { ids.contains($0.id) && $0.pinned }
+        guard !moving.isEmpty else { return }
+        slots.removeAll { s in moving.contains { $0.id == s.id } }
+        let at = pinnedCount
+        slots.insert(contentsOf: moving.map { Slot(id: $0.id, group: nil) }, at: at)
+        normalize()
+    }
+
+    // MARK: - Acting on several tabs
+
+    /// The tabs right of the rightmost of `ids`, not counting pinned tabs ("Close Tabs to the Right").
+    func tabsRight(of ids: [UUID]) -> [UUID] {
+        guard let last = ids.compactMap(index(of:)).max() else { return [] }
+        return slots[(last + 1)...].filter { !$0.pinned && !ids.contains($0.id) }.map(\.id)
+    }
+
+    /// Every unpinned tab except `ids` ("Close Other Tabs" keeps pinned tabs, as other browsers do).
+    func others(than ids: [UUID]) -> [UUID] {
+        slots.filter { !$0.pinned && !ids.contains($0.id) }.map(\.id)
+    }
+
+    /// The run a tab sorts within: the pinned tabs, its group, or the ungrouped tabs.
+    func run(of id: UUID) -> [UUID] {
+        guard let i = index(of: id) else { return [] }
+        let slot = slots[i]
+        return slots.filter { $0.pinned == slot.pinned && $0.group == slot.group }.map(\.id)
+    }
+
+    /// Sorts tabs by site (`key`, such as the host), each within its run: the tabs trade places
+    /// among the slots they hold in the pinned tabs, a group, or the ungrouped tabs. Ties keep
+    /// their order.
+    mutating func sort(_ ids: [UUID], by key: (UUID) -> String) {
+        var runs: [String: [Int]] = [:]
+        for (i, slot) in slots.enumerated() where ids.contains(slot.id) {
+            let run = slot.pinned ? "pinned" : slot.group?.uuidString ?? "loose"
+            runs[run, default: []].append(i)
+        }
+        for positions in runs.values {
+            let keys = positions.map { key(slots[$0].id) }
+            let order = positions.indices.sorted { a, b in
+                keys[a] == keys[b] ? a < b : keys[a].localizedStandardCompare(keys[b]) == .orderedAscending
+            }
+            let sorted = order.map { slots[positions[$0]] }
+            for (position, slot) in zip(positions, sorted) { slots[position] = slot }
+        }
+        normalize()
     }
 
     // MARK: - Groups
@@ -289,18 +385,19 @@ struct TabLayout: Equatable {
 
     // MARK: - Invariants
 
-    /// Gathers each group's tabs into one run at the position of its first tab, drops groups with
-    /// no tabs and memberships of unknown groups, and checks the selection.
+    /// Puts pinned tabs first, gathers each group's tabs into one run at the position of its first
+    /// tab, drops groups with no tabs and memberships of unknown groups, and checks the selection.
     private mutating func normalize() {
         let known = Set(groups.map(\.id))
         for i in slots.indices where slots[i].group.map({ !known.contains($0) }) == true { slots[i].group = nil }
-        var out: [Slot] = []
+        for i in slots.indices where slots[i].pinned { slots[i].group = nil }
+        var out: [Slot] = slots.filter(\.pinned)
         var placed = Set<UUID>()
-        for slot in slots {
+        for slot in slots where !slot.pinned {
             guard let g = slot.group else { out.append(slot); continue }
             guard !placed.contains(g) else { continue }
             placed.insert(g)
-            out.append(contentsOf: slots.filter { $0.group == g })
+            out.append(contentsOf: slots.filter { $0.group == g && !$0.pinned })
         }
         // The Agent group stays at the end of the strip.
         if let agent = groups.first(where: { $0.agent })?.id, out.contains(where: { $0.group == agent }) {
@@ -309,5 +406,69 @@ struct TabLayout: Equatable {
         slots = out
         groups.removeAll { !placed.contains($0.id) }
         if let selected, !contains(selected) { self.selected = slots.first?.id }
+    }
+}
+
+/// Several tabs picked at once, for acting on them together (close, group, move, bookmark, sort).
+/// The selected tab is always part of it; `marked` holds the others.
+///
+/// - A click selects a tab. It keeps the marks when the tab is already marked (so a right-click
+///   or a drag can still act on all of them), and clears them otherwise.
+/// - ⌘-click adds a tab to the selection or takes it out. Taking out the selected tab selects the
+///   marked tab nearest to it.
+/// - ⇧-click picks every tab from the anchor (the tab last clicked, or the selected tab) to the
+///   clicked one; ⌘⇧-click adds that range to the marks.
+struct TabSelection: Equatable {
+    var marked: Set<UUID> = []
+    /// Where a ⇧-click range starts.
+    var anchor: UUID?
+
+    enum Click { case plain, command, shift, commandShift }
+
+    /// Applies a click on `id`. Returns the tab to select, if the selection changes.
+    mutating func click(_ id: UUID, _ kind: Click, in layout: TabLayout) -> UUID? {
+        guard layout.contains(id) else { return nil }
+        let selected = layout.selected
+        switch kind {
+        case .plain:
+            if !marked.contains(id) { marked = [] }
+            marked.remove(id)
+            if let selected, selected != id, !marked.isEmpty { marked.insert(selected) }
+            anchor = id
+            return id == selected ? nil : id
+        case .command:
+            anchor = id
+            if id == selected {
+                // The selected tab leaves the selection: the nearest marked tab takes over.
+                guard let index = layout.index(of: id), let next = marked.min(by: { a, b in
+                    abs((layout.index(of: a) ?? 0) - index) < abs((layout.index(of: b) ?? 0) - index)
+                }) else { return nil }
+                marked.remove(next)
+                return next
+            }
+            if marked.contains(id) { marked.remove(id) } else { marked.insert(id) }
+            return nil
+        case .shift, .commandShift:
+            let start = anchor.flatMap { layout.contains($0) ? $0 : nil } ?? selected ?? id
+            guard let a = layout.index(of: start), let b = layout.index(of: id) else { return nil }
+            let range = Set(layout.ids[min(a, b)...max(a, b)])
+            marked = kind == .commandShift ? marked.union(range) : range
+            if let selected { marked.remove(selected) }
+            return nil
+        }
+    }
+
+    /// The tabs an action on `id` applies to, in strip order: the whole selection when `id` is in
+    /// it and it has more than one tab, otherwise `id` alone.
+    func targets(for id: UUID, in layout: TabLayout) -> [UUID] {
+        let all = marked.union(layout.selected.map { [$0] } ?? [])
+        guard all.count > 1, all.contains(id) else { return [id] }
+        return layout.ids.filter(all.contains)
+    }
+
+    /// Drops marks for tabs that are gone.
+    mutating func prune(_ layout: TabLayout) {
+        marked = marked.filter { layout.contains($0) && $0 != layout.selected }
+        if let anchor, !layout.contains(anchor) { self.anchor = nil }
     }
 }

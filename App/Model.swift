@@ -205,8 +205,9 @@ final class Tab: ObservableObject, Identifiable {
     }
 
     /// The tab as saved in session.json.
-    func record(group: UUID?) -> TabRecord {
-        TabRecord(id: id, url: url, title: title, group: group, keepAlive: keepAliveLowered ? nil : keepAliveSetting, history: history)
+    func record(group: UUID?, pinned: Bool = false) -> TabRecord {
+        TabRecord(id: id, url: url, title: title, group: group, keepAlive: keepAliveLowered ? nil : keepAliveSetting,
+                  history: history, pinned: pinned)
     }
 }
 
@@ -215,8 +216,13 @@ final class Tab: ObservableObject, Identifiable {
 final class SpaceTabs: ObservableObject {
     let spaceID: String
     @Published private(set) var layout = TabLayout()
-    /// Tabs picked with ⌘-click or ⇧-click, for grouping or closing several at once. Not saved.
-    @Published var marked: Set<UUID> = []
+    /// Tabs picked with ⌘-click or ⇧-click, for acting on several at once. Not saved.
+    @Published var selection = TabSelection()
+    /// The picked tabs other than the selected one.
+    var marked: Set<UUID> {
+        get { selection.marked }
+        set { selection.marked = newValue }
+    }
     private(set) var tabs: [UUID: Tab] = [:]
     /// Called after any change to the layout.
     var changed: (() -> Void)?
@@ -229,16 +235,26 @@ final class SpaceTabs: ObservableObject {
     var ordered: [Tab] { layout.ids.compactMap { tabs[$0] } }
     func tab(_ id: UUID) -> Tab? { tabs[id] }
 
-    /// The tabs an action from `id`'s context menu applies to: the marked tabs if `id` is one of
-    /// them, otherwise `id` alone.
+    /// The tabs an action from `id`'s context menu applies to: the whole selection if `id` is in
+    /// it, otherwise `id` alone.
     func targets(for id: UUID) -> [UUID] {
-        guard marked.contains(id) else { return [id] }
-        return layout.ids.filter { marked.contains($0) || $0 == layout.selected }
+        selection.targets(for: id, in: layout)
+    }
+
+    /// A click on a tab in the strip, the sidebar or the overview: selects it or changes the
+    /// selection (see `TabSelection`). Returns the tab to select, if that changes.
+    func click(_ id: UUID, _ kind: TabSelection.Click) -> UUID? {
+        var next = selection
+        let select = next.click(id, kind, in: layout)
+        if next != selection { selection = next }
+        return select
     }
 
     func update(_ change: (inout TabLayout) -> Void) {
         change(&layout)
-        marked.formIntersection(layout.ids)
+        var pruned = selection
+        pruned.prune(layout)
+        if pruned != selection { selection = pruned }
         changed?()
     }
 
@@ -258,7 +274,7 @@ final class SpaceTabs: ObservableObject {
 
     var record: SpaceRecord {
         SpaceRecord(space: spaceID, selected: layout.selected, groups: layout.groups,
-                    tabs: layout.ids.compactMap { id in tabs[id]?.record(group: layout.groupID(of: id)) })
+                    tabs: layout.ids.compactMap { id in tabs[id]?.record(group: layout.groupID(of: id), pinned: layout.isPinned(id)) })
     }
 
     /// Rebuilds the space's tabs from a saved record; none of them are loaded yet.
@@ -290,6 +306,10 @@ final class WindowState: ObservableObject, Identifiable {
     @Published var downloadsShown = false
     /// Where this window shows the agent panel (saved with the session).
     @Published var agentDock = AgentDock.preferred
+    /// Tabs in a sidebar beside the rail instead of the top strip (saved with the session).
+    @Published var verticalTabs = TabLayoutStyle.verticalByDefault
+    /// The tab overview (⌘⇧A) is open.
+    @Published var overviewShown = false
     /// Asks the find bar to take focus (⌘F).
     let findFocusRequests = PassthroughSubject<Void, Never>()
     /// Asks the toolbar to bookmark the page and show its editor (⌘D).
@@ -328,7 +348,7 @@ final class WindowState: ObservableObject, Identifiable {
     func record(spaceOrder: [String]) -> WindowRecord {
         WindowRecord(id: id, frame: window?.frameDescriptor ?? savedFrame, activeSpace: activeSpaceID,
                      spaces: spaceOrder.compactMap { spaces[$0] }.filter { !$0.layout.isEmpty }.map(\.record),
-                     agentDock: agentDock)
+                     agentDock: agentDock, verticalTabs: verticalTabs)
     }
 }
 
@@ -364,6 +384,7 @@ struct ClosedTab {
     var url: URL?
     var title: String
     var group: UUID?
+    var pinned = false
     /// The tab that followed it, so it reopens in the same place.
     var before: UUID?
     var keepAlive: Bool?

@@ -19,6 +19,11 @@ struct BrowserWindowView: View {
             Rectangle().fill(Color(nsColor: .separatorColor)).frame(width: 1)
             content
                 .background(tint)
+                .sheet(isPresented: $window.overviewShown) {
+                    if let space = activeSpace, let tabs = window.spaces[space.id] {
+                        TabOverview(window: window, tabs: tabs, spaceName: space.def.name)
+                    }
+                }
         }
         .background(Color(nsColor: .windowBackgroundColor))
         .ignoresSafeArea()
@@ -214,13 +219,36 @@ private struct SpaceView: View {
     @ObservedObject var tabs: SpaceTabs
     @AppStorage("showBookmarksBar") private var showBookmarksBar = true
 
+    // One structure for both layouts, so switching keeps the page (and its web view container)
+    // in place; only the strip or the sidebar comes and goes.
     var body: some View {
+        let vertical = window.verticalTabs
+        HStack(spacing: 0) {
+            if vertical {
+                // Tabs in a sidebar beside the rail; the toolbar takes the top, where the strip was.
+                VerticalTabsBar(browser: browser, window: window, tabs: tabs, name: space.def.name,
+                                color: Palette.nsColor(space.def.color))
+                    .frame(width: 236)
+            }
+            VStack(spacing: 0) {
+                if !vertical {
+                    TabStripBar(browser: browser, window: window, tabs: tabs, name: space.def.name,
+                                color: Palette.nsColor(space.def.color))
+                        .frame(height: 42)
+                }
+                page(topInset: vertical ? 8 : 0)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func page(topInset: CGFloat) -> some View {
         VStack(spacing: 0) {
-            TabStripBar(browser: browser, window: window, tabs: tabs, name: space.def.name,
-                        color: Palette.nsColor(space.def.color))
-                .frame(height: 42)
             if let tab = tabs.selected {
                 Toolbar(window: window, space: space, tabs: tabs, tab: tab)
+                    .padding(.top, topInset)
+                    // Without the strip, the toolbar's empty space is the title bar: it moves the window.
+                    .background { if topInset > 0 { WindowDragArea() } }
                     .id(tab.id)
                 if showBookmarksBar, browser.data != nil {
                     BookmarksBar(window: window, spaceID: space.id)

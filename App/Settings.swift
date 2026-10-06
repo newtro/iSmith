@@ -86,11 +86,21 @@ private struct GeneralSettings: View {
     @EnvironmentObject private var browser: BrowserState
     @AppStorage(SearchEngine.defaultsKey) private var engine = SearchEngine.google.rawValue
     @AppStorage("showBookmarksBar") private var showBookmarksBar = true
+    @AppStorage(TabLayoutStyle.defaultsKey) private var verticalTabs = false
 
     var body: some View {
         Form {
             Picker("Search engine", selection: $engine) {
                 ForEach(SearchEngine.allCases) { Text($0.name).tag($0.rawValue) }
+            }
+            Picker("Tabs", selection: $verticalTabs) {
+                Text("Across the top").tag(false)
+                Text("In a sidebar (vertical)").tag(true)
+            }
+            .onChange(of: verticalTabs) { _, vertical in
+                // Every open window follows; View ▸ Use Vertical Tabs changes one window.
+                for window in browser.windows { window.verticalTabs = vertical }
+                browser.scheduleRefresh()
             }
             Toggle("Show the bookmarks bar", isOn: $showBookmarksBar)
             LabeledContent("Downloads go to") {

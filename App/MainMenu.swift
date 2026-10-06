@@ -75,6 +75,10 @@ enum MainMenu {
         view.addItem(item("Show Bookmarks Bar", #selector(Commands.toggleBookmarksBar), "B", commands))
         view.addItem(item("Show Downloads", #selector(Commands.showDownloads), "l", commands, [.command, .option]))
         view.addItem(.separator())
+        // Per window: the tabs across the top, or in a sidebar beside the rail.
+        view.addItem(item("Use Vertical Tabs", #selector(Commands.toggleVerticalTabs), "", commands))
+        view.addItem(item("Search Tabs…", #selector(Commands.showTabOverview), "A", commands))
+        view.addItem(.separator())
         // The agent panel: ⌥⌘A shows or hides it; the dock items say where.
         view.addItem(item("Show Agent Panel", #selector(Commands.toggleAgentPanel), "a", commands, [.command, .option]))
         let dockRight = item("Agent Panel on the Right", #selector(Commands.dockAgentPanel(_:)), "", commands)
@@ -126,6 +130,7 @@ enum MainMenu {
         window.addItem(item("Show Next Tab", #selector(Commands.nextTab), "}", commands))
         window.addItem(item("Show Previous Tab", #selector(Commands.previousTab), "{", commands))
         window.addItem(item("Move Tab to New Window", #selector(Commands.moveTabToNewWindow), "", commands))
+        window.addItem(item("Pin Tab", #selector(Commands.togglePinned), "", commands))
         window.addItem(.separator())
         window.addItem(withTitle: "Bring All to Front", action: #selector(NSApplication.arrangeInFront(_:)), keyEquivalent: "")
         NSApp.windowsMenu = window
@@ -234,6 +239,28 @@ final class Commands: NSObject, NSMenuDelegate, NSMenuItemValidation {
         browser.selectNeighbor(forward: false, in: window)
     }
 
+    /// Pins or unpins the selected tab (and any other picked tabs).
+    @objc func togglePinned() {
+        guard let tabs, let id = tabs.layout.selected else { return }
+        let targets = tabs.targets(for: id)
+        if tabs.layout.isPinned(id) { browser.unpin(targets, in: tabs) } else { browser.pin(targets, in: tabs) }
+    }
+
+    /// ⌘⇧A: the tab overview, a searchable list of the space's tabs.
+    @objc func showTabOverview() {
+        guard let window, window.active != nil else { return NSSound.beep() }
+        window.window?.makeKeyAndOrderFront(nil)
+        window.overviewShown.toggle()
+    }
+
+    /// View ▸ Use Vertical Tabs: this window; new windows follow the last choice.
+    @objc func toggleVerticalTabs() {
+        guard let window else { return }
+        window.verticalTabs.toggle()
+        TabLayoutStyle.verticalByDefault = window.verticalTabs
+        browser.scheduleRefresh()
+    }
+
     @objc func moveTabToNewWindow() {
         guard let window, let tabs, let id = tabs.layout.selected else { return }
         browser.moveToNewWindow(id, from: tabs, in: window)
@@ -333,6 +360,13 @@ final class Commands: NSObject, NSMenuDelegate, NSMenuItemValidation {
         case #selector(goBack): return tab?.canGoBack == true
         case #selector(goForward): return tab?.canGoForward == true
         case #selector(reload), #selector(moveTabToNewWindow), #selector(find): return tab != nil
+        case #selector(togglePinned):
+            item.title = tabs?.layout.selected.map { tabs?.layout.isPinned($0) == true } == true ? "Unpin Tab" : "Pin Tab"
+            return tab != nil
+        case #selector(showTabOverview): return tabs != nil && window?.window?.attachedSheet == nil || window?.overviewShown == true
+        case #selector(toggleVerticalTabs):
+            item.state = window?.verticalTabs == true ? .on : .off
+            return window != nil
         case #selector(findNext), #selector(findPrevious): return tab?.findText.isEmpty == false
         case #selector(zoomIn), #selector(zoomOut), #selector(zoomReset), #selector(printPage): return tab?.webView != nil
         case #selector(bookmarkPage): return tab?.url != nil && browser.data != nil
