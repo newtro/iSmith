@@ -31,7 +31,11 @@ iSmith's own per-tab browser tools.
   - `AddressBar.swift`: the address field, suggestions and inline completion. `Library.swift`:
     history and bookmarks windows and the Bookmarks menu. `PageViews.swift`: the bars and pages
     shown over a tab (questions, find, crash, failed load, bookmarks bar). `Settings.swift`.
-  - `TabStripView.swift`, `WindowView.swift`, `MainMenu.swift`, `Panels.swift`: the UI.
+  - `TabStripView.swift`, `WindowView.swift`, `MainMenu.swift`, `Panels.swift`: the UI. The tab
+    strip and the vertical-tabs sidebar share one AppKit view and the tab context menu
+    (`TabMenu`). `TabActions.swift`: pinned tabs and the actions on several tabs.
+    `TabOverview.swift`: the tab overview (⌘⇧A). `Favicons.swift`: site icons.
+  - `TabLayout.swift` also holds `TabSelection`, the ⌘-click and ⇧-click rules.
   - `PageRules.swift`: unread badges from page titles, and which pages are kept alive.
   - `LinkRouting.swift`: links from other apps (which space and window), the default-browser
     seam, learned-rule offers, the Dock's "Open in Space". `LinkSettings.swift`: Settings ▸ Links.
@@ -114,7 +118,8 @@ seed or runs longer.
   its own Keychain key, `<bundle id>.passwords-key`. Passwords are global, not per space.
 - `config.json` is what each space is: name, color, accounts, and the rail's order.
 - `session.json` is what's open: windows → spaces → tab groups → tabs, with each tab's URL,
-  title, Keep alive setting and back/forward history. The history can hold form posts, so it's
+  title, Keep alive setting, pin and back/forward history, and each window's tab layout
+  (strip or vertical) and agent dock. The history can hold form posts, so it's
   sealed (AES-GCM, a key derived from the vault key). The file is saved a second after a
   navigation or a change to the tabs, and on quit, and restored at launch (after a crash too).
   Restored tabs load when you select them; Keep alive tabs load at once.
@@ -147,6 +152,19 @@ seed or runs longer.
   ⌃⇧Tab, ⌘⇧] and ⌘⇧[ to move between tabs. Drag a tab to reorder it, into or out of a group, onto
   a space in the rail (it reloads signed in as that space), into another window, or out of the
   window for a new one.
+- **Pinned tabs**: right-click a tab ▸ Pin Tab (or Window ▸ Pin Tab). Pinned tabs are icons at
+  the start of the strip, per space, and come back after a relaunch. ⌘W on a pinned tab doesn't
+  close it; it moves to the first unpinned tab (right-click ▸ Close Tab closes it).
+- **Several tabs at once**: ⌘-click adds or removes a tab, ⇧-click picks a range. Right-click
+  one of them to close them, close the others or those to the right, move them to a group, a
+  new group, another space or a new window, bookmark them into a folder, sort them by site,
+  duplicate, pin or reload them.
+- **Tab overview**: ⌘⇧A lists the space's tabs; type to filter by title, site or group, ↑↓ and
+  Return to go to one, ⇧↑↓ or ⌘-click to pick several, ⌘⌫ (with the search field empty) to
+  close them, "Move To" to move them.
+- **Vertical tabs**: View ▸ Use Vertical Tabs (per window) or Settings ▸ General ▸ Tabs shows
+  the space's tabs in a sidebar beside the rail: pinned tabs on top, groups as sections that
+  collapse, the same drag and drop and menus. The top strip hides.
 - **Groups**: right-click a tab ("Add Tab to New Group"), or ⌘-click or ⇧-click several first.
   Click a group's label to collapse it; right-click it to rename, recolor, ungroup or close it.
 - **Keep alive**: Outlook, Teams and Gmail tabs are never throttled in the background, so

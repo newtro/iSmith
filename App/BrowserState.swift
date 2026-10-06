@@ -293,6 +293,7 @@ final class BrowserState: NSObject, ObservableObject {
         let window = WindowState(id: record.id)
         window.savedFrame = record.frame
         if let dock = record.agentDock { window.agentDock = dock }
+        if let vertical = record.verticalTabs { window.verticalTabs = vertical }
         for spaceRecord in record.spaces {
             let tabs = SpaceTabs.restore(spaceRecord)
             hook(tabs)
@@ -723,7 +724,7 @@ final class BrowserState: NSObject, ObservableObject {
         let returnTo = tabs.layout.selected == id ? tab.openerID.flatMap { tabs.layout.contains($0) ? $0 : nil } : nil
         let index = tabs.layout.index(of: id)
         let ids = tabs.layout.ids
-        var closed = ClosedTab(url: tab.url, title: tab.title, group: tabs.layout.groupID(of: id),
+        var closed = ClosedTab(url: tab.url, title: tab.title, group: tabs.layout.groupID(of: id), pinned: tabs.layout.isPinned(id),
                                before: index.flatMap { ids.indices.contains($0 + 1) ? ids[$0 + 1] : nil },
                                keepAlive: tab.keepAliveSetting, state: tab.history)
         if closed.url == nil, closed.state == nil { closed.title = "" } // an empty tab isn't worth reopening
@@ -756,8 +757,18 @@ final class BrowserState: NSObject, ObservableObject {
 
     /// ⌘W: closes the selected tab. In an empty space it closes the window, but only when none of
     /// the window's other spaces has tabs, so a second ⌘W can't take a whole window's tabs with it.
+    /// A pinned tab isn't closed by ⌘W (as in Safari): the first unpinned tab is selected instead.
+    /// Its context menu closes it.
     func closeSelectedTab(in window: WindowState) {
         if let tabs = window.active, let id = tabs.layout.selected {
+            if tabs.layout.isPinned(id) {
+                if let next = tabs.layout.ids.first(where: { !tabs.layout.isPinned($0) }) {
+                    selectTab(next, in: tabs)
+                } else {
+                    NSSound.beep()
+                }
+                return
+            }
             closeTab(id, in: tabs)
         } else if window.allTabs.isEmpty {
             window.window?.performClose(nil)
@@ -789,7 +800,7 @@ final class BrowserState: NSObject, ObservableObject {
                 state: closed.state) { layout, id in
             let before = closed.before.flatMap { layout.contains($0) ? $0 : nil }
             let group = closed.group.flatMap { layout.group($0) == nil ? nil : $0 }
-            layout.insert(id, before: before, group: group)
+            layout.insert(id, before: before, group: group, pinned: closed.pinned)
         }
     }
 
@@ -823,11 +834,13 @@ final class BrowserState: NSObject, ObservableObject {
 
     /// Moves a tab to a place in a window's space. Within one space the tab moves as it is; into
     /// another space it reloads there, under that space's sign-ins.
+    /// `pinned` puts it among the target's pinned tabs.
     func moveTab(_ id: UUID, from source: (window: WindowState, space: String),
-                 to target: (window: WindowState, space: String), before: UUID?, group: UUID?, select: Bool = true) {
+                 to target: (window: WindowState, space: String), before: UUID?, group: UUID?, select: Bool = true,
+                 pinned: Bool = false) {
         guard let sourceTabs = source.window.spaces[source.space], let tab = sourceTabs.tab(id) else { return }
         if source.window === target.window, source.space == target.space {
-            sourceTabs.update { $0.move(id, before: before, group: group) }
+            sourceTabs.update { $0.move(id, before: before, group: group, pinned: pinned) }
             return
         }
         let targetTabs = target.window.tabs(for: target.space)
@@ -844,7 +857,7 @@ final class BrowserState: NSObject, ObservableObject {
         }
         sourceTabs.take(id)
         if let next = sourceTabs.selected, source.window.activeSpaceID == source.space { ensureLoaded(next, space: source.space) }
-        targetTabs.add(tab) { $0.insert(id, before: before, group: group) }
+        targetTabs.add(tab) { $0.insert(id, before: before, group: group, pinned: pinned) }
         let visible = target.window.activeSpaceID == target.space
         if select || targetTabs.layout.selected == nil { targetTabs.update { $0.select(id) } }
         if !sameSpace {
@@ -859,19 +872,24 @@ final class BrowserState: NSObject, ObservableObject {
     }
 
     /// Moves tabs to another space in the same window (dragged onto the rail, or "Move to Space").
-    /// They go to the end of that space's strip and reload signed in as that space.
+    /// They go to the end of that space's strip (pinned tabs to the end of its pinned tabs) and
+    /// reload signed in as that space.
     func moveTabs(_ ids: [UUID], from tabs: SpaceTabs, in window: WindowState, toSpace spaceID: String) {
         guard spaceID != tabs.spaceID, space(spaceID) != nil else { return }
         for id in ids {
-            moveTab(id, from: (window, tabs.spaceID), to: (window, spaceID), before: nil, group: nil, select: false)
+            moveTab(id, from: (window, tabs.spaceID), to: (window, spaceID), before: nil, group: nil, select: false,
+                    pinned: tabs.layout.isPinned(id))
         }
+        tabs.marked = []
     }
 
     /// Moves a tab into a new window showing the same space, optionally at a screen point (a tab
-    /// dragged out of the strip).
+    /// dragged out of the strip). The new window lays out its tabs as this one does.
     func moveToNewWindow(_ id: UUID, from tabs: SpaceTabs, in window: WindowState, at point: NSPoint? = nil) {
         guard tabs.tab(id) != nil else { return }
         let created = WindowState(activeSpaceID: tabs.spaceID)
+        created.verticalTabs = window.verticalTabs
+        created.agentDock = window.agentDock
         if let frame = window.window?.frame {
             let origin = point.map { NSPoint(x: $0.x - 120, y: $0.y - frame.height + 20) }
                 ?? NSPoint(x: frame.minX + 30, y: frame.minY - 30)
@@ -880,7 +898,8 @@ final class BrowserState: NSObject, ObservableObject {
         windows.append(created)
         let target = created.tabs(for: tabs.spaceID)
         hook(target)
-        moveTab(id, from: (window, tabs.spaceID), to: (created, tabs.spaceID), before: nil, group: nil)
+        moveTab(id, from: (window, tabs.spaceID), to: (created, tabs.spaceID), before: nil, group: nil,
+                pinned: tabs.layout.isPinned(id))
         presentWindow?(created)
         if let space = space(tabs.spaceID) { select(space, in: created) }
         // The source space may be empty now; it shows its empty state until a new tab is opened.

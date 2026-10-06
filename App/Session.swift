@@ -76,9 +76,14 @@ struct WindowRecord: Codable, Equatable {
     var spaces: [SpaceRecord]
     /// Where the window shows the agent panel; nil in files from before v1.1.
     var agentDock: AgentDock?
+    /// The window shows its tabs in a sidebar instead of the top strip; nil in older files (the
+    /// Settings default applies).
+    var verticalTabs: Bool?
 
-    init(id: UUID, frame: String?, activeSpace: String?, spaces: [SpaceRecord], agentDock: AgentDock? = nil) {
+    init(id: UUID, frame: String?, activeSpace: String?, spaces: [SpaceRecord], agentDock: AgentDock? = nil,
+         verticalTabs: Bool? = nil) {
         (self.id, self.frame, self.activeSpace, self.spaces, self.agentDock) = (id, frame, activeSpace, spaces, agentDock)
+        self.verticalTabs = verticalTabs
     }
 
     init(from decoder: Decoder) throws {
@@ -88,6 +93,7 @@ struct WindowRecord: Codable, Equatable {
         activeSpace = try c.decodeIfPresent(String.self, forKey: .activeSpace)
         spaces = try c.decodeIfPresent([SpaceRecord].self, forKey: .spaces) ?? []
         agentDock = try c.decodeIfPresent(AgentDock.self, forKey: .agentDock)
+        verticalTabs = try c.decodeIfPresent(Bool.self, forKey: .verticalTabs)
     }
 }
 
@@ -112,7 +118,8 @@ struct SpaceRecord: Codable, Equatable {
 
     /// The layout these records describe, repaired if the file was edited by hand.
     var layout: TabLayout {
-        TabLayout(slots: tabs.map { TabLayout.Slot(id: $0.id, group: $0.group) }, groups: groups, selected: selected)
+        TabLayout(slots: tabs.map { TabLayout.Slot(id: $0.id, group: $0.group, pinned: $0.pinned == true) },
+                  groups: groups, selected: selected)
     }
 }
 
@@ -126,13 +133,16 @@ struct TabRecord: Codable, Equatable {
     /// The tab's back/forward history (`WKWebView.interactionState`). Dropped when larger than
     /// `TabRecord.maxHistoryBytes`; the tab then reopens on its URL alone.
     var history: Data?
+    /// Pinned to the start of the strip; nil (not written) for an ordinary tab.
+    var pinned: Bool?
 
     /// WebKit's state for a long history with form data can be large; 40 tabs must still save fast.
     static let maxHistoryBytes = 512 * 1024
 
-    init(id: UUID, url: URL?, title: String, group: UUID?, keepAlive: Bool?, history: Data? = nil) {
+    init(id: UUID, url: URL?, title: String, group: UUID?, keepAlive: Bool?, history: Data? = nil, pinned: Bool = false) {
         (self.id, self.url, self.title, self.group, self.keepAlive) = (id, url, title, group, keepAlive)
         self.history = history.flatMap { $0.count <= Self.maxHistoryBytes ? $0 : nil }
+        self.pinned = pinned ? true : nil
     }
 
     init(from decoder: Decoder) throws {
@@ -144,6 +154,7 @@ struct TabRecord: Codable, Equatable {
         keepAlive = try c.decodeIfPresent(Bool.self, forKey: .keepAlive)
         // A damaged history blob mustn't cost the tab: it reopens on its URL.
         history = (try? c.decodeIfPresent(Data.self, forKey: .history)) ?? nil
+        pinned = (try? c.decodeIfPresent(Bool.self, forKey: .pinned)) == true ? true : nil
     }
 }
 

@@ -86,11 +86,22 @@ private struct GeneralSettings: View {
     @EnvironmentObject private var browser: BrowserState
     @AppStorage(SearchEngine.defaultsKey) private var engine = SearchEngine.google.rawValue
     @AppStorage("showBookmarksBar") private var showBookmarksBar = true
+    @AppStorage(TabLayoutStyle.defaultsKey) private var verticalTabs = false
 
     var body: some View {
         Form {
             Picker("Search engine", selection: $engine) {
                 ForEach(SearchEngine.allCases) { Text($0.name).tag($0.rawValue) }
+            }
+            // Picking here applies to every open window and new ones; View ▸ Use Vertical Tabs
+            // changes one window (and the default, which this shows).
+            Picker("Tabs", selection: Binding(get: { verticalTabs }, set: { vertical in
+                verticalTabs = vertical
+                for window in browser.windows { window.verticalTabs = vertical }
+                browser.scheduleRefresh()
+            })) {
+                Text("Across the top").tag(false)
+                Text("In a sidebar (vertical)").tag(true)
             }
             Toggle("Show the bookmarks bar", isOn: $showBookmarksBar)
             LabeledContent("Downloads go to") {
