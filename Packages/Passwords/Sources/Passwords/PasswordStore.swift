@@ -236,7 +236,7 @@ public final class PasswordStore: @unchecked Sendable {
     // MARK: Copies set aside
 
     /// Earlier copies of the store that were moved aside (`passwords.unreadable-<time>.sqlite`),
-    /// oldest first.
+    /// newest first.
     public static func setAsideCopies(of fileURL: URL) -> [URL] {
         let dir = fileURL.deletingLastPathComponent()
         let base = fileURL.deletingPathExtension().lastPathComponent + ".unreadable-"

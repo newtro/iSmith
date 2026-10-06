@@ -131,10 +131,11 @@ extension BrowserState {
                 } else if !reported.contains(copy.lastPathComponent) {
                     report.unopenable.append(copy)
                 }
+                reported.insert(copy.lastPathComponent)
             } catch {
+                // Tried again at the next launch (and reported then if it's sealed with another key).
                 passwordsLog.error("an earlier copy of the passwords file couldn't be read: \(String(describing: error), privacy: .public)")
             }
-            reported.insert(copy.lastPathComponent)
         }
         if let aside = store.movedAside { reported.insert(aside.lastPathComponent) }
         do {

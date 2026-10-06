@@ -147,7 +147,10 @@ final class BrowserState: NSObject, ObservableObject {
         var data: BrowserDatabase?
         do {
             data = try BrowserDatabase(fileURL: paths.browserDataURL)
-            if let aside = data?.movedAside { NSLog("iSmith: browser.sqlite couldn't be opened; kept a copy at \(aside.path)") }
+            if let aside = data?.movedAside {
+                NSLog("iSmith: browser.sqlite couldn't be opened; kept a copy at \(aside.path)")
+                browserDataProblem = "The history and bookmarks file couldn't be opened, so a new, empty one was started. The old file was kept at \(aside.path)."
+            }
         } catch {
             NSLog("iSmith: browser.sqlite couldn't be opened (\(error)); history and bookmarks are off")
             browserDataProblem = (error as? BrowserDataError)?.description ?? String(describing: error)
@@ -251,8 +254,13 @@ final class BrowserState: NSObject, ObservableObject {
         if let problem = browserDataProblem {
             // Not silent: otherwise the bookmarks bar and history just look empty.
             let alert = NSAlert()
-            alert.messageText = "History and bookmarks are off for now"
-            alert.informativeText = "\(problem)\n\nNothing was deleted: browser.sqlite (and any browser.before-*.sqlite backup next to it) is in \(paths.dataDir.path). Quit and reopen \(AppIdentity.displayName) to try again."
+            if data == nil {
+                alert.messageText = "History and bookmarks are off for now"
+                alert.informativeText = "\(problem)\n\nNothing was deleted: browser.sqlite (and any browser.before-*.sqlite backup next to it) is in \(paths.dataDir.path). Quit and reopen \(AppIdentity.displayName) to try again."
+            } else {
+                alert.messageText = "History and bookmarks started empty"
+                alert.informativeText = problem
+            }
             alert.runModal()
         }
         if let history = data?.history {

@@ -26,8 +26,13 @@ step() { print -P "%B==> $1%b" }
 
 rm -rf "$OUT"; mkdir -p "$OUT/feed" "$OUT/data" "$OUT/reports" "$OUT/install"
 
-stop_server() { [[ -n "${SERVER:-}" ]] && kill "$SERVER" 2>/dev/null || true }
-trap stop_server EXIT INT TERM HUP
+stop_server() {
+  [[ -n "${SERVER:-}" ]] && kill "$SERVER" 2>/dev/null
+  [[ -n "${BINARY:-}" ]] && pkill -TERM -f "^$BINARY" 2>/dev/null
+  true
+}
+trap stop_server EXIT
+trap "exit 130" INT TERM HUP
 
 step "Throwaway update key and a test copy of the sources"
 openssl genpkey -algorithm ed25519 -out "$OUT/ed.pem"
@@ -40,6 +45,8 @@ rsync -a --exclude /build --exclude .build --exclude /.git --exclude /.claude --
 sed -e "s|PRODUCT_BUNDLE_IDENTIFIER: com.scottsmith.ismith$|PRODUCT_BUNDLE_IDENTIFIER: $ID|" \
     -e "s|SUFeedURL: .*|SUFeedURL: http://127.0.0.1:$PORT/appcast.xml|" \
     -e "s|SUPublicEDKey: .*|SUPublicEDKey: $PUB|" project.yml > "$OUT/src/project.yml"
+grep -q "PRODUCT_BUNDLE_IDENTIFIER: $ID$" "$OUT/src/project.yml" && grep -q "127.0.0.1:$PORT" "$OUT/src/project.yml" \
+  || { echo "project.yml did not take the test identity; stopping."; exit 1; }
 cd "$OUT/src"
 xcodegen generate -q
 
