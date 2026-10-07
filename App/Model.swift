@@ -378,6 +378,8 @@ enum DragItem: Equatable {
     case tab(UUID, window: UUID, space: String)
     case space(String)
     case bookmark(Int64)
+    /// A tab group's label, dragged to move the whole group within its strip.
+    case group(UUID, window: UUID, space: String)
 }
 
 /// A closed tab, for ⌘⇧T. Its back/forward history comes back too.
@@ -401,8 +403,11 @@ extension UTType {
     static let ismithSpace = UTType(exportedAs: AppIdentity.bundleID + ".space")
     /// A bookmark or folder being dragged on the bookmarks bar or in the bookmarks manager.
     static let ismithBookmark = UTType(exportedAs: AppIdentity.bundleID + ".bookmark")
+    /// A tab group's label being dragged in the strip or sidebar.
+    static let ismithGroup = UTType(exportedAs: AppIdentity.bundleID + ".group")
 }
 
 extension NSPasteboard.PasteboardType {
     static let ismithTab = NSPasteboard.PasteboardType(UTType.ismithTab.identifier)
+    static let ismithGroup = NSPasteboard.PasteboardType(UTType.ismithGroup.identifier)
 }

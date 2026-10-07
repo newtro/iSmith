@@ -62,6 +62,25 @@ final class TabLayoutTests: XCTestCase {
         XCTAssertNil(l.createGroup(with: [UUID()]), "unknown tabs make no group")
     }
 
+    func testMoveGroupMovesTheWholeRunAndNeverSplitsAnother() {
+        var l = layout()
+        let work = l.createGroup(with: [ids[1], ids[2]], name: "Work")!
+        l.createGroup(with: [ids[4], ids[5]], name: "Home")
+        XCTAssertEqual(names(l), "a b[Work] c[Work] d e[Home] f[Home]")
+        l.moveGroup(work, before: nil)
+        XCTAssertEqual(names(l), "a d e[Home] f[Home] b[Work] c[Work]", "to the end, tabs in order")
+        l.moveGroup(work, before: ids[0])
+        XCTAssertEqual(names(l), "b[Work] c[Work] a d e[Home] f[Home]", "to the front")
+        l.moveGroup(work, before: ids[5])
+        XCTAssertEqual(names(l), "a d b[Work] c[Work] e[Home] f[Home]", "before a tab inside another group: before that group")
+        l.moveGroup(work, before: ids[2])
+        XCTAssertEqual(names(l), "a d b[Work] c[Work] e[Home] f[Home]", "before one of its own tabs: nothing moves")
+        l.pin([ids[0]])
+        l.moveGroup(work, before: ids[0])
+        XCTAssertEqual(names(l), "a b[Work] c[Work] d e[Home] f[Home]", "never among the pinned tabs")
+        XCTAssertTrue(l.isPinned(ids[0]))
+    }
+
     func testNextColorSkipsUsedColors() {
         var l = layout()
         XCTAssertEqual(l.nextColor, .blue)
