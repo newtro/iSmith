@@ -92,6 +92,9 @@ targets:
           - UTTypeIdentifier: $(PRODUCT_BUNDLE_IDENTIFIER).bookmark
             UTTypeDescription: iSmith bookmark
             UTTypeConformsTo: [public.data]
+          - UTTypeIdentifier: $(PRODUCT_BUNDLE_IDENTIFIER).group
+            UTTypeDescription: iSmith tab group
+            UTTypeConformsTo: [public.data]
     entitlements:
       path: App/iSmith.entitlements
       properties:

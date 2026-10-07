@@ -98,6 +98,35 @@ final class TabDragTests: XCTestCase {
         XCTAssertEqual(tabs.layout.ids, [ids[1], ids[2], ids[0], ids[3]])
         wired.browser.drag = nil
     }
+
+    func testDraggingAGroupLabelMovesTheWholeGroup() async throws {
+        let tabs = wired.tabs
+        let ids = tabs.layout.ids
+        let group = try XCTUnwrap(wired.browser.createGroup(with: [ids[0], ids[1]], in: tabs))
+        try await settle()
+        let strip = strip
+        let tabViews = views(TabItemView.self).sorted { $0.frame.minX < $1.frame.minX }
+        // Drag the group's label onto the right half of D: it goes after D, at the end.
+        wired.browser.drag = .group(group, window: wired.window.id, space: wired.spaceID)
+        let d = try XCTUnwrap(tabViews.first { $0.tab.id == ids[3] }).frame
+        let window = try XCTUnwrap(controller.window)
+        let after = FakeDrag(location: strip.convert(NSPoint(x: d.maxX - 5, y: d.midY), to: nil), window: window)
+        XCTAssertEqual(strip.draggingEntered(after), .move)
+        XCTAssertNotNil(strip.indicatorFrame, "the insertion marker shows")
+        XCTAssertTrue(strip.performDragOperation(after))
+        XCTAssertEqual(tabs.layout.ids, [ids[2], ids[3], ids[0], ids[1]])
+        XCTAssertEqual(tabs.layout.tabs(in: group), [ids[0], ids[1]], "still one group, in order")
+        // Back before C, the first tab.
+        try await settle()
+        let c = try XCTUnwrap(views(TabItemView.self).first { $0.tab.id == ids[2] }).frame
+        let before = FakeDrag(location: strip.convert(NSPoint(x: c.minX + 5, y: c.midY), to: nil), window: window)
+        XCTAssertTrue(strip.performDragOperation(before))
+        XCTAssertEqual(tabs.layout.ids, ids)
+        // Another window's strip refuses it.
+        wired.browser.drag = .group(group, window: UUID(), space: wired.spaceID)
+        XCTAssertEqual(strip.draggingEntered(before), [])
+        wired.browser.drag = nil
+    }
 }
 
 /// Just enough of a drag for the strip's drop handling.

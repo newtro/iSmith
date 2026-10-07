@@ -39,7 +39,7 @@ final class TabStripView: NSView {
         plusButton.action = #selector(newTab)
         for view in [dot, nameLabel, scrollView, plusButton] { addSubview(view) }
         content.onChange = { [weak self] in self?.needsLayout = true }
-        registerForDraggedTypes([.ismithTab])
+        registerForDraggedTypes([.ismithTab, .ismithGroup])
     }
 
     @available(*, unavailable)
@@ -141,7 +141,7 @@ final class StripContentView: NSView {
     var pendingEdit: UUID?
     private var popover: NSPopover?
     /// The tab being dragged over this view, dimmed until the drag leaves or ends.
-    private weak var dimmed: TabItemView?
+    private weak var dimmed: NSView?
 
     static let gap: CGFloat = 4
     static let maxTab: CGFloat = 200
@@ -161,7 +161,7 @@ final class StripContentView: NSView {
         indicator.layer?.cornerRadius = 1.5
         indicator.isHidden = true
         addSubview(indicator)
-        registerForDraggedTypes([.ismithTab])
+        registerForDraggedTypes([.ismithTab, .ismithGroup])
     }
 
     @available(*, unavailable)
@@ -419,6 +419,39 @@ final class StripContentView: NSView {
         return end
     }
 
+    /// Where a dragged group goes: before the ungrouped tab or whole group whose first half
+    /// `point` is in, or at the end. Never inside another group.
+    func groupDropTarget(at point: NSPoint) -> TabDropTarget {
+        let horizontal = axis == .horizontal
+        let end = TabDropTarget(before: nil, group: nil, pinned: false,
+                                marker: marker(at: horizontal ? (ordered.last?.frame.maxX ?? 0) + 2 : (ordered.last?.frame.maxY ?? 0) + 1))
+        guard let layout = tabs?.layout else { return end }
+        // Each unit: its first tab and where it starts and ends along the strip.
+        var units: [(first: UUID, group: UUID?, low: CGFloat, high: CGFloat)] = []
+        for view in ordered {
+            let f = view.frame
+            let (low, high) = horizontal ? (f.minX, f.maxX) : (f.minY, f.maxY)
+            if let chip = view as? GroupChipView, let first = layout.tabs(in: chip.group.id).first {
+                units.append((first, chip.group.id, low, high))
+            } else if let tab = view as? TabItemView, tab.mode != .pinned {
+                if let group = layout.groupID(of: tab.tab.id) {
+                    if let last = units.indices.last, units[last].group == group { units[last].high = high }
+                } else {
+                    units.append((tab.tab.id, nil, low, high))
+                }
+            }
+        }
+        // The Agent group stays last, so the end is just before it.
+        var last = end
+        if let agent = layout.agentGroup, let i = units.firstIndex(where: { $0.group == agent.id }) {
+            let unit = units.remove(at: i)
+            last = TabDropTarget(before: unit.first, group: nil, marker: marker(at: unit.low - (horizontal ? 2 : 1)))
+        }
+        let position = horizontal ? point.x : point.y
+        guard let unit = units.first(where: { position < ($0.low + $0.high) / 2 }) else { return last }
+        return TabDropTarget(before: unit.first, group: nil, marker: marker(at: unit.low - (horizontal ? 2 : 1)))
+    }
+
     /// The insertion marker: a bar in the accent color (or the group's, for a drop into a group)
     /// where the tab will land. The dragged tab itself is dimmed meanwhile.
     private func showIndicator(_ target: TabDropTarget) {
@@ -426,7 +459,12 @@ final class StripContentView: NSView {
         indicator.layer?.backgroundColor = color.cgColor
         indicator.frame = target.marker
         indicator.isHidden = false
-        if case let .tab(id, _, _) = browser.drag, let view = tabViews[id] {
+        let dragged: NSView? = switch browser.drag {
+        case let .tab(id, _, _): tabViews[id]
+        case let .group(id, _, _): chipViews[id]
+        default: nil
+        }
+        if let view = dragged {
             if dimmed !== view { dimmed?.alphaValue = 1 }
             dimmed = view
             view.alphaValue = 0.45
@@ -447,12 +485,19 @@ final class StripContentView: NSView {
     }
 
     override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
-        guard case .tab = browser.drag, tabs != nil else {
+        let point = convert(sender.draggingLocation, from: nil)
+        switch browser.drag {
+        case .tab where tabs != nil:
+            showIndicator(dropTarget(at: point))
+            return .move
+        case let .group(_, windowID, spaceID) where windowID == windowState.id && spaceID == tabs?.spaceID:
+            showIndicator(groupDropTarget(at: point))
+            return .move
+        default:
+            // A group moves only within its own strip.
             hideIndicator()
             return []
         }
-        showIndicator(dropTarget(at: convert(sender.draggingLocation, from: nil)))
-        return .move
     }
 
     override func draggingExited(_ sender: NSDraggingInfo?) {
@@ -465,6 +510,12 @@ final class StripContentView: NSView {
 
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
         hideIndicator()
+        if case let .group(id, windowID, spaceID) = browser.drag {
+            guard let tabs, windowID == windowState.id, spaceID == tabs.spaceID else { return false }
+            let target = groupDropTarget(at: convert(sender.draggingLocation, from: nil))
+            tabs.update { $0.moveGroup(id, before: target.before) }
+            return true
+        }
         guard case let .tab(id, windowID, spaceID) = browser.drag, let tabs,
               let source = browser.windows.first(where: { $0.id == windowID }) else { return false }
         let target = dropTarget(at: convert(sender.draggingLocation, from: nil))
@@ -971,11 +1022,14 @@ final class TabItemView: NSControl, NSDraggingSource {
 }
 
 /// A group's label: its name on its color, and the tab count when collapsed. In the sidebar it's
-/// a section header with a disclosure chevron. Click to collapse or expand; right-click to
-/// rename, recolor, ungroup or close. A control for the same reason as `TabItemView`: in the title
-/// bar only a control keeps a drag from moving the window.
-final class GroupChipView: NSControl {
+/// a section header with a disclosure chevron. Click to collapse or expand; drag to move the
+/// whole group; right-click to rename, recolor, ungroup or close. A control for the same reason
+/// as `TabItemView`: in the title bar only a control keeps a drag from moving the window.
+final class GroupChipView: NSControl, NSDraggingSource {
+    /// The label being dragged, kept alive even if the strip drops it (its last tab closes).
+    private static var dragging: GroupChipView?
     private weak var strip: StripContentView?
+    private var mouseDownEvent: NSEvent?
     private(set) var group = TabGroup(name: "", color: .grey)
     private var count = 0
     private let label = NSTextField(labelWithString: "")
@@ -1074,7 +1128,24 @@ final class GroupChipView: NSControl {
         }
     }
 
+    // A click collapses or expands on mouse up, so a drag can move the group instead.
     override func mouseDown(with event: NSEvent) {
+        mouseDownEvent = event
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        // The Agent group always stays last, so it doesn't drag: a shaky click still toggles it.
+        guard let down = mouseDownEvent, !group.agent else { return }
+        let a = down.locationInWindow
+        let b = event.locationInWindow
+        guard hypot(a.x - b.x, a.y - b.y) > 4 else { return }
+        mouseDownEvent = nil
+        startDrag(down)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        guard mouseDownEvent != nil else { return }
+        mouseDownEvent = nil
         guard let strip, let tabs = strip.tabs else { return }
         strip.browser.toggleCollapsed(group.id, in: tabs, window: strip.windowState)
         strip.keepPageFocus()
@@ -1082,6 +1153,34 @@ final class GroupChipView: NSControl {
 
     override func menu(for event: NSEvent) -> NSMenu? {
         strip?.menu(forGroup: group.id, from: self)
+    }
+
+    // MARK: - Dragging
+
+    private func startDrag(_ event: NSEvent) {
+        guard let strip, let tabs = strip.tabs, !group.agent else { return }
+        strip.browser.drag = .group(group.id, window: strip.windowState.id, space: tabs.spaceID)
+        let item = NSPasteboardItem()
+        item.setString(group.id.uuidString, forType: .ismithGroup)
+        let dragging = NSDraggingItem(pasteboardWriter: item)
+        let image = NSImage(size: bounds.size, flipped: false) { [weak self] _ in
+            guard let self, let context = NSGraphicsContext.current?.cgContext, let layer = self.layer else { return false }
+            layer.render(in: context)
+            return true
+        }
+        dragging.setDraggingFrame(bounds, contents: image)
+        Self.dragging = self
+        beginDraggingSession(with: [dragging], event: event, source: self)
+    }
+
+    func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
+        context == .withinApplication ? .move : []
+    }
+
+    func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
+        defer { Self.dragging = nil }
+        alphaValue = 1
+        if case .group = strip?.browser.drag { strip?.browser.drag = nil }
     }
 }
 
@@ -1192,7 +1291,7 @@ final class VerticalTabsView: NSView {
         separator.wantsLayer = true
         for view in [dot, nameLabel, scrollView, plusButton, separator] { addSubview(view) }
         content.onChange = { [weak self] in self?.needsLayout = true }
-        registerForDraggedTypes([.ismithTab])
+        registerForDraggedTypes([.ismithTab, .ismithGroup])
     }
 
     @available(*, unavailable)

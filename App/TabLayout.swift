@@ -220,6 +220,22 @@ struct TabLayout: Equatable {
         normalize()
     }
 
+    /// Moves a whole group, its tabs in order, before `before` (nil: the end of the strip). A
+    /// `before` in another group means before that whole group, and a pinned one means first
+    /// among the unpinned tabs. This is what dropping a dragged group label does.
+    mutating func moveGroup(_ id: UUID, before: UUID?) {
+        guard group(id) != nil, before.map({ groupID(of: $0) != id }) ?? true else { return }
+        let members = slots.filter { $0.group == id }
+        slots.removeAll { $0.group == id }
+        var index = slots.count
+        if let before, let i = slots.firstIndex(where: { $0.id == before }) {
+            index = slots[i].group.flatMap { g in slots.firstIndex { $0.group == g } } ?? i
+        }
+        index = max(index, slots.firstIndex { !$0.pinned } ?? slots.count)
+        slots.insert(contentsOf: members, at: index)
+        normalize()
+    }
+
     private mutating func setPlace(_ ids: [UUID], group: UUID?, pinned: Bool) {
         let group = pinned ? nil : group.flatMap { self.group($0) == nil ? nil : $0 }
         for i in slots.indices where ids.contains(slots[i].id) {

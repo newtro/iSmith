@@ -20,7 +20,7 @@ final class BrowserState: NSObject, ObservableObject {
     let manager: SpaceManager
     @Published private(set) var spaces: [SpaceState]
     @Published private(set) var windows: [WindowState] = []
-    /// What's being dragged right now (a tab, a space or a bookmark).
+    /// What's being dragged right now (a tab, a tab group, a space or a bookmark).
     var drag: DragItem?
     /// Opens an AppKit window for a window state. Unset in tests, which run headless.
     var presentWindow: ((WindowState) -> Void)?
