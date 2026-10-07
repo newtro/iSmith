@@ -521,7 +521,7 @@ private struct AgentDocked<Page: View>: View {
                 let shown = AgentPanelSize.clampWidth(width, available: geo.size.width)
                 HStack(spacing: 0) {
                     page()
-                    AgentPanel(agent: browser.agent, session: browser.agent.session(space.id), space: space, dock: .right)
+                    AgentPanel(agent: browser.agent, session: browser.agent.session(space.id), space: space, window: window, dock: .right)
                         .frame(width: shown)
                         .overlay(alignment: .leading) { Rectangle().fill(space.color.opacity(0.3)).frame(width: 1) }
                         .overlay(alignment: .leading) {
@@ -534,7 +534,7 @@ private struct AgentDocked<Page: View>: View {
                 let shown = AgentPanelSize.clampHeight(height, available: geo.size.height)
                 VStack(spacing: 0) {
                     page()
-                    AgentPanel(agent: browser.agent, session: browser.agent.session(space.id), space: space, dock: .bottom)
+                    AgentPanel(agent: browser.agent, session: browser.agent.session(space.id), space: space, window: window, dock: .bottom)
                         .frame(height: shown)
                         .clipShape(RoundedRectangle(cornerRadius: 8))
                         .overlay(RoundedRectangle(cornerRadius: 8).stroke(space.color.opacity(0.35)))

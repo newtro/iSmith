@@ -12,6 +12,7 @@ struct AgentPanel: View {
     @ObservedObject var agent: AgentController
     @ObservedObject var session: AgentSession
     @ObservedObject var space: SpaceState
+    @ObservedObject var window: WindowState
     let dock: AgentDock
     @State private var showingLog = false
 
@@ -36,6 +37,7 @@ struct AgentPanel: View {
             }
         }
         .font(.system(size: 12.5))
+        .environment(\.openURL, OpenURLAction { open($0) })
         .background(space.color.opacity(0.06))
         .background(Color(nsColor: .windowBackgroundColor))
         .task { await agent.prepare() }
@@ -102,6 +104,54 @@ struct AgentPanel: View {
 }
 
 /// The chat's name, and a menu of the space's other chats.
+extension AgentPanel {
+    /// A link in the chat. The agent links web pages, and files by absolute path (often with a
+    /// `:line` suffix and no scheme), which the system can't open as they are (error -50).
+    fileprivate func open(_ url: URL) -> OpenURLAction.Result {
+        switch AgentLink(url, workingFolder: session.workingFolder) {
+        case let .web(url):
+            browser.openTab(in: window, space: session.spaceID, url: url)
+            return .handled
+        case let .file(file):
+            guard FileManager.default.fileExists(atPath: file.path) else { NSSound.beep(); return .discarded }
+            NSWorkspace.shared.open(file)
+            return .handled
+        case nil:
+            return .systemAction
+        }
+    }
+}
+
+/// Where a chat link goes: web pages open in a tab in the space, file paths open as files.
+enum AgentLink: Equatable {
+    case web(URL)
+    case file(URL)
+
+    init?(_ url: URL, workingFolder: String) {
+        let path: String
+        switch url.scheme?.lowercased() {
+        case "http", "https": self = .web(url); return
+        case "file": path = url.path
+        case nil: path = url.path
+        // `app.py:12` parses as scheme `app.py`; a real scheme has no dot in it.
+        case let scheme? where scheme.contains("."): path = url.absoluteString.removingPercentEncoding ?? url.absoluteString
+        default: return nil
+        }
+        guard !path.isEmpty else { return nil }
+        let expanded = (path as NSString).expandingTildeInPath
+        let full = expanded.hasPrefix("/") ? expanded
+            : URL(fileURLWithPath: workingFolder, isDirectory: true).appendingPathComponent(expanded).path
+        self = .file(URL(fileURLWithPath: Self.strippingLine(full)))
+    }
+
+    /// `/a/b.swift:12` or `/a/b.swift:12:5` → `/a/b.swift`, unless the path with the suffix exists.
+    static func strippingLine(_ path: String) -> String {
+        guard !FileManager.default.fileExists(atPath: path),
+              let range = path.range(of: #":\d+(:\d+)?$"#, options: .regularExpression) else { return path }
+        return String(path[..<range.lowerBound])
+    }
+}
+
 private struct AgentThreadMenu: View {
     @ObservedObject var agent: AgentController
     @ObservedObject var session: AgentSession
