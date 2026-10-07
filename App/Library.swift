@@ -1,6 +1,7 @@
 import AppKit
 import BrowserData
 import SwiftUI
+import UniformTypeIdentifiers
 import WebKit
 
 // History (⌘Y, per space) and bookmarks (bar, menu, manager; one set shared by every space).
@@ -166,7 +167,8 @@ struct HistoryView: View {
 // MARK: - Bookmarks manager
 
 /// ⌥⌘B: the bookmarks (shared by every space) as a tree. Rename, change the address, add
-/// folders, move between folders, delete. Opening one opens it in the current window's space.
+/// folders, drag to reorder or into a folder (or Move Up/Down and Move to Folder), delete.
+/// Opening one opens it in the current window's space.
 struct BookmarksManager: View {
     @EnvironmentObject private var browser: BrowserState
     @State private var tree: [BookmarkTree] = []
@@ -177,6 +179,8 @@ struct BookmarksManager: View {
     /// Open folders (roots are open unless collapsed).
     @State private var expanded = Set<Int64>()
     @State private var collapsed = Set<Int64>()
+    /// Where a dragged bookmark would land.
+    @State private var dropOver: BookmarkDropTarget?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -188,7 +192,7 @@ struct BookmarksManager: View {
             Divider()
             List(selection: $selection) {
                 if query.isEmpty {
-                    ForEach(tree, id: \.bookmark.id) { node(_: $0) }
+                    ForEach(tree, id: \.bookmark.id) { node($0, in: nil) }
                 } else {
                     ForEach(results) { row($0) }
                 }
@@ -204,9 +208,17 @@ struct BookmarksManager: View {
         .onReceive(NotificationCenter.default.publisher(for: BookmarkStore.didChange)) { _ in reload() }
     }
 
-    /// A folder opens and closes; the two roots start open.
-    private func node(_ node: BookmarkTree) -> AnyView {
-        guard node.bookmark.isFolder else { return AnyView(row(node.bookmark)) }
+    /// A folder opens and closes; the two roots start open. `folder` is the one it's in (nil for
+    /// the roots), for drag and drop and Move Up/Down.
+    private func node(_ node: BookmarkTree, in folder: BookmarkTree?) -> AnyView {
+        let place = folder.flatMap { f in
+            f.children.firstIndex { $0.bookmark.id == node.bookmark.id }
+                .map { BookmarkPlace(parent: f.bookmark.id, index: $0, count: f.children.count) }
+        }
+        let row = row(node.bookmark, place: place)
+            .modifier(BookmarkDragDrop(bookmark: node.bookmark, parent: place?.parent, index: place?.index ?? 0,
+                                       horizontal: false, over: $dropOver))
+        guard node.bookmark.isFolder else { return AnyView(row) }
         let id = node.bookmark.id
         let open = Binding(get: { node.bookmark.root != nil ? !collapsed.contains(id) : expanded.contains(id) },
                            set: { on in
@@ -215,28 +227,38 @@ struct BookmarksManager: View {
                                } else if on { expanded.insert(id) } else { expanded.remove(id) }
                            })
         return AnyView(DisclosureGroup(isExpanded: open) {
-            ForEach(node.children, id: \.bookmark.id) { self.node($0) }
+            ForEach(node.children, id: \.bookmark.id) { self.node($0, in: node) }
         } label: {
-            row(node.bookmark)
+            row
         })
     }
 
-    private func row(_ b: Bookmark) -> some View {
+    private func row(_ b: Bookmark, place: BookmarkPlace? = nil) -> some View {
         HStack(spacing: 8) {
             Image(systemName: b.isFolder ? "folder" : "globe").foregroundStyle(.secondary)
             Text(b.title.isEmpty ? (b.url ?? "") : b.title).lineLimit(1)
             if let url = b.url { Text(url).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle) }
         }
+        // The whole row, so drags start and drops land anywhere on it.
+        .frame(maxWidth: .infinity, minHeight: 22, alignment: .leading)
+        .contentShape(Rectangle())
         .tag(b.id)
-        .contextMenu { menu(for: b) }
+        .contextMenu { menu(for: b, place: place) }
         .onTapGesture(count: 2) { open(b) }
     }
 
     @ViewBuilder
-    private func menu(for b: Bookmark) -> some View {
+    private func menu(for b: Bookmark, place: BookmarkPlace?) -> some View {
         if !b.isFolder { Button("Open") { open(b) } }
         if b.root == nil {
             Button(b.isFolder ? "Rename…" : "Edit…") { editing = b }
+            if let place {
+                // move(at:) counts positions before the move, so one down is index + 2.
+                Button("Move Up") { try? browser.data?.bookmarks.move(b.id, to: place.parent, at: place.index - 1) }
+                    .disabled(place.index == 0)
+                Button("Move Down") { try? browser.data?.bookmarks.move(b.id, to: place.parent, at: place.index + 2) }
+                    .disabled(place.index >= place.count - 1)
+            }
             Menu("Move to Folder") {
                 ForEach(BookmarkFolders.list(browser.data?.bookmarks).filter { $0.id != b.id }, id: \.id) { folder in
                     Button(folder.name) { try? browser.data?.bookmarks.move(b.id, to: folder.id, at: nil) }
@@ -270,6 +292,134 @@ struct BookmarksManager: View {
         guard let store = browser.data?.bookmarks else { return }
         let target = parent ?? (selection.flatMap { try? store.bookmark(id: $0) }.flatMap { $0.isFolder ? $0.id : $0.parentID })
         if let folder = try? store.addFolder(parent: target, title: "New Folder") { editing = folder }
+    }
+}
+
+/// A bookmark's folder, its index there and how many items the folder holds.
+private struct BookmarkPlace {
+    let parent: Int64
+    let index: Int
+    let count: Int
+}
+
+// MARK: - Bookmark drag and drop
+
+/// Where a dragged bookmark lands relative to the one it's over: before or after it, or (for a
+/// folder) inside at the end.
+enum BookmarkDropZone { case before, into, after }
+
+struct BookmarkDropTarget: Equatable {
+    let id: Int64
+    let zone: BookmarkDropZone
+}
+
+/// Makes a bookmark draggable (roots aren't) and a drop target: dropping another bookmark on it
+/// puts that one before or after it, or into it if it's a folder (its middle half, or anywhere
+/// on a root). Used by the bookmarks bar (`horizontal`) and the bookmarks manager. `parent` and
+/// `index` say where it is; nil for a root.
+struct BookmarkDragDrop: ViewModifier {
+    @EnvironmentObject private var browser: BrowserState
+    let bookmark: Bookmark
+    let parent: Int64?
+    let index: Int
+    let horizontal: Bool
+    @Binding var over: BookmarkDropTarget?
+    @State private var size = CGSize.zero
+
+    func body(content: Content) -> some View {
+        draggable(content)
+            .onGeometryChange(for: CGSize.self) { $0.size } action: { size = $0 }
+            .onDrop(of: [.ismithBookmark], delegate: BookmarkDropDelegate(
+                browser: browser, target: bookmark, parent: parent, index: index, horizontal: horizontal,
+                size: size, over: $over))
+            .overlay { indicator }
+    }
+
+    @ViewBuilder
+    private func draggable(_ content: Content) -> some View {
+        if bookmark.root == nil {
+            content.onDrag {
+                browser.drag = .bookmark(bookmark.id)
+                return NSItemProvider(item: Data(String(bookmark.id).utf8) as NSData,
+                                      typeIdentifier: UTType.ismithBookmark.identifier)
+            }
+        } else {
+            content
+        }
+    }
+
+    /// A line on the side it would go, or a highlight when it would go inside.
+    @ViewBuilder
+    private var indicator: some View {
+        if let over, over.id == bookmark.id {
+            switch over.zone {
+            case .into:
+                RoundedRectangle(cornerRadius: 4).fill(Color.accentColor.opacity(0.18))
+                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.accentColor, lineWidth: 1.5))
+                    .allowsHitTesting(false)
+            case .before, .after:
+                let edge: Alignment = horizontal ? (over.zone == .before ? .leading : .trailing)
+                                                 : (over.zone == .before ? .top : .bottom)
+                Rectangle().fill(Color.accentColor)
+                    .frame(width: horizontal ? 2 : nil, height: horizontal ? nil : 2)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: edge)
+                    .allowsHitTesting(false)
+            }
+        }
+    }
+}
+
+private struct BookmarkDropDelegate: DropDelegate {
+    let browser: BrowserState
+    let target: Bookmark
+    let parent: Int64?
+    let index: Int
+    let horizontal: Bool
+    let size: CGSize
+    @Binding var over: BookmarkDropTarget?
+
+    private var dragged: Int64? {
+        if case let .bookmark(id) = browser.drag { return id }
+        return nil
+    }
+
+    /// nil when it can't go here (it's the bookmark itself).
+    private func zone(_ info: DropInfo) -> BookmarkDropZone? {
+        guard let id = dragged, id != target.id else { return nil }
+        guard parent != nil, target.root == nil else { return .into }
+        let length = horizontal ? size.width : size.height
+        let fraction = length > 0 ? (horizontal ? info.location.x : info.location.y) / length : 0
+        if target.isFolder { return fraction < 0.25 ? .before : fraction > 0.75 ? .after : .into }
+        return fraction < 0.5 ? .before : .after
+    }
+
+    func validateDrop(info: DropInfo) -> Bool { dragged != nil }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        let zone = zone(info)
+        let target = zone.map { BookmarkDropTarget(id: self.target.id, zone: $0) }
+        if over != target { over = target }
+        return DropProposal(operation: zone == nil ? .forbidden : .move)
+    }
+
+    func dropExited(info: DropInfo) {
+        if over?.id == target.id { over = nil }
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        defer { over = nil; browser.drag = nil }
+        guard let id = dragged, let zone = zone(info), let store = browser.data?.bookmarks else { return false }
+        do {
+            switch zone {
+            case .into: try store.move(id, to: target.id, at: nil)
+            case .before: try store.move(id, to: parent ?? target.id, at: index)
+            case .after: try store.move(id, to: parent ?? target.id, at: index + 1)
+            }
+            return true
+        } catch {
+            // A folder dropped into itself or one of its own folders: nothing moves.
+            return false
+        }
     }
 }
 

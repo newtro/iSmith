@@ -204,7 +204,7 @@ private struct RailDropDelegate: DropDelegate {
             browser.moveTab(id, from: (source, space), to: (window, target.id), before: nil, group: nil,
                             select: window.activeSpaceID == target.id)
             return true
-        case nil:
+        case .bookmark, nil:
             return false
         }
     }

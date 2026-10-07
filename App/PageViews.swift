@@ -154,11 +154,14 @@ struct PageProblemView: View {
 
 /// The bookmarks bar: the "Bookmarks Bar" folder, the same in every space; folders open as menus.
 /// Only the items that fit are shown; the rest are in a » menu at the right end, as in other
-/// browsers. Bookmarks open in the window's current space.
+/// browsers. Bookmarks open in the window's current space. Drag an item to reorder it or onto a
+/// folder; dropping on the bar's empty space puts it at the end.
 struct BookmarksBar: View {
     @EnvironmentObject private var browser: BrowserState
     @ObservedObject var window: WindowState
+    @State private var bar: Bookmark?
     @State private var items: [BookmarkTree] = []
+    @State private var dropOver: BookmarkDropTarget?
     /// Each item's natural width, measured off-screen, keyed by bookmark id.
     @State private var widths: [Int64: CGFloat] = [:]
 
@@ -175,9 +178,11 @@ struct BookmarksBar: View {
                     Text("Bookmarks you add to the bar appear here (⌘D)")
                         .font(.caption).foregroundStyle(.tertiary).padding(.leading, 6)
                 }
-                ForEach(items.prefix(shown), id: \.bookmark.id) { node in
+                ForEach(Array(items.prefix(shown).enumerated()), id: \.element.bookmark.id) { index, node in
                     BookmarkBarItem(window: window, node: node)
                         .fixedSize()
+                        .modifier(BookmarkDragDrop(bookmark: node.bookmark, parent: bar?.id, index: index,
+                                                   horizontal: true, over: $dropOver))
                 }
                 Spacer(minLength: 0)
                 if shown < items.count {
@@ -196,6 +201,13 @@ struct BookmarksBar: View {
             }
             .padding(.horizontal, Self.sidePadding)
             .frame(width: geo.size.width, height: geo.size.height, alignment: .leading)
+            .background {
+                // The bar itself, behind the items: a drop here goes at the end.
+                if let bar {
+                    Color.clear.contentShape(Rectangle())
+                        .modifier(BookmarkDragDrop(bookmark: bar, parent: nil, index: 0, horizontal: true, over: $dropOver))
+                }
+            }
         }
         .frame(height: 24)
         .background(alignment: .topLeading) { measurer }
@@ -238,7 +250,9 @@ struct BookmarksBar: View {
 
     private func reload() {
         let tree = (try? browser.data?.bookmarks.tree()) ?? []
-        items = tree.first { $0.bookmark.root == .bar }?.children ?? []
+        let root = tree.first { $0.bookmark.root == .bar }
+        bar = root?.bookmark
+        items = root?.children ?? []
     }
 }
 
@@ -254,25 +268,24 @@ private struct BookmarkBarItem: View {
     @ObservedObject var window: WindowState
     let node: BookmarkTree
 
+    @State private var hovering = false
+
+    // Plain views with a tap, not Button or Menu: those track the mouse in AppKit and swallow the
+    // drag that reorders the bar.
     var body: some View {
         Group {
             if node.bookmark.isFolder {
-                Menu {
-                    BookmarkMenuContent(nodes: node.children) { open($0, newTab: false) }
-                } label: {
-                    Label(node.bookmark.title, systemImage: "folder")
+                HStack(spacing: 4) {
+                    Image(systemName: "folder")
+                    Text(node.bookmark.title).lineLimit(1)
+                    Image(systemName: "chevron.down").font(.system(size: 8, weight: .semibold))
                 }
-                .menuStyle(.borderlessButton)
-                .fixedSize()
             } else {
-                Button { open(node.bookmark, newTab: NSEvent.modifierFlags.contains(.command)) } label: {
-                    Text(node.bookmark.title.isEmpty ? (node.bookmark.url ?? "") : node.bookmark.title)
-                        .lineLimit(1)
-                        .frame(maxWidth: 160)
-                }
-                .buttonStyle(.borderless)
-                .help(node.bookmark.url ?? "")
-                .contextMenu {
+                Text(node.bookmark.title.isEmpty ? (node.bookmark.url ?? "") : node.bookmark.title)
+                    .lineLimit(1)
+                    .frame(maxWidth: 160)
+                    .help(node.bookmark.url ?? "")
+                    .contextMenu {
                     Button("Open in New Tab") { open(node.bookmark, newTab: true) }
                     Button("Copy Address") {
                         NSPasteboard.general.clearContents()
@@ -285,10 +298,53 @@ private struct BookmarkBarItem: View {
         }
         .font(.system(size: 12))
         .padding(.horizontal, 6)
+        .padding(.vertical, 3)
+        .background(RoundedRectangle(cornerRadius: 4).fill(Color.primary.opacity(hovering ? 0.08 : 0)))
+        .contentShape(Rectangle())
+        .onHover { hovering = $0 }
+        .onTapGesture(perform: activate)
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction { activate() }
+    }
+
+    private func activate() {
+        if node.bookmark.isFolder { showFolder() } else {
+            open(node.bookmark, newTab: NSEvent.modifierFlags.contains(.command))
+        }
     }
 
     private func open(_ bookmark: Bookmark, newTab: Bool) {
         browser.openBookmark(bookmark, in: window, newTab: newTab)
+    }
+
+    /// The folder's contents as a menu at the pointer.
+    private func showFolder() {
+        menu(node.children).popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+    }
+
+    private func menu(_ nodes: [BookmarkTree]) -> NSMenu {
+        let menu = NSMenu()
+        if nodes.isEmpty {
+            let empty = NSMenuItem(title: "Empty", action: nil, keyEquivalent: "")
+            empty.isEnabled = false
+            menu.addItem(empty)
+        }
+        for child in nodes {
+            let bookmark = child.bookmark
+            if bookmark.isFolder {
+                let item = NSMenuItem(title: bookmark.title, action: nil, keyEquivalent: "")
+                item.submenu = self.menu(child.children)
+                menu.addItem(item)
+            } else {
+                let item = ActionItem(bookmark.title.isEmpty ? (bookmark.url ?? "") : bookmark.title) {
+                    open(bookmark, newTab: NSEvent.modifierFlags.contains(.command))
+                }
+                item.toolTip = bookmark.url
+                menu.addItem(item)
+            }
+        }
+        return menu
     }
 }
 

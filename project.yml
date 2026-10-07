@@ -89,6 +89,9 @@ targets:
           - UTTypeIdentifier: $(PRODUCT_BUNDLE_IDENTIFIER).space
             UTTypeDescription: iSmith space
             UTTypeConformsTo: [public.data]
+          - UTTypeIdentifier: $(PRODUCT_BUNDLE_IDENTIFIER).bookmark
+            UTTypeDescription: iSmith bookmark
+            UTTypeConformsTo: [public.data]
     entitlements:
       path: App/iSmith.entitlements
       properties:

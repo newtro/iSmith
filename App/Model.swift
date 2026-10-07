@@ -373,10 +373,11 @@ struct EditorRequest: Identifiable {
 }
 
 /// What's being dragged. Drags carry only an id on the pasteboard; drop targets read this to
-/// find the tab or space, so nothing from outside the app can be dropped as one.
+/// find the tab, space or bookmark, so nothing from outside the app can be dropped as one.
 enum DragItem: Equatable {
     case tab(UUID, window: UUID, space: String)
     case space(String)
+    case bookmark(Int64)
 }
 
 /// A closed tab, for ⌘⇧T. Its back/forward history comes back too.
@@ -398,6 +399,8 @@ extension UTType {
     static let ismithTab = UTType(exportedAs: AppIdentity.bundleID + ".tab")
     /// A space being dragged in the rail.
     static let ismithSpace = UTType(exportedAs: AppIdentity.bundleID + ".space")
+    /// A bookmark or folder being dragged on the bookmarks bar or in the bookmarks manager.
+    static let ismithBookmark = UTType(exportedAs: AppIdentity.bundleID + ".bookmark")
 }
 
 extension NSPasteboard.PasteboardType {
