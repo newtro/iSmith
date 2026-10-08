@@ -145,7 +145,8 @@ final class StripContentView: NSView {
 
     static let gap: CGFloat = 4
     static let maxTab: CGFloat = 200
-    static let minTab: CGFloat = 110
+    /// As narrow as a tab gets before the strip scrolls: just its icon (see `TabItemView.compactWidth`).
+    static let minTab: CGFloat = 28
     static let pinnedSize = NSSize(width: 34, height: 30)
     /// The sidebar's margins and row heights.
     static let sideInset: CGFloat = 8
@@ -257,7 +258,8 @@ final class StripContentView: NSView {
     }
 
     /// Sizes and places every item across; returns the width they need. Pinned tabs are icons;
-    /// tabs share the rest between `minTab` and `maxTab` wide; past that the strip scrolls.
+    /// tabs share the rest between `minTab` and `maxTab` wide, narrow ones showing only their icon;
+    /// past that the strip scrolls.
     func layoutItems(maxWidth: CGFloat, height: CGFloat) -> CGFloat {
         let chips = ordered.compactMap { $0 as? GroupChipView }
         let pinned = pinnedViews
@@ -727,6 +729,8 @@ enum TabMenu {
 /// plain view, so it still moves the window.
 final class TabItemView: NSControl, NSDraggingSource {
     enum Mode { case tab, row, pinned }
+    /// Strip tabs narrower than this show only their icon.
+    static let compactWidth: CGFloat = 80
 
     let tab: Tab
     private weak var strip: StripContentView?
@@ -860,6 +864,7 @@ final class TabItemView: NSControl, NSDraggingSource {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         defer { CATransaction.commit() }
+        spinner.isHidden = false
         if mode == .pinned {
             titleField.isHidden = true
             closeButton.isHidden = true
@@ -874,6 +879,21 @@ final class TabItemView: NSControl, NSDraggingSource {
             return
         }
         badge.isHidden = true
+        if mode == .tab, bounds.width < Self.compactWidth {
+            // Too narrow for a title: just the icon. The selected tab shows its close button
+            // instead, as in Chrome; a hover close button would take clicks meant to select.
+            titleField.isHidden = true
+            keepAliveIcon.isHidden = true
+            let icon = NSRect(x: (bounds.width - 16) / 2, y: (h - 16) / 2, width: 16, height: 16)
+            iconView.frame = icon
+            spinner.frame = icon
+            closeButton.frame = icon
+            closeButton.isHidden = !isSelected
+            iconView.isHidden = tab.isLoading || isSelected
+            spinner.isHidden = isSelected
+            groupLine.frame = NSRect(x: 4, y: 0, width: max(0, bounds.width - 8), height: 2.5)
+            return
+        }
         titleField.isHidden = false
         var x: CGFloat = mode == .row ? 9 : 10
         let icon = NSRect(x: x, y: (h - 16) / 2, width: 16, height: 16)

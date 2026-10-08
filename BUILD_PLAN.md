@@ -193,7 +193,7 @@ iSmith/
   SwiftUI draws each window's content (rail, toolbar, page) and the Accounts window (⌘, or the
   rail's gear; it replaced the in-window panel).
 - **The tab strip is AppKit** (`TabStripView.swift`): an `NSScrollView` of tab and group-label
-  views, laid out by hand. Tabs shrink from 200 to 110 points, then the strip scrolls (a vertical
+  views, laid out by hand. Tabs shrink from 200 to 28 points (icon only below 80), then the strip scrolls (a vertical
   wheel scrolls it sideways). Drags use `NSDraggingSession` with an in-app pasteboard type
   (`com.scottsmith.ismith.tab`, declared in Info.plist); the drag carries only an id, and drop
   targets read `BrowserState.drag`, so nothing from outside the app can be dropped as a tab, and
