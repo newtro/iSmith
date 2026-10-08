@@ -62,6 +62,10 @@ targets:
         SUEnableAutomaticChecks: true
         SUScheduledCheckInterval: 86400
         SUPublicEDKey: Ezl8lB6Z6JnAQ08oLRWy8uOWsNpPxzlNEV4d5+xFyEU=
+        # A browser has to load plain-http sites. This lifts App Transport Security for web
+        # views only; iSmith's own network calls (Sparkle, agent, sync) still require https.
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoadsInWebContent: true
         # P6: iSmith opens web links (so it's listed as a default browser) and HTML documents.
         # Documents rank as Alternate, so installing iSmith never takes over .html files by itself.
         CFBundleURLTypes:
