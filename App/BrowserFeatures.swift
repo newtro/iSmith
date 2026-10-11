@@ -24,26 +24,9 @@ extension BrowserState {
         guard let (window, tabs, tab) = owner(of: webView) else { return .init() }
         var items = BrowserWebView.ContextMenuItems()
         if let link = element.link {
-            items.openLink.append(ActionItem("Open Link in New Tab") { [weak self] in
-                self?.openTab(in: window, space: tabs.spaceID, url: link, select: false) { layout, id in
-                    layout.insert(id, after: tab.id)
-                }
-            })
-            let others = spaces.filter { $0.id != tabs.spaceID }
-            if !others.isEmpty {
-                let sub = NSMenu()
-                for space in others {
-                    let item = ActionItem(space.def.name) { [weak self, weak window] in
-                        guard let self, let window, let target = self.space(space.id) else { return }
-                        self.openTab(in: window, space: target.id, url: link)
-                        self.select(target, in: window)
-                    }
-                    item.image = StripContentView.swatch(Palette.nsColor(space.def.color))
-                    sub.addItem(item)
-                }
-                let item = NSMenuItem(title: "Open Link in Space", action: nil, keyEquivalent: "")
-                item.submenu = sub
-                items.openLink.append(item)
+            items.openLink = openLinkItems(for: webView) { [weak self, weak webView] space in
+                guard let webView else { return }
+                self?.openLink(link, from: webView, in: space)
             }
             if ["http", "https"].contains(link.scheme?.lowercased() ?? "") {
                 items.downloadLink = ActionItem("Download Linked File") { [weak self, weak webView] in
@@ -66,6 +49,41 @@ extension BrowserState {
             }
         }
         return items
+    }
+
+    /// "Open Link in New Tab" and "Open Link in Space ▸" (when there's another space). `open`
+    /// gets the space picked, or nil for a tab next to this one.
+    func openLinkItems(for webView: BrowserWebView, open: @escaping (String?) -> Void) -> [NSMenuItem] {
+        guard let (_, tabs, _) = owner(of: webView) else { return [] }
+        var items: [NSMenuItem] = [ActionItem("Open Link in New Tab") { open(nil) }]
+        let others = spaces.filter { $0.id != tabs.spaceID }
+        if !others.isEmpty {
+            let sub = NSMenu()
+            for space in others {
+                let item = ActionItem(space.def.name) { open(space.id) }
+                item.image = StripContentView.swatch(Palette.nsColor(space.def.color))
+                sub.addItem(item)
+            }
+            let item = NSMenuItem(title: "Open Link in Space", action: nil, keyEquivalent: "")
+            item.submenu = sub
+            items.append(item)
+        }
+        return items
+    }
+
+    /// Opens a link from a page's context menu: in the background next to its tab, or in another
+    /// space, which is then shown.
+    func openLink(_ link: URL, from webView: WKWebView, in spaceID: String?) {
+        guard let (window, tabs, tab) = owner(of: webView) else { return }
+        guard let spaceID else {
+            openTab(in: window, space: tabs.spaceID, url: link, select: false) { layout, id in
+                layout.insert(id, after: tab.id)
+            }
+            return
+        }
+        guard let target = space(spaceID) else { return }
+        openTab(in: window, space: target.id, url: link)
+        select(target, in: window)
     }
 
     /// The save panel for "Save Image As…", as a sheet on the page's window.

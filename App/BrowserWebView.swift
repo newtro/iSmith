@@ -20,7 +20,15 @@ final class BrowserWebView: WKWebView {
 
     override func mouseDown(with event: NSEvent) {
         if !deliveringAgentInput { lastUserInput = Date() }
+        if event.modifierFlags.contains(.control) { contextElement = nil }
         super.mouseDown(with: event)
+    }
+
+    /// A report left by an earlier right-click (one the page answered with its own menu) isn't
+    /// about this one: the page reports the new element after the mouse goes down.
+    override func rightMouseDown(with event: NSEvent) {
+        contextElement = nil
+        super.rightMouseDown(with: event)
     }
 
     override func otherMouseDown(with event: NSEvent) {
@@ -45,6 +53,20 @@ final class BrowserWebView: WKWebView {
     var contextElement: ContextElement?
     /// Builds the app's items for a link or image; set by `BrowserState`.
     var contextItems: ((BrowserWebView, ContextElement) -> ContextMenuItems)?
+    /// Builds the open-link items when the page couldn't report the link (a frame sandboxed
+    /// without scripts, as webmail shows messages): the closure is given the space picked (nil:
+    /// a tab here) and runs WebKit's own item, whose new web view `BrowserState` reroutes.
+    var fallbackLinkItems: ((BrowserWebView, @escaping (String?) -> Void) -> [NSMenuItem])?
+    /// Where the next new web view WebKit asks for goes, set by a fallback item just before it
+    /// runs WebKit's "Open Link in New Window".
+    private var pendingLinkTarget: (space: String?, time: Date)?
+
+    /// The pending fallback target, once, if it was set within the last few seconds.
+    func takePendingLinkTarget() -> String?? {
+        defer { pendingLinkTarget = nil }
+        guard let pending = pendingLinkTarget, Date().timeIntervalSince(pending.time) < 5 else { return nil }
+        return .some(pending.space)
+    }
 
     struct ContextElement {
         var link: URL?
@@ -73,10 +95,32 @@ final class BrowserWebView: WKWebView {
 
     override func willOpenMenu(_ menu: NSMenu, with event: NSEvent) {
         super.willOpenMenu(menu, with: event)
+        pendingLinkTarget = nil
         guard let element = contextElement, Date().timeIntervalSince(element.time) < 3,
-              let items = contextItems?(self, element) else { return }
+              let items = contextItems?(self, element) else {
+            rewriteWithoutElement(menu)
+            return
+        }
         contextElement = nil
         Self.rewrite(menu, with: items)
+        // An image with no link reported, inside a link the page couldn't report.
+        if items.openLink.isEmpty { rewriteWithoutElement(menu) }
+    }
+
+    /// No report from the page: if WebKit's menu is for a link, its "Open Link in New Window"
+    /// gives way to the app's items, which run it with a target set.
+    private func rewriteWithoutElement(_ menu: NSMenu) {
+        guard let webKitItem = menu.items.first(where: { $0.identifier?.rawValue == Identifier.openLinkInNewWindow }),
+              let action = webKitItem.action,
+              let items = fallbackLinkItems?(self, { [weak self, weak webKitItem] space in
+                  guard let self, let webKitItem else { return }
+                  self.pendingLinkTarget = (space, Date())
+                  NSApp.sendAction(action, to: webKitItem.target, from: webKitItem)
+              }), !items.isEmpty else { return }
+        // Hidden, not removed: WebKit's action reads the item, which stays in its menu.
+        let index = menu.index(of: webKitItem)
+        webKitItem.isHidden = true
+        for (offset, item) in items.enumerated() { menu.insertItem(item, at: index + 1 + offset) }
     }
 
     /// Swaps WebKit's items for the app's, keeping their place in the menu.

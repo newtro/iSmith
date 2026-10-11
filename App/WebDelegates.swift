@@ -13,10 +13,18 @@ extension BrowserState: WKUIDelegate {
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
                  for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
         guard let (window, tabs, opener) = owner(of: webView) else { return nil }
+        // The context menu's fallback open-link items run WebKit's "Open Link in New Window":
+        // taken first, so no other path leaves it set for an unrelated popup.
+        let pendingLink = (webView as? BrowserWebView)?.takePendingLinkTarget()
         // window.open("msteams:…") opens the app (after asking), not an empty tab.
         if let url = navigationAction.request.url, let scheme = url.scheme?.lowercased(), !scheme.isEmpty,
            !AppLinks.browserSchemes.contains(scheme) {
             openAppLink(url, from: webView, action: navigationAction)
+            return nil
+        }
+        // A fallback open-link item: the link opens where the user picked, with no opener.
+        if let target = pendingLink, let url = navigationAction.request.url {
+            openLink(url, from: webView, in: target)
             return nil
         }
         // ⌘-click or a middle click on a target=_blank link: a background tab with no opener, as

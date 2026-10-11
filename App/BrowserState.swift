@@ -1072,6 +1072,9 @@ final class BrowserState: NSObject, ObservableObject {
         webView.contextItems = { [weak self] webView, element in
             self?.contextItems(for: webView, element: element) ?? .init()
         }
+        webView.fallbackLinkItems = { [weak self] webView, open in
+            self?.openLinkItems(for: webView, open: open) ?? []
+        }
         webView.customUserAgent = Self.userAgent
         webView.uiDelegate = self
         webView.navigationDelegate = self
