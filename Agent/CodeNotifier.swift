@@ -6,8 +6,9 @@ import UserNotifications
 
 /// One notification per accepted code: "123456", "from chase.com" (or the sender), with a Copy
 /// action, and no SMS text. With previews hidden (or the Mac locked) macOS shows only
-/// "Verification code". Notification Center keeps what it shows, so each notification is removed
-/// when its code expires (10 minutes), at the agent's launch, and when the pairing goes.
+/// "Verification code". Notification Center keeps what it shows, so notifications older than the
+/// codes' 10 minutes are swept by wall-clock time (at launch and every minute, so sleep doesn't
+/// stretch it), all of them go when the pairing goes or launchd stops the agent.
 /// Copies and the automatic clipboard copy go through `CodePasteboard`.
 @MainActor
 final class CodeNotifier: NSObject, CodeSink, UNUserNotificationCenterDelegate {
@@ -25,14 +26,32 @@ final class CodeNotifier: NSObject, CodeSink, UNUserNotificationCenterDelegate {
         let category = UNNotificationCategory(identifier: Self.category, actions: [copy], intentIdentifiers: [],
                                               hiddenPreviewsBodyPlaceholder: "Verification code", options: [])
         center.setNotificationCategories([category])
-        // Anything left from an earlier run is older than the codes this run knows.
-        center.removeAllDeliveredNotifications()
+        sweep()
+        sweeper = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.sweep() }
+        }
     }
 
-    func pairingForgotten() {
+    private var sweeper: Timer?
+
+    /// Removes code notifications delivered more than 10 minutes ago (wall clock).
+    func sweep() {
+        let cutoff = Date().addingTimeInterval(-RecentCodes.lifetime)
+        let category = Self.category
+        Task { @MainActor in
+            let notes = await center.deliveredNotifications()
+            let old = notes.filter { $0.request.content.categoryIdentifier == category && $0.date < cutoff }
+                .map(\.request.identifier)
+            if !old.isEmpty { center.removeDeliveredNotifications(withIdentifiers: old) }
+        }
+    }
+
+    func removeAll() {
         center.removeAllDeliveredNotifications()
         center.removeAllPendingNotificationRequests()
     }
+
+    func pairingForgotten() { removeAll() }
 
     func requestAuthorization() {
         center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
@@ -59,10 +78,6 @@ final class CodeNotifier: NSObject, CodeSink, UNUserNotificationCenterDelegate {
         } catch {
             agentLog.error("notification not posted: \(String(describing: error), privacy: .public)")
         }
-        let id = message.id
-        DispatchQueue.main.asyncAfter(deadline: .now() + RecentCodes.lifetime) { [center] in
-            center.removeDeliveredNotifications(withIdentifiers: [id])
-        }
     }
 
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
@@ -86,32 +101,93 @@ final class CodeNotifier: NSObject, CodeSink, UNUserNotificationCenterDelegate {
 /// A code on the clipboard the way iSmith copies passwords (the Passwords package's
 /// `SecretPasteboard`, whose package the agent doesn't link): this Mac only (no Universal
 /// Clipboard), marked concealed and transient so clipboard managers skip it, and cleared after
-/// 90 seconds or when the agent quits, unless something else was copied since.
+/// 90 seconds unless something else was copied since. The pasteboard's change count and the
+/// deadline are kept in the agent's data folder and checked by wall-clock time every 10 seconds
+/// and at launch, so a restart, a SIGTERM or sleep doesn't leave the code there.
 @MainActor
 enum CodePasteboard {
     static let clearAfter: TimeInterval = 90
     static let concealed = NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType")
     static let transient = NSPasteboard.PasteboardType("org.nspasteboard.TransientType")
-    private static var pending: [Int] = []
+    /// `clipboard.json` in the agent's data folder; set at launch.
+    static var stateURL: URL?
+    private static var sweeper: Timer?
+
+    struct State: Codable {
+        var changeCount: Int
+        var clearAt: Date
+    }
 
     static func copy(_ code: String, pasteboard: NSPasteboard = .general) {
         pasteboard.prepareForNewContents(with: .currentHostOnly)
         pasteboard.setString(code, forType: .string)
         pasteboard.setData(Data(), forType: concealed)
         pasteboard.setData(Data(), forType: transient)
-        let count = pasteboard.changeCount
-        pending.append(count)
-        DispatchQueue.main.asyncAfter(deadline: .now() + clearAfter) {
-            clear(pasteboard, ifStill: count)
+        save(State(changeCount: pasteboard.changeCount, clearAt: Date().addingTimeInterval(clearAfter)))
+        startSweeping()
+    }
+
+    /// At launch: clears a code an earlier run left past its deadline, and keeps watching one
+    /// that isn't due yet.
+    static func launch(stateURL: URL) {
+        self.stateURL = stateURL
+        sweep()
+        if load() != nil { startSweeping() }
+    }
+
+    static func sweep(pasteboard: NSPasteboard = .general, now: Date = Date()) {
+        guard let state = load() else { return stopSweeping() }
+        if pasteboard.changeCount != state.changeCount {
+            forget() // something else was copied since: nothing of ours is there
+        } else if now >= state.clearAt {
+            pasteboard.clearContents()
+            forget()
         }
     }
 
+    /// Clears our code now if it's still there (quit, SIGTERM).
     static func clearAll(_ pasteboard: NSPasteboard = .general) {
-        for count in pending { clear(pasteboard, ifStill: count) }
+        if let state = load(), pasteboard.changeCount == state.changeCount { pasteboard.clearContents() }
+        forget()
     }
 
-    private static func clear(_ pasteboard: NSPasteboard, ifStill count: Int) {
-        if pasteboard.changeCount == count { pasteboard.clearContents() }
-        pending.removeAll { $0 == count }
+    private static func startSweeping() {
+        guard sweeper == nil else { return }
+        sweeper = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { _ in
+            MainActor.assumeIsolated { sweep() }
+        }
+    }
+
+    private static func stopSweeping() {
+        sweeper?.invalidate()
+        sweeper = nil
+    }
+
+    private static var memory: State?
+
+    private static func load() -> State? {
+        if let memory { return memory }
+        guard let stateURL, let data = try? Data(contentsOf: stateURL) else { return nil }
+        memory = CodesJSON.decode(State.self, from: data)
+        return memory
+    }
+
+    private static func save(_ state: State) {
+        memory = state
+        guard let stateURL else { return }
+        do {
+            try FileManager.default.createDirectory(at: stateURL.deletingLastPathComponent(), withIntermediateDirectories: true,
+                                                    attributes: [.posixPermissions: 0o700])
+            try CodesJSON.encode(state).write(to: stateURL, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: stateURL.path)
+        } catch {
+            agentLog.error("clipboard deadline not saved: \(String(describing: error), privacy: .public)")
+        }
+    }
+
+    private static func forget() {
+        memory = nil
+        if let stateURL { try? FileManager.default.removeItem(at: stateURL) }
+        stopSweeping()
     }
 }

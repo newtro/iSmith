@@ -121,7 +121,7 @@ final class CodesController: ObservableObject {
             pairing = state
             if state.state != .waiting { qrURI = nil }
             settings = try await client.settings()
-            recent = status.paired ? try await client.recentCodes(for: nil) : []
+            recent = status.paired ? try await client.recentCodeSummaries() : []
         } catch {
             agent = nil
         }
@@ -217,7 +217,6 @@ final class CodesController: ObservableObject {
 
 struct CodesSettingsView: View {
     @ObservedObject var codes: CodesController
-    @State private var revealed: Set<String> = []
 
     var body: some View {
         Form {
@@ -258,17 +257,13 @@ struct CodesSettingsView: View {
                         if codes.recent.isEmpty {
                             Text("None in the last 10 minutes.").foregroundStyle(.secondary)
                         }
+                        // The agent sends these masked; the codes themselves are in the notifications.
                         ForEach(codes.recent, id: \.id) { offer in
                             HStack {
-                                Text(revealed.contains(offer.id) ? offer.code : String(repeating: "•", count: offer.code.count))
-                                    .font(.body.monospaced())
+                                Text(offer.code).font(.body.monospaced())
                                 Text("from \(offer.domain ?? offer.sender)").foregroundStyle(.secondary)
                                 Spacer()
                                 Text(offer.receivedAt, style: .time).foregroundStyle(.secondary)
-                                Button {
-                                    if revealed.contains(offer.id) { revealed.remove(offer.id) } else { revealed.insert(offer.id) }
-                                } label: { Image(systemName: revealed.contains(offer.id) ? "eye.slash" : "eye") }
-                                    .buttonStyle(.borderless).help("Show or hide the code")
                             }
                         }
                     }

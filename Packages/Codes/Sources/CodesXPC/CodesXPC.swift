@@ -55,9 +55,12 @@ public struct CodesIdentity: Equatable, Sendable {
     /// Revokes the pairing at the relay and forgets the keys, token and phone. Replies with a
     /// warning (the relay couldn't be told), or nil.
     func unpair(reply: @escaping (_ warning: String?) -> Void)
-    /// `[CodeOffer]` as JSON. With a host, only the codes that may be offered on that page
-    /// (PROTOCOL.md §5); with nil, every recent code (for Settings).
-    func recentCodes(forHost host: String?, reply: @escaping (Data) -> Void)
+    /// `[CodeOffer]` as JSON: only the unused codes that may be offered on a page with this
+    /// top-level host (PROTOCOL.md §5), and none when "offer in iSmith" is off or the host isn't a
+    /// plain host name (no `/`, `:`, spaces or empty labels). There is no "every code" call.
+    func recentCodes(forHost host: String, reply: @escaping (Data) -> Void)
+    /// `[CodeOffer]` as JSON for Settings' list: every kept code with the code itself masked.
+    func recentCodeSummaries(reply: @escaping (Data) -> Void)
     /// The code was filled; it isn't offered again.
     func markUsed(_ id: String, reply: @escaping () -> Void)
     /// `CodesSettings` as JSON.

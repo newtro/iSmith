@@ -47,7 +47,9 @@ final class AgentDelegate: NSObject, NSApplicationDelegate {
         let config = CodesEngine.Config(
             dataDir: dataDir, relayURL: Self.relayURL(), macName: Host.current().localizedName ?? "Mac",
             agentVersion: Self.version,
-            secrets: KeychainSecretStore(servicePrefix: identity.agentBundleID, labelPrefix: Self.displayName))
+            secrets: KeychainSecretStore(servicePrefix: identity.agentBundleID, labelPrefix: Self.displayName),
+            allowLocalHTTPRelay: Self.allowsLocalRelay)
+        CodePasteboard.launch(stateURL: dataDir.appendingPathComponent("clipboard.json"))
         let engine = CodesEngine(config: config)
         let notifier = CodeNotifier(engine: engine)
         engine.sink = notifier
@@ -64,6 +66,7 @@ final class AgentDelegate: NSObject, NSApplicationDelegate {
         self.listener = listener
 
         if engine.settings.notifications { notifier.requestAuthorization() }
+        watchForSIGTERM()
         engine.start()
         agentLog.info("agent \(Self.version, privacy: .public) started; service \(identity.machServiceName, privacy: .public); paired \(engine.isPaired, privacy: .public)")
     }
@@ -71,6 +74,26 @@ final class AgentDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         engine?.stop()
         CodePasteboard.clearAll()
+    }
+
+    private var sigterm: DispatchSourceSignal?
+
+    /// launchd stops the agent with SIGTERM (Codes turned off, logout), which skips
+    /// applicationWillTerminate: clear the clipboard copy and the code notifications first.
+    private func watchForSIGTERM() {
+        signal(SIGTERM, SIG_IGN)
+        let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+        source.setEventHandler { [weak self] in
+            MainActor.assumeIsolated {
+                agentLog.info("SIGTERM: clearing codes and exiting")
+                self?.engine?.stop()
+                CodePasteboard.clearAll()
+                self?.notifier?.removeAll()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { exit(0) }
+            }
+        }
+        source.resume()
+        sigterm = source
     }
 
     /// The relay new pairings use. A Debug agent may be pointed at a local stand-in
@@ -85,6 +108,15 @@ final class AgentDelegate: NSObject, NSApplicationDelegate {
         }
         #endif
         return standard
+    }
+
+    /// Only a Debug agent may use a plain-http relay on this Mac (a local stand-in).
+    static var allowsLocalRelay: Bool {
+        #if DEBUG
+        return true
+        #else
+        return false
+        #endif
     }
 
     /// "1.3.7 (42)", compared with the app's own by the app after an update.
@@ -161,8 +193,12 @@ final class AgentService: NSObject, NSXPCListenerDelegate, CodesAgentProtocol, @
         onMain { engine in reply(await engine.unpair()) }
     }
 
-    func recentCodes(forHost host: String?, reply: @escaping (Data) -> Void) {
+    func recentCodes(forHost host: String, reply: @escaping (Data) -> Void) {
         onMain { reply(CodesJSON.encode($0.recentCodes(for: host))) }
+    }
+
+    func recentCodeSummaries(reply: @escaping (Data) -> Void) {
+        onMain { reply(CodesJSON.encode($0.recentCodeSummaries())) }
     }
 
     func markUsed(_ id: String, reply: @escaping () -> Void) {
