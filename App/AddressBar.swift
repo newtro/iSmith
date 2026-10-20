@@ -252,6 +252,9 @@ final class AddressBridge: ObservableObject {
 /// Selects all of its text when it takes focus, as browsers' address bars do.
 final class AddressTextField: NSTextField {
     var focused: (() -> Void)?
+    /// Set while the event that focused the field is still being handled: the window makes the
+    /// field first responder before it passes that click on to `mouseDown`.
+    private var justFocused = false
 
     /// A click that focuses the field selects the whole address. The field editor tracks the
     /// click until the button comes up and leaves the caret where it landed, undoing the
@@ -259,9 +262,10 @@ final class AddressTextField: NSTextField {
     /// selected part of the address keeps that selection; a click in a field already being
     /// edited places the caret as usual, and a ⌃-click (a context menu) is left alone.
     override func mouseDown(with event: NSEvent) {
-        let wasEditing = currentEditor() != nil || event.modifierFlags.contains(.control)
+        let focusing = justFocused && !event.modifierFlags.contains(.control)
+        justFocused = false
         super.mouseDown(with: event)
-        guard !wasEditing, let editor = currentEditor(), editor.selectedRange.length == 0 else { return }
+        guard focusing, let editor = currentEditor(), editor.selectedRange.length == 0 else { return }
         editor.selectAll(nil)
     }
 
@@ -269,7 +273,11 @@ final class AddressTextField: NSTextField {
         let ok = super.becomeFirstResponder()
         if ok {
             focused?()
-            DispatchQueue.main.async { [weak self] in self?.currentEditor()?.selectAll(nil) }
+            justFocused = true
+            DispatchQueue.main.async { [weak self] in
+                self?.justFocused = false
+                self?.currentEditor()?.selectAll(nil)
+            }
         }
         return ok
     }
