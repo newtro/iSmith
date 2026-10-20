@@ -1,0 +1,44 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Sign in to your account</title>
+<!-- Modelled on Microsoft's sign-in, password step: the username is shown as text and kept in a
+     hidden field; the password field's hint is a div drawn over it (the same placeholder
+     component as the username step), and the page focuses the field itself. -->
+<style>
+  body.cb { font-family: sans-serif; }
+  .sign-in-box { width: 440px; margin: 60px auto; }
+  body.cb div.placeholderContainer { width: 100%; position: relative }
+  body.cb div.placeholderInnerContainer { left: 0; top: 0; width: 100%; position: absolute; z-index: 5 }
+  body.cb div.placeholder { color: #666; background-color: transparent; margin-top: 8px; margin-left: 0; white-space: nowrap; text-align: left; cursor: text }
+  .form-control { display: block; width: 100%; height: 36px; padding: 6px 0; border: 0; border-bottom: 1px solid rgba(0,0,0,.6); background: transparent; color: #1b1b1b; box-sizing: border-box; font-size: 15px }
+</style></head>
+<body class="cb">
+<div class="sign-in-box">
+  <div id="displayName" class="identity"></div>
+  <div id="loginHeader" role="heading">Enter password</div>
+  <form name="f1" id="i0281" novalidate="novalidate" method="post" action="/done.html" autocomplete="off"
+        onsubmit="event.preventDefault(); window.submitted = true;">
+    <input type="hidden" name="login" id="login">
+    <input type="hidden" name="loginfmt" id="loginfmt">
+    <div class="form-group col-md-24">
+      <div class="placeholderContainer">
+        <input name="passwd" type="password" id="i0118" autocomplete="off" class="form-control input ext-input text-box ext-text-box" aria-required="true" aria-label="Enter the password for your account" aria-describedby="loginHeader passwordError">
+        <div class="placeholderInnerContainer" id="hintBox">
+          <div class="placeholder" id="hint" aria-hidden="true">Password</div>
+        </div>
+      </div>
+    </div>
+    <input type="submit" id="idSIButton9" class="win-button button_primary" value="Sign in">
+  </form>
+</div>
+<script>
+  const name = new URLSearchParams(location.search).get("loginfmt") || "";
+  document.getElementById("displayName").textContent = name;
+  document.getElementById("login").value = name;
+  document.getElementById("loginfmt").value = name;
+  const field = document.getElementById("i0118");
+  const hintBox = document.getElementById("hintBox");
+  hintBox.addEventListener("click", () => field.focus());
+  field.addEventListener("input", () => { hintBox.style.display = field.value ? "none" : ""; });
+  setTimeout(() => field.focus(), 50);
+</script>
+</body></html>

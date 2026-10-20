@@ -563,6 +563,92 @@ final class AutofillWebTests: XCTestCase {
         XCTAssertTrue(focus.isUserInitiated)
     }
 
+    // MARK: Hints drawn over fields (Microsoft's sign-in)
+
+    func testMicrosoftSignInOffersTheLoginOnBothSteps() async throws {
+        let saved = try h.store.add(origin: origin, username: "test@example.com", password: "Dummy-Secret-1")
+        try await h.load(server.url("/ms-step1.html"))
+        // The page focuses the username itself: reported, but not as the user's.
+        try await h.waitUntil("the page's own focus") { !h.focuses.isEmpty }
+        XCTAssertFalse(h.focuses.last!.isUserInitiated)
+        // The middle of the field is Microsoft's hint, not the field: that's what the click hits.
+        let hit = try await h.pageString("""
+            const r = document.getElementById('i0116').getBoundingClientRect();
+            return document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2).id;
+            """)
+        XCTAssertEqual(hit, "hint")
+
+        // The user's click on the field (on its hint) offers the login.
+        try await h.click("i0116")
+        let step1 = try XCTUnwrap(h.focuses.last)
+        XCTAssertTrue(step1.isUserInitiated, "a click on the hint over the field is a click on the field")
+        XCTAssertEqual(step1.field, .username)
+        XCTAssertEqual(step1.form, .usernameOnly)
+        XCTAssertEqual(step1.logins.map(\.id), [saved.id])
+        XCTAssertEqual(h.autofill.bestAutomaticLogin(for: step1)?.id, saved.id, "⌘\\ fills it too")
+        let result = try await h.autofill.fill(saved.id, into: step1)
+        XCTAssertEqual(result, .filled)
+        let email = try await value("i0116"), stub = try await value("i0118stub")
+        XCTAssertEqual(email, "test@example.com")
+        XCTAssertEqual(stub, "", "nothing goes into the hidden password field")
+
+        // The password step: the page focuses the field, the user clicks it, the login chosen on
+        // the first step is suggested and its password filled.
+        try await h.waitForNavigation { try await h.pressReturn() }
+        XCTAssertTrue(h.webView.url?.path.hasSuffix("ms-step2.html") == true)
+        h.clearEvents()
+        try await h.settle(0.3)
+        try await h.click("i0118")
+        let step2 = try XCTUnwrap(h.focuses.last)
+        XCTAssertTrue(step2.isUserInitiated)
+        XCTAssertEqual(step2.field, .password)
+        XCTAssertEqual(step2.form, .login)
+        XCTAssertEqual(step2.suggestedLoginID, saved.id)
+        let notYet = try await value("i0118")
+        XCTAssertEqual(notYet, "", "not filled until asked")
+        try await h.autofill.fill(saved.id, into: step2)
+        let password = try await value("i0118")
+        XCTAssertEqual(password, "Dummy-Secret-1")
+    }
+
+    func testOnlySeeThroughTextOverAFieldCountsAsTheField() async throws {
+        let saved = try h.store.add(origin: origin, username: "user@example.com", password: "Hint-Secret-1")
+        try await h.load(server.url("/hint-tricks.html"))
+        try await h.settle(0.5)
+        for n in 1...11 {
+            try await h.page("document.getElementById('u\(n)').focus({ preventScroll: true })")
+        }
+        try await h.settle(0.6)
+        XCTAssertEqual(h.focuses.map(\.fieldID), [], """
+            a field under a box, an image, an oversized or form-wide layer, a pseudo-element, a closed shadow \
+            root, or stroked, shadowed or oversized text gets nothing
+            """)
+
+        // Filling from the password field beside each covered username leaves the username alone.
+        for n in 1...11 {
+            let focus = try await focus("p\(n)")
+            _ = try await h.autofill.fill(saved.id, into: focus)
+            let user = try await value("u\(n)"), pass = try await value("p\(n)")
+            XCTAssertEqual(user, "", "#u\(n) is covered: no username goes in")
+            XCTAssertEqual(pass, "Hint-Secret-1")
+        }
+
+        // A see-through text hint is part of its field, and a click on it is a click on the field.
+        let hit = try await h.pageString("""
+            const r = document.getElementById('uok').getBoundingClientRect();
+            return document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2).id;
+            """)
+        XCTAssertEqual(hit, "hok")
+        try await h.click("uok")
+        let clicked = try XCTUnwrap(h.focuses.last)
+        XCTAssertTrue(clicked.isUserInitiated)
+        XCTAssertEqual(clicked.field, .username)
+        let ok = try await focus("pok")
+        _ = try await h.autofill.fill(saved.id, into: ok)
+        let okUser = try await value("uok")
+        XCTAssertEqual(okUser, "user@example.com")
+    }
+
     func testDisabledWebViewGetsNothing() async throws {
         let saved = try h.store.add(origin: origin, username: "user", password: "Agent-Tab-1")
         try await h.load(server.url("/login.html"))

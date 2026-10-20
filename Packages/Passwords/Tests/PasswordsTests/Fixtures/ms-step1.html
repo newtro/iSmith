@@ -1,0 +1,44 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Sign in to your account</title>
+<!-- Modelled on Microsoft's sign-in (login.microsoftonline.com, ConvergedSignIn, October 2026):
+     the same markup and CSS for the username step. The field has no placeholder attribute: its
+     hint is a div drawn on top of it (`placeholderInnerContainer > placeholder`), whose click
+     handler focuses the field. A hidden password field (`moveOffScreen`) sits in the form for
+     browsers. The page focuses the username itself once it has loaded. -->
+<style>
+  body.cb { font-family: sans-serif; }
+  .sign-in-box { width: 440px; margin: 60px auto; }
+  body.cb div.placeholderContainer { width: 100%; position: relative }
+  body.cb div.placeholderInnerContainer { left: 0; top: 0; width: 100%; position: absolute; z-index: 5 }
+  body.cb div.placeholder { color: #666; background-color: transparent; margin-top: 8px; margin-left: 0; white-space: nowrap; text-align: left; cursor: text }
+  .form-control { display: block; width: 100%; height: 36px; padding: 6px 0; border: 0; border-bottom: 1px solid rgba(0,0,0,.6); background: transparent; color: #1b1b1b; box-sizing: border-box; font-size: 15px }
+  .moveOffScreen { position: fixed; bottom: 0; right: 0; height: 0 !important; width: 0 !important; overflow: hidden; opacity: 0 }
+</style></head>
+<body class="cb">
+<div class="sign-in-box">
+  <div id="loginHeader" role="heading">Sign in</div>
+  <form name="f1" id="i0281" novalidate="novalidate" method="get" action="/ms-step2.html" autocomplete="off">
+    <div class="form-group col-md-24">
+      <div class="placeholderContainer">
+        <input type="email" name="loginfmt" id="i0116" maxlength="113" class="form-control ltr_override input ext-input text-box ext-text-box" aria-required="true" autocomplete="username webauthn" aria-label="Enter your email, phone, or Skype." aria-describedby="usernameError loginHeader">
+        <input name="passwd" type="password" id="i0118stub" class="moveOffScreen" tabindex="-1" aria-hidden="true">
+        <div class="placeholderInnerContainer" id="hintBox">
+          <div class="placeholder" id="hint" aria-hidden="true">Email, phone, or Skype</div>
+        </div>
+      </div>
+    </div>
+    <input type="hidden" name="ps" value="">
+    <input type="hidden" name="flowToken" value="fixture-flow-token">
+    <input type="submit" id="idSIButton9" class="win-button button_primary" value="Next">
+  </form>
+</div>
+<script>
+  const field = document.getElementById("i0116");
+  const hintBox = document.getElementById("hintBox");
+  // Knockout's `visible: placeholderVisible, click: placeholder_onClick`.
+  hintBox.addEventListener("click", () => field.focus());
+  field.addEventListener("input", () => { hintBox.style.display = field.value ? "none" : ""; });
+  // `hasFocusEx`: the page focuses the field after it renders.
+  setTimeout(() => field.focus(), 50);
+</script>
+</body></html>

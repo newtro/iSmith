@@ -139,8 +139,68 @@
   };
 
   const elementFromPoint = Document.prototype.elementFromPoint;
+  const elementsFromPoint = Document.prototype.elementsFromPoint;
   const labelControlOf = Object.getOwnPropertyDescriptor(HTMLLabelElement.prototype, "control").get;
-  const hits = (el, x, y) => {
+  const contains = Node.prototype.contains;
+
+  // A hint the page draws over its own empty field instead of a placeholder attribute.
+  // Microsoft's sign-in does this on both steps: `div.placeholderInnerContainer >
+  // div.placeholder` ("Email, phone, or Skype", "Password") sits on top of the input, so a hit
+  // test lands on the hint, and a click on it goes to the hint (the page then focuses the field).
+  // It counts as part of the field only while it is plain see-through text: a text element
+  // (no image, control, link or shadow root), painting nothing but its glyphs (no background,
+  // border, outline, shadow, text shadow or stroke, filter, mask or ::before/::after), in a font
+  // no taller than the field, inside the field's own wrapper (its parent or grandparent, never
+  // the form or the body) and within the field's box. Only points inside the hint's own box look
+  // through it (what paints outside it never does), and some of the field itself must still be
+  // hit directly (see `isVisibleToUser`).
+  const HINT_TAGS = new Set(["DIV", "SPAN", "P", "SMALL", "EM", "STRONG", "B", "I", "LABEL"]);
+  const paintsOnlyText = (style) => {
+    if (alphaOf(style.backgroundColor) > 0 || style.backgroundImage !== "none") return false;
+    if (style.boxShadow !== "none" || (style.filter || "none") !== "none") return false;
+    if ((style.backdropFilter || style.webkitBackdropFilter || "none") !== "none") return false;
+    if ((style.webkitMaskImage || style.maskImage || "none") !== "none") return false;
+    if ((style.textShadow || "none") !== "none" || parseFloat(style.webkitTextStrokeWidth) > 0) return false;
+    if (style.outlineStyle !== "none" && parseFloat(style.outlineWidth) > 0) return false;
+    if ((style.borderImageSource || "none") !== "none") return false;
+    for (const side of ["Top", "Right", "Bottom", "Left"]) {
+      if (parseFloat(style["border" + side + "Width"]) > 0 && alphaOf(style["border" + side + "Color"]) > 0) return false;
+    }
+    return true;
+  };
+  const noPseudoContent = (node) => ["::before", "::after"].every((pseudo) => {
+    const content = getComputedStyle(node, pseudo).content;
+    return !content || content === "none" || content === "normal";
+  });
+  const isFieldHint = (node, el, x, y) => {
+    if (!(node instanceof HTMLElement) || node === el || !HINT_TAGS.has(node.tagName)) return false;
+    if (contains.call(node, el) || node.shadowRoot) return false;
+    const parent = el.parentElement;
+    const wrappers = [parent, parent && parent.parentElement].filter((w) =>
+      w && !(w instanceof HTMLFormElement) && w !== docBody() && w !== rootOf.call(document));
+    if (!wrappers.some((w) => contains.call(w, node))) return false;
+    if (queryAll.call(node, "*").length > 8 ||
+        queryAll.call(node, "img, svg, canvas, video, iframe, object, embed, picture, input, textarea, select, button, a").length) return false;
+    const f = el.getBoundingClientRect(), r = node.getBoundingClientRect();
+    if (r.left < f.left - 2 || r.top < f.top - 2 || r.right > f.right + 2 || r.bottom > f.bottom + 2) return false;
+    if (x < r.left || x >= r.right || y < r.top || y >= r.bottom) return false;
+    const style = getComputedStyle(node);
+    if (!(parseFloat(style.fontSize) <= f.height)) return false;
+    return paintsOnlyText(style) && noPseudoContent(node);
+  };
+
+  // The input under the point, looking through its own hints, or null.
+  const fieldBeneath = (x, y) => {
+    if (x < 0 || y < 0 || x >= window.innerWidth || y >= window.innerHeight) return null;
+    const stack = elementsFromPoint.call(document, x, y);
+    const i = stack.findIndex(isInput);
+    if (i < 1) return null;
+    const el = stack[i];
+    return stack.slice(0, i).every((node) => isFieldHint(node, el, x, y)) ? el : null;
+  };
+
+  // The field itself is on top at the point.
+  const hitsDirectly = (el, x, y) => {
     if (x < 0 || y < 0 || x >= window.innerWidth || y >= window.innerHeight) return false;
     const hit = elementFromPoint.call(document, x, y);
     if (!hit) return false;
@@ -149,14 +209,17 @@
     for (let root = el.getRootNode(); root && root.host; root = root.host.getRootNode()) {
       if (root.host === hit) return true;
     }
-    if (hit instanceof HTMLLabelElement && labelControlOf.call(hit) === el) return true;
-    return false;
+    return hit instanceof HTMLLabelElement && labelControlOf.call(hit) === el;
   };
+  // The field is on top at the point, or under its own hint.
+  const hits = (el, x, y) => hitsDirectly(el, x, y) || fieldBeneath(x, y) === el;
 
   // `strict` (for a field a password is written to): both the middle and the left quarter must
   // be the field, so a field narrowed to a sliver or half covered doesn't count. Otherwise (the
   // field the user just clicked) one of three points is enough, allowing for icons drawn over
-  // its ends.
+  // its ends. Either way, a field seen only through a hint must also be hit directly somewhere
+  // (Microsoft's hint leaves the field's lower edge clear), so a hint can't stand in for all of
+  // it.
   // `clearText`: the field's own text may be invisible (one-time-code widgets that draw their
   // digits in boxes under a transparent input). Never for a field a password goes into.
   const isVisibleToUser = (el, strict, clearText) => {
@@ -165,8 +228,11 @@
     if (!clearText && alphaOf(style.webkitTextFillColor || style.color) < 0.3) return false;
     const r = el.getBoundingClientRect();
     const y = r.top + r.height / 2;
-    if (strict) return hits(el, r.left + r.width / 2, y) && hits(el, r.left + r.width / 4, y);
-    return [r.left + r.width / 2, r.left + r.width / 4, r.right - r.width / 4].some((x) => hits(el, x, y));
+    const xs = [r.left + r.width / 2, r.left + r.width / 4, r.right - r.width / 4];
+    const seen = strict ? hits(el, xs[0], y) && hits(el, xs[1], y) : xs.some((x) => hits(el, x, y));
+    if (!seen) return false;
+    if (strict ? hitsDirectly(el, xs[0], y) && hitsDirectly(el, xs[1], y) : xs.some((x) => hitsDirectly(el, x, y))) return true;
+    return [r.top + 3, r.bottom - 3].some((edge) => xs.some((x) => hitsDirectly(el, x, edge)));
   };
 
   // A field below the fold (or scrolled away in its container) is brought into view before it's
@@ -431,19 +497,30 @@
   let lastPointer = { el: null, at: 0 };
   let lastTab = 0;
   const closest = Element.prototype.closest;
+  // The field a click is on: the clicked element, or (`labels`) the field of the label clicked
+  // (which focuses it), or the field under a hint the page draws over it (whose click handler focuses
+  // the field: Microsoft's sign-in).
+  const pointerField = (event, labels) => {
+    const el = event.composedPath ? event.composedPath()[0] : event.target;
+    if (isInput(el) || !el || el.nodeType !== 1) return el;
+    const label = labels ? closest.call(el, "label") : null;
+    const control = label && labelControlOf.call(label);
+    if (control) return control;
+    return fieldBeneath(event.clientX, event.clientY) || el;
+  };
   document.addEventListener("pointerdown", (event) => {
     if (!event.isTrusted) return;
-    let el = event.composedPath ? event.composedPath()[0] : event.target;
-    // A click on a field's label focuses the field: count it as a click on the field.
-    const label = el && el.nodeType === 1 ? closest.call(el, "label") : null;
-    if (label) el = labelControlOf.call(label) || el;
-    lastPointer = { el, at: Date.now() };
+    lastPointer = { el: pointerField(event, true), at: Date.now() };
   }, true);
 
   let lastFocus = { id: null, at: 0, user: false };
   const onFocus = (event) => {
     if (!event.isTrusted) return;
-    const el = event.composedPath ? event.composedPath()[0] : event.target;
+    // A mousedown on a hint is one on its field (whose page may then focus it without a new
+    // focus event, as Microsoft's does when it already has focus). A label counts only once the
+    // field it names is really focused.
+    const el = event.type === "mousedown" ? pointerField(event, false)
+      : event.composedPath ? event.composedPath()[0] : event.target;
     if (!isInput(el)) return;
     const visible = isVisibleToUser(el);
     if (!visible && !isVisibleToUser(el, false, true)) return;
