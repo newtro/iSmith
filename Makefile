@@ -21,7 +21,8 @@ build: project
 # The package tests (SignInSync: sync, vault and config; BraveImport: Brave profiles, bookmarks
 # and passwords; Blocking: ad and tracker blocking; Passwords: store, matching, autofill;
 # BrowserData: history, bookmarks, site settings, downloads, agent threads; Routing: link rules and
-# learning; AgentKit: the Codex app-server backend against a fake server), then the app-hosted tests.
+# learning; AgentKit: the Codex app-server backend against a fake server; Codes: 2FASync's crypto
+# vectors, receiver rules and relay client against a fake relay), then the app-hosted tests.
 test: test-package test-app
 
 test-package:
@@ -32,6 +33,7 @@ test-package:
 	cd Packages/BrowserData && swift test
 	cd Packages/Routing && swift test
 	cd Packages/AgentKit && swift test
+	cd Packages/Codes && swift test
 
 test-app: project
 	$(XCODEBUILD) test
@@ -61,9 +63,9 @@ install: release
 project: $(PROJECT)
 
 # Regenerated when project.yml changes or files are added to or removed from a source folder.
-$(PROJECT): project.yml App AppTests
+$(PROJECT): project.yml App AppTests Agent
 	xcodegen generate
 	@touch $(PROJECT)
 
 clean:
-	rm -rf $(DERIVED) $(PROJECT) Packages/SignInSync/.build Packages/BraveImport/.build Packages/Blocking/.build Packages/Passwords/.build Packages/BrowserData/.build Packages/Routing/.build Packages/AgentKit/.build
+	rm -rf $(DERIVED) $(PROJECT) Packages/SignInSync/.build Packages/BraveImport/.build Packages/Blocking/.build Packages/Passwords/.build Packages/BrowserData/.build Packages/Routing/.build Packages/AgentKit/.build Packages/Codes/.build

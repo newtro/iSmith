@@ -72,6 +72,17 @@ iSmith's own per-tab browser tools.
 - `Packages/Passwords/`: the password store and autofill core (the app's UI is in `App/`): encrypted logins in
   SQLite, origin matching, the capture and fill script, and the `PasswordAutofill` controller.
   [INTEGRATION.md](Packages/Passwords/INTEGRATION.md) lists the app's hook points.
+- `Packages/Codes/`: SMS verification codes from the phone (2FASync), with no UI: the v1 wire
+  types, libsodium `crypto_box`, pairing, the relay client (HTTP and the WebSocket stream), the
+  receiver rules and the recent-codes list (`Codes`), and the agent's XPC interface (`CodesXPC`,
+  the only part the app links). `FakeRelay` is a stand-in relay for the tests and a local
+  end-to-end run. [INTEGRATION.md](Packages/Codes/INTEGRATION.md) covers how the app, the agent
+  and the relay connect, and the Debug and Release names.
+- `Agent/`: iSmith Agent, the background helper embedded at
+  `iSmith.app/Contents/Library/LoginItems/` and started by launchd once Settings ▸ Codes turns it
+  on (its plist is written into `Contents/Library/LaunchAgents/` at build time). It holds the relay
+  stream and the Mac's key and token, and shows a notification per code. In the app,
+  `CodesClient.swift` (XPC) and `CodesSettings.swift` (Settings ▸ Codes).
 - `Packages/Routing/`: link routing, with no UI: URL patterns, ordered rules, the space last used
   for shared-address sites (Outlook, Teams, Gmail, Etsy), the Default space, Safe Links
   unwrapping and learned rules, saved in `routing.json`.
@@ -91,7 +102,7 @@ Needs Xcode and XcodeGen (`brew install xcodegen`).
 
 ```bash
 make build   # generate the project and build Debug ("iSmith Dev") into build/
-make test    # package tests (SignInSync, BraveImport, Blocking, Passwords, BrowserData, Routing, AgentKit; swift test), then the app-hosted tests
+make test    # package tests (SignInSync, BraveImport, Blocking, Passwords, BrowserData, Routing, AgentKit, Codes; swift test), then the app-hosted tests
 make run     # build and open the Debug app, "iSmith Dev"
 make install # build Release and install it as /Applications/iSmith.app (quit iSmith first)
 ```
@@ -217,6 +228,11 @@ seed or runs longer.
   yet), passwords into the password store. macOS asks once for
   permission to read Brave's data (Privacy & Security ▸ Files & Folders if you said no) and for
   your Mac password to use the "Brave Safe Storage" key.
+- **Codes from your phone**: Settings ▸ Codes ▸ "Receive codes from my phone", then "Pair Phone…"
+  and scan the QR code with 2FASync on the Android phone; check the two 6-digit numbers match.
+  Verification codes texted to the phone then show as a notification ("123456 from chase.com",
+  with Copy), even when iSmith is closed. Copying to the clipboard as codes arrive is off by
+  default; copies are cleared after 90 seconds.
 - **Agent panel** (needs Codex: `npm install -g @openai/codex`, then `codex login`): the toolbar's
   three buttons dock it on the right, at the bottom or hide it (per window; ⌥⌘A shows or hides
   it). Ask about the space's tabs; the agent reads pages and clicks and types in them with real

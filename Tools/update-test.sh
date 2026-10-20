@@ -43,6 +43,7 @@ PUB="$(openssl pkey -in "$OUT/ed.pem" -pubout -outform DER | tail -c 32 | base64
 rsync -a --exclude /build --exclude .build --exclude /.git --exclude /.claude --exclude /iSmith.xcodeproj \
   --exclude /spike "$ROOT/" "$OUT/src/"
 sed -e "s|PRODUCT_BUNDLE_IDENTIFIER: com.scottsmith.ismith$|PRODUCT_BUNDLE_IDENTIFIER: $ID|" \
+    -e "s|PRODUCT_BUNDLE_IDENTIFIER: com.scottsmith.ismith.agent$|PRODUCT_BUNDLE_IDENTIFIER: $ID.agent|" \
     -e "s|SUFeedURL: .*|SUFeedURL: http://127.0.0.1:$PORT/appcast.xml|" \
     -e "s|SUPublicEDKey: .*|SUPublicEDKey: $PUB|" project.yml > "$OUT/src/project.yml"
 grep -q "PRODUCT_BUNDLE_IDENTIFIER: $ID$" "$OUT/src/project.yml" && grep -q "127.0.0.1:$PORT" "$OUT/src/project.yml" \
