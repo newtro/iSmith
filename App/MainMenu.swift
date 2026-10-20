@@ -342,6 +342,24 @@ final class Commands: NSObject, NSMenuDelegate, NSMenuItemValidation {
         window?.bookmarkRequests.send()
     }
 
+    /// The mouse's back and forward buttons (3 and 4) go back and forward in the window's
+    /// selected tab, anywhere in a browser window, when the button comes up (as other browsers do).
+    /// With nowhere to go, or behind a modal dialog, the release goes on to the page.
+    func handleNavigationButton(_ event: NSEvent) -> Bool {
+        guard event.buttonNumber == 3 || event.buttonNumber == 4, NSApp.modalWindow == nil,
+              let key = event.window, key.attachedSheet == nil,
+              let window = browser.windows.first(where: { $0.window === key }),
+              let tab = window.active?.selected, let webView = tab.webView else { return false }
+        if event.buttonNumber == 3 {
+            guard tab.canGoBack else { return false }
+            webView.goBack()
+        } else {
+            guard tab.canGoForward else { return false }
+            webView.goForward()
+        }
+        return true
+    }
+
     /// ⌃Tab, ⌃⇧Tab, ⌘⇧] and ⌘⇧[ switch tabs even while a page or the address bar has focus.
     func handleTabSwitchKey(_ event: NSEvent) -> Bool {
         guard let key = event.window, key.attachedSheet == nil,

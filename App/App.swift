@@ -42,6 +42,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var importWindow: NSWindowController?
     private var commands: Commands?
     private var keyMonitor: Any?
+    private var mouseMonitor: Any?
     /// Links handed over before the browser started (a launch to open a link).
     private var pendingLinks: [URL] = []
 
@@ -67,6 +68,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.mainMenu = MainMenu.build(commands: commands, updater: updater)
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak commands] event in
             commands?.handleTabSwitchKey(event) == true ? nil : event
+        }
+        mouseMonitor = NSEvent.addLocalMonitorForEvents(matching: .otherMouseUp) { [weak commands] event in
+            commands?.handleNavigationButton(event) == true ? nil : event
         }
         browser.start(links: pendingLinks)
         pendingLinks = []

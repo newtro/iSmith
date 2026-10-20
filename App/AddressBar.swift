@@ -253,6 +253,18 @@ final class AddressBridge: ObservableObject {
 final class AddressTextField: NSTextField {
     var focused: (() -> Void)?
 
+    /// A click that focuses the field selects the whole address. The field editor tracks the
+    /// click until the button comes up and leaves the caret where it landed, undoing the
+    /// selection `becomeFirstResponder` made, so select again once it returns. A drag that
+    /// selected part of the address keeps that selection; a click in a field already being
+    /// edited places the caret as usual, and a ⌃-click (a context menu) is left alone.
+    override func mouseDown(with event: NSEvent) {
+        let wasEditing = currentEditor() != nil || event.modifierFlags.contains(.control)
+        super.mouseDown(with: event)
+        guard !wasEditing, let editor = currentEditor(), editor.selectedRange.length == 0 else { return }
+        editor.selectAll(nil)
+    }
+
     override func becomeFirstResponder() -> Bool {
         let ok = super.becomeFirstResponder()
         if ok {
