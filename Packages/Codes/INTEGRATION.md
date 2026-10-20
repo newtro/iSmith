@@ -32,8 +32,8 @@ phone ──POST /v1/messages──► relay (2fa.johnnycode.ai) ──WebSocket
 | Plist | `com.scottsmith.ismith.agent.plist` | `com.scottsmith.ismith.debug.agent.plist` |
 | Agent display name | iSmith Agent | iSmith Dev Agent |
 | Agent data | `~/Library/Application Support/com.scottsmith.ismith.agent/` | `…/com.scottsmith.ismith.debug.agent/` |
-| Keychain items | `com.scottsmith.ismith.agent.mac-key`, `.mac-token` | `com.scottsmith.ismith.debug.agent.mac-key`, `.mac-token` |
-| Relay | always `https://2fa.johnnycode.ai` | same, unless `defaults write com.scottsmith.ismith.debug.agent CodesRelayURL http://127.0.0.1:8787` |
+| Keychain item | `com.scottsmith.ismith.agent.pairing` | `com.scottsmith.ismith.debug.agent.pairing` |
+| Relay | always `https://2fa.johnnycode.ai`; https required | same, unless `defaults write com.scottsmith.ismith.debug.agent CodesRelayURL http://127.0.0.1:8787` (plain http only to 127.0.0.1/localhost) |
 
 The agent requires its caller to satisfy
 `anchor apple generic and certificate leaf[subject.OU] = "232A77467G" and identifier "<app id>"`
@@ -49,13 +49,23 @@ build script checks that the embedded agent's bundle id is the one it names.
 
 ## What the agent owns
 
-- The Mac's X25519 key pair (the secret key; the public one is derived) and the Mac bearer token,
-  as generic passwords in the login Keychain, created by the agent, so their access list trusts
-  the agent and not iSmith. iSmith never reads them.
-- `pairing.json` (0600, folder 0700): relay URL, pairing id, the phone's public key and name, the
-  Mac's public key, when it paired.
-- `seen.json` (0600): the `(id, ctr)` pairs accepted in the last 20 minutes, for the pairing in use.
+- One generic password in the login Keychain, `<agent id>.pairing`: the Mac's secret key (the
+  public one is derived), the Mac bearer token, the phone's public key, the pairing id and the relay
+  URL, as JSON. Saving deletes whatever is under that name first and adds a fresh item, which the
+  file Keychain's default access list trusts for the agent alone; an item someone else created
+  beforehand (with an "any app" list) is never written into. iSmith never reads it.
+- `pairing.json` (0600, folder 0700): only the pairing id, the phone's name and when it paired. It
+  marks that a pairing exists (a new one is refused until it's unpaired) and names it for
+  Settings; nothing security-relevant is taken from it, and a pairing id that doesn't match the
+  Keychain item disables the pairing ("Unpair, then pair again"). The relay URL from the Keychain
+  must be https (a Debug agent also takes http on 127.0.0.1/localhost).
+- `seen.json` (0600): the `(id, ctr)` pairs accepted in the last 20 minutes, for the pairing in
+  use. It's created at confirm time; if it's later missing, corrupt or another pairing's, the
+  agent fails closed and accepts only messages whose `ts` is after it loaded. A failed save removes
+  the file, so the next start fails closed too.
 - `settings.json` (0600): notifications (on), clipboard copy (off), offer in iSmith (on).
+- `clipboard.json` (0600, while a copy is pending): the pasteboard change count of the agent's
+  copy and when to clear it.
 - Recent codes: memory only, 10 minutes.
 
 ## Pairing (PROTOCOL.md §2)
@@ -88,8 +98,12 @@ connection. Close 4409 (another stream for the pairing took over) waits at least
 pairing is gone: the agent forgets the keys, token, phone and codes, and Settings says so. Any
 other refusal (a 403, a 5xx) is retried with backoff. Events are tagged with the stream that
 produced them, so a late 401 from a replaced stream can't wipe a newer pairing. A message frame
-whose envelope doesn't decode is acked by its id. A WebOTP domain that isn't a plain lowercase
-multi-label ASCII host loses the binding (the code stays, offered like an unbound one).
+whose envelope doesn't decode is acked by its id.
+
+The WebOTP domain is lowercased and loses one trailing dot. One that still isn't a plain
+multi-label ASCII host name (an IDN the phone didn't punycode, an underscore, a single label, empty
+labels) fails closed: the code is kept for the notification, but bound to no host, so it's never
+offered in iSmith.
 
 ## Notifications and the clipboard
 
@@ -97,10 +111,13 @@ Title the code ("123456"), subtitle "from chase.com" (the WebOTP domain, else th
 and no SMS text, since Notification Center keeps what it shows; category with a Copy action and
 `hiddenPreviewsBodyPlaceholder` "Verification code", so with previews hidden or the Mac locked
 only that shows. `userInfo` holds only the message id; Copy looks the code up in memory. Each
-notification is removed when its code expires (10 minutes), all of them at the agent's launch
-and when the pairing is unpaired or revoked. Copies
+notification older than 10 minutes is removed by a wall-clock sweep (at launch and every minute,
+so sleep doesn't stretch it); all of them go when the pairing is unpaired or revoked and when
+launchd stops the agent (SIGTERM: Codes turned off, logout). Copies
 work like the Passwords package's `SecretPasteboard` (this Mac only, concealed and transient
-types, cleared after 90 s or at quit unless something else was copied). The agent doesn't link
+types, cleared after 90 s or at quit unless something else was copied). The deadline and the
+pasteboard's change count are kept in `clipboard.json` and checked every 10 s and at launch, so a
+restart, a SIGTERM or sleep doesn't leave a code on the clipboard. The agent doesn't link
 the Passwords package (it would pull in GRDB and SignInSync), so `CodePasteboard` in
 `Agent/CodeNotifier.swift` repeats that logic.
 
@@ -115,12 +132,14 @@ call replies; `CodesClient` gives up after 30 s.
 | `startPairing` | QR URI and pairing id, or an error |
 | `pairingState` | `PairingInfo`: idle / waiting / verify / active / failed, fingerprint, phone name, message |
 | `confirmPairing`, `cancelPairing`, `unpair` | error or warning, or nil |
-| `recentCodes(forHost:)` | `[CodeOffer]` (id, code, sender, domain, receivedAt). With a host: unused codes bound to that host or a parent domain (`login.chase.com` gets `chase.com`'s; `evilchase.com` doesn't), plus unbound codes under 2 minutes old, and nothing when "offer in iSmith" is off. With nil: every code still kept (Settings). |
+| `recentCodes(forHost:)` | `[CodeOffer]` (id, code, sender, domain, receivedAt): unused codes bound to that host or a parent domain (`login.chase.com` gets `chase.com`'s; `evilchase.com` doesn't), plus unbound codes under 2 minutes old. Nothing when "offer in iSmith" is off, or when the host isn't a plain host name (it's lowercased and loses a trailing dot; `/`, `:`, `#`, spaces, empty labels or a leading dot mean no codes). The host is required: there's no "every code" call. |
+| `recentCodeSummaries` | every kept code with the code masked, for Settings' list |
 | `markUsed(id)` | the code isn't offered again |
 | `settings`, `setSettings` | `CodesSettings` |
 | `quit` | the agent replies, then exits; launchd starts it again |
 
-`CodesClient.recentCodes(for:)` and `markUsed` are what the code-field autofill (next phase) uses.
+`CodesClient.recentCodes(for: String)` and `markUsed` are what the code-field autofill (next phase)
+uses; pass the top-level page's `URL.host`, and don't call for a page without one.
 
 ## The Sparkle relaunch rule
 

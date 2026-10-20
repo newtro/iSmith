@@ -129,10 +129,16 @@ final class CodesClient {
         try await call { agent, done in agent.unpair { done(.success($0)) } }
     }
 
-    /// The codes that may be offered on a page with this top-level host (PROTOCOL.md §5), or
-    /// every recent code for nil. For the code-field autofill (next phase) and Settings.
-    func recentCodes(for host: String?) async throws -> [CodeOffer] {
+    /// The codes that may be offered on a page with this top-level host (PROTOCOL.md §5), for
+    /// the code-field autofill. Pass the top-level page's `URL.host`; a page without a host
+    /// (about:, data:, file:) has nothing to offer, so don't call.
+    func recentCodes(for host: String) async throws -> [CodeOffer] {
         try await call { agent, done in agent.recentCodes(forHost: host) { done(self.decode([CodeOffer].self, $0)) } }
+    }
+
+    /// Every kept code with the code masked, for Settings' list.
+    func recentCodeSummaries() async throws -> [CodeOffer] {
+        try await call { agent, done in agent.recentCodeSummaries { done(self.decode([CodeOffer].self, $0)) } }
     }
 
     /// The code was filled; the agent stops offering it.

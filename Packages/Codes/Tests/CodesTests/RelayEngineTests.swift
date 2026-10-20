@@ -1,4 +1,4 @@
-import Codes
+@testable import Codes
 import CodesXPC
 @testable import FakeRelayKit
 import XCTest
@@ -47,9 +47,14 @@ final class RelayEngineTests: XCTestCase {
         try? FileManager.default.removeItem(at: dir)
     }
 
+    func keychainPairing() -> KeychainPairing {
+        CodesJSON.decode(KeychainPairing.self, from: secrets.values["pairing"] ?? Data())!
+    }
+
     func makeEngine() -> CodesEngine {
         let e = CodesEngine(config: .init(dataDir: dir, relayURL: self.relay.baseURL, macName: "Test Mac", agentVersion: "1.0 (1)",
-                                          secrets: secrets, streamTiming: Self.fast, pairPollInterval: 0.05))
+                                          secrets: self.secrets, streamTiming: Self.fast, pairPollInterval: 0.05,
+                                          allowLocalHTTPRelay: true))
         e.sink = sink
         return e
     }
@@ -90,10 +95,11 @@ final class RelayEngineTests: XCTestCase {
         XCTAssertEqual(self.engine.status().phoneName, "Galaxy S24")
         XCTAssertEqual(self.engine.pairingState().state, .active)
         // The Mac's key and token are in the secret store; the phone's key and name on disk.
-        XCTAssertEqual(self.secrets.values.count, 2)
+        XCTAssertEqual(Array(self.secrets.values.keys), ["pairing"], "one Keychain item holds the pairing")
         let record = try String(contentsOf: dir.appendingPathComponent("pairing.json"), encoding: .utf8)
         XCTAssertTrue(record.contains("Galaxy S24"))
-        XCTAssertFalse(record.contains(String(decoding: self.secrets.values["mac-token"]!, as: UTF8.self)), "no token on disk")
+        XCTAssertFalse(record.contains(self.keychainPairing().macToken), "no token on disk")
+        XCTAssertFalse(record.contains(Base64URL.encode(phone.keyPair.publicKey)), "the phone's key isn't taken from the file")
 
         let id = try await phone.send(code: "481516", domain: "chase.com", sender: "24273")
         let delivered = await eventually { self.sink.delivered.count == 1 }
@@ -197,7 +203,7 @@ final class RelayEngineTests: XCTestCase {
         XCTAssertNil(self.relay.pairing(phone.pairingID))
         XCTAssertFalse(self.engine.isPaired)
         XCTAssertTrue(self.secrets.values.isEmpty)
-        XCTAssertEqual(self.engine.recentCodes(for: nil), [])
+        XCTAssertEqual(self.engine.recentCodeSummaries(), [])
         XCTAssertFalse(self.engine.connected)
     }
 
@@ -229,7 +235,7 @@ final class RelayEngineTests: XCTestCase {
         XCTAssertEqual(self.engine.recentCodes(for: "anything.example").count, 1)
         try self.engine.setSettings(CodesSettings(notifications: false, copyToClipboard: true, offerInBrowser: false))
         XCTAssertEqual(self.engine.recentCodes(for: "anything.example"), [])
-        XCTAssertEqual(self.engine.recentCodes(for: nil).count, 1, "Settings still lists them")
+        XCTAssertEqual(self.engine.recentCodeSummaries().map(\.code), ["••••••"], "Settings still lists them, masked")
         self.engine.stop()
         engine = makeEngine()
         XCTAssertEqual(self.engine.settings, CodesSettings(notifications: false, copyToClipboard: true, offerInBrowser: false))
@@ -251,7 +257,7 @@ final class RelayEngineTests: XCTestCase {
     /// `replacedBackoff` instead of knocking the other one off straight away.
     func testReplacedStreamBacksOff() async throws {
         try await pair()
-        let token = String(decoding: try XCTUnwrap(self.secrets.values["mac-token"]), as: UTF8.self)
+        let token = self.keychainPairing().macToken
         let other = RelayStream(url: RelayAPI(baseURL: self.relay.baseURL).streamURL, token: token, timing: Self.fast) { _ in }
         other.start()
         let replaced = await eventually { self.relay.streamConnections == 2 }
@@ -310,6 +316,100 @@ final class RelayEngineTests: XCTestCase {
         self.relay.revoke(phone.pairingID)
         let told = await eventually { self.sink.forgotten == 1 }
         XCTAssertTrue(told)
+    }
+
+    // MARK: - Security fix round
+
+    /// The file isn't trusted: a phone key or relay URL written into it is ignored (they come from
+    /// the Keychain item), and a pairing id that doesn't match the Keychain disables the pairing.
+    func testTamperedPairingFileIsNotTrusted() async throws {
+        let phone = try await pair()
+        engine.stop()
+        let attacker = FakePhone(name: "Attacker")
+        let url = dir.appendingPathComponent("pairing.json")
+        var json = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as! [String: Any]
+        json["phonePublicKey"] = Base64URL.encode(attacker.keyPair.publicKey)
+        json["relayURL"] = "http://127.0.0.1:1"
+        try JSONSerialization.data(withJSONObject: json).write(to: url)
+        engine = makeEngine()
+        XCTAssertTrue(engine.isPaired)
+        engine.start()
+        let connected = await eventually { self.engine.connected }
+        XCTAssertTrue(connected, "still the relay from the Keychain")
+        let forged = attacker.envelope(code: "666666", to: phone.macPublicKey)
+        relay.enqueue(forged, pairingID: phone.pairingID)
+        let acked = await eventually { self.relay.ackedIDs.contains(forged["id"] as! String) }
+        XCTAssertTrue(acked)
+        XCTAssertTrue(sink.delivered.isEmpty, "a key in the file doesn't make a forgery acceptable")
+
+        engine.stop()
+        json["pairingId"] = UUID().uuidString.lowercased()
+        try JSONSerialization.data(withJSONObject: json).write(to: url)
+        engine = makeEngine()
+        XCTAssertFalse(engine.isPaired)
+        XCTAssertNotNil(engine.status().problem)
+        do {
+            _ = try await engine.startPairing()
+            XCTFail("a pairing file exists: unpair first")
+        } catch let error as CodesEngine.Failure {
+            XCTAssertEqual(error, .alreadyPaired)
+        }
+    }
+
+    func testRelayMustBeHTTPS() async throws {
+        try await pair()
+        engine.stop()
+        // The same Keychain item, read by an engine that doesn't allow a local http relay.
+        let strict = CodesEngine(config: .init(dataDir: dir, relayURL: relay.baseURL, macName: "Test Mac", agentVersion: "1",
+                                               secrets: secrets, allowLocalHTTPRelay: false))
+        XCTAssertFalse(strict.isPaired)
+        XCTAssertEqual(strict.status().problem, "The pairing's relay isn't an https address. Unpair, then pair again.")
+        _ = await strict.unpair()
+        do {
+            _ = try await strict.startPairing()
+            XCTFail("http relay")
+        } catch let error as CodesEngine.Failure {
+            XCTAssertEqual(error, .insecureRelay)
+        }
+        XCTAssertTrue(strict.relayAllowed(URL(string: "https://2fa.johnnycode.ai")!))
+        XCTAssertFalse(strict.relayAllowed(URL(string: "http://2fa.johnnycode.ai")!))
+        XCTAssertFalse(engine.relayAllowed(URL(string: "http://evil.example")!), "only loopback http, even in tests")
+    }
+
+    /// A lost or corrupt seen set fails closed: only messages sent after the agent loaded it.
+    func testCorruptSeenSetFailsClosed() async throws {
+        let phone = try await pair()
+        let old = phone.envelope(code: "111111", ts: Date().addingTimeInterval(-60))
+        relay.enqueue(old, pairingID: phone.pairingID)
+        _ = await eventually { self.sink.delivered.count == 1 }
+        engine.stop()
+        try Data("garbage".utf8).write(to: dir.appendingPathComponent("seen.json"))
+        engine = makeEngine()
+        engine.start()
+        _ = await eventually { self.engine.connected }
+        relay.enqueue(old, pairingID: phone.pairingID) // a replay the lost set can't recognize
+        let acked = await eventually { self.relay.ackedIDs.filter { $0 == old["id"] as! String }.count == 2 }
+        XCTAssertTrue(acked)
+        XCTAssertEqual(sink.delivered.count, 1, "the replay is refused")
+        try await Task.sleep(nanoseconds: 20_000_000)
+        let id = try await phone.send(code: "222222")
+        let fresh = await eventually { self.sink.delivered.contains { $0.id == id } }
+        XCTAssertTrue(fresh, "a message sent after the load is accepted")
+    }
+
+    func testOffersNeedAPlainHostAndTheSetting() async throws {
+        let phone = try await pair()
+        _ = try await phone.send(code: "313131", domain: "chase.com")
+        _ = await eventually { self.sink.delivered.count == 1 }
+        XCTAssertEqual(engine.recentCodes(for: "login.chase.com").map(\.code), ["313131"])
+        XCTAssertEqual(engine.recentCodes(for: "LOGIN.CHASE.COM.").map(\.code), ["313131"])
+        for bad in ["", "evil.com/.chase.com", "evil.com#.chase.com", ".chase.com", "a..chase.com", "chase.com:443",
+                    "evil com.chase.com", "[::1]"] {
+            XCTAssertEqual(engine.recentCodes(for: bad), [], bad)
+        }
+        let id = try XCTUnwrap(engine.recentCodes(for: "chase.com").first?.id)
+        engine.markUsed(id)
+        XCTAssertEqual(engine.recentCodes(for: "chase.com"), [], "used codes aren't offered")
     }
 
     func testStreamRefusesABadToken() async throws {

@@ -92,16 +92,32 @@ final class ReceiverTests: XCTestCase {
         XCTAssertEqual(r.receive(make(code: "12 34 56"), now: now), .dropped(.badPlaintext))
     }
 
-    /// A WebOTP domain that isn't a plain multi-label ASCII host loses the binding, not the code.
-    func testOddDomainsKeepTheCodeButLoseTheBinding() {
-        for (domain, kept) in [("chase.com", "chase.com"), ("localhost", nil), ("bücher.de", nil), ("a..com", nil),
-                               ("-x.com", nil), ("CHASE.COM", nil)] as [(String, String?)] {
+    /// The WebOTP domain is normalized (case, one trailing dot); one that still isn't a plain
+    /// multi-label ASCII host keeps the code but fails closed: it's never offered on any page.
+    func testOddDomainsFailClosed() {
+        for (domain, kept) in [("chase.com", "chase.com"), ("CHASE.COM", "chase.com"), ("chase.com.", "chase.com"),
+                               ("localhost", nil), ("bücher.de", nil), ("a..com", nil), ("-x.com", nil),
+                               ("my_bank.com", nil), ("chase.com..", nil)] as [(String, String?)] {
             let r = receiver()
             let e = envelope(phone.envelope(code: "123456", domain: domain, ts: now, to: mac.publicKey))
             guard case let .accepted(m) = r.receive(e, now: now) else { return XCTFail(domain) }
             XCTAssertEqual(m.domain, kept, domain)
+            XCTAssertEqual(m.bindingUnusable, kept == nil, domain)
             XCTAssertEqual(m.code, "123456")
+            let recent = RecentCodes()
+            recent.add(m, receivedAt: now)
+            XCTAssertEqual(recent.offers(for: "evil.example", now: now), [], "\(domain) isn't offered elsewhere")
+            XCTAssertEqual(recent.offers(for: "chase.com", now: now).isEmpty, kept == nil, domain)
+            XCTAssertEqual(recent.all(now: now).count, 1, "kept for the notification")
         }
+    }
+
+    func testMissingSeenFileWhilePairedFailsClosed() {
+        let file = dir.appendingPathComponent("seen.json")
+        let r = Receiver(phonePublicKey: phone.keyPair.publicKey, macSecretKey: mac.secretKey,
+                         seen: SeenStore(fileURL: file, pairingID: "p1", expectFile: true, now: now))
+        XCTAssertEqual(r.receive(make(ts: now.addingTimeInterval(-1)), now: now), .dropped(.seenSetLost))
+        guard case .accepted = r.receive(make(ts: now.addingTimeInterval(1)), now: now.addingTimeInterval(2)) else { return XCTFail() }
     }
 
     /// The seen set survives a restart (it's on disk, owner-only) and belongs to one pairing.
@@ -161,8 +177,8 @@ final class RecentCodesTests: XCTestCase {
         XCTAssertEqual(recent.offers(for: "example.org", now: t0.addingTimeInterval(119)).map(\.code), ["222222"])
         XCTAssertEqual(recent.offers(for: "example.org", now: t0.addingTimeInterval(121)), [])
         // Still listed (Settings) until 10 minutes.
-        XCTAssertEqual(recent.offers(for: nil, now: t0.addingTimeInterval(300)).count, 1)
-        XCTAssertEqual(recent.offers(for: nil, now: t0.addingTimeInterval(601)).count, 0)
+        XCTAssertEqual(recent.all(now: t0.addingTimeInterval(300)).count, 1)
+        XCTAssertEqual(recent.all(now: t0.addingTimeInterval(601)).count, 0)
     }
 
     func testMarkUsedAndNewestFirst() {

@@ -10,15 +10,25 @@ public protocol CodeSink: AnyObject {
     func pairingForgotten()
 }
 
-/// The paired phone, as the agent remembers it (`pairing.json`, owner-only). Its public key isn't
-/// secret; the Mac's key and token are in the Keychain.
+/// What `pairing.json` (owner-only) holds: that a pairing exists, and its name for Settings. It
+/// is never trusted for anything that matters; those fields are in the Keychain (`KeychainPairing`)
+/// and the file's pairing id must match them.
 struct PairingRecord: Codable, Equatable {
-    var relayURL: URL
     var pairingId: String
-    var phonePublicKey: String
     var phoneName: String
-    var macPublicKey: String
     var pairedAt: Date
+}
+
+/// The security-relevant part of a pairing, in one Keychain item the agent created: the Mac's
+/// secret key and token, the phone's public key, the pairing id and the relay URL. A process that
+/// can edit files but not the agent's Keychain items can't swap the phone's key or send the
+/// token to another host.
+struct KeychainPairing: Codable, Equatable {
+    var pairingId: String
+    var relayURL: URL
+    var phonePublicKey: String
+    var macSecretKey: String
+    var macToken: String
 }
 
 /// The agent's engine: pairing, the relay stream, the receiver rules, recent codes and settings.
@@ -37,12 +47,16 @@ public final class CodesEngine {
         public var streamTiming: RelayStream.Timing
         /// How often `GET /v1/pair` is read while waiting for the phone.
         public var pairPollInterval: TimeInterval
+        /// Lets a relay on http://127.0.0.1 or http://localhost through (tests, a Debug agent).
+        /// Otherwise the relay must be https.
+        public var allowLocalHTTPRelay: Bool
         public var now: () -> Date
 
         public init(dataDir: URL, relayURL: URL, macName: String, agentVersion: String, secrets: SecretStore,
                     session: URLSession = URLSession(configuration: .ephemeral),
                     streamTiming: RelayStream.Timing = .init(), pairPollInterval: TimeInterval = 1,
-                    now: @escaping () -> Date = Date.init) {
+                    allowLocalHTTPRelay: Bool = false, now: @escaping () -> Date = Date.init) {
+            self.allowLocalHTTPRelay = allowLocalHTTPRelay
             self.dataDir = dataDir
             self.relayURL = relayURL
             self.macName = macName
@@ -59,6 +73,7 @@ public final class CodesEngine {
         case alreadyPaired
         case nothingToConfirm
         case cancelled
+        case insecureRelay
         case keychain(String)
 
         public var description: String {
@@ -66,13 +81,16 @@ public final class CodesEngine {
             case .alreadyPaired: return "This Mac is already paired. Unpair first."
             case .nothingToConfirm: return "There's no pairing waiting to be confirmed."
             case .cancelled: return "The pairing was cancelled."
+            case .insecureRelay: return "The relay must be an https address."
             case let .keychain(why): return "The Keychain refused the Mac's key (\(why))."
             }
         }
     }
 
-    static let macKeyName = "mac-key"
-    static let macTokenName = "mac-token"
+    /// The Keychain item holding `KeychainPairing`.
+    static let pairingSecretName = "pairing"
+    /// Items written by builds before the pairing moved into one item; removed on unpair.
+    static let legacySecretNames = ["mac-key", "mac-token"]
 
     public let config: Config
     public weak var sink: CodeSink?
@@ -83,6 +101,8 @@ public final class CodesEngine {
     public private(set) var problem: String?
 
     private var record: PairingRecord?
+    /// The relay of the active pairing (from the Keychain item, never from the file).
+    private var relayURL: URL?
     private var macKeyPair: BoxKeyPair?
     private var macToken: String?
     private var receiver: Receiver?
@@ -149,9 +169,27 @@ public final class CodesEngine {
         settings = new
     }
 
-    public func recentCodes(for host: String?) -> [CodeOffer] {
-        if host != nil, !settings.offerInBrowser { return [] }
+    /// The codes that may be offered on a page with this top-level host (PROTOCOL.md §5): none
+    /// when "offer in iSmith" is off or the host isn't a plain host name; never used ones.
+    public func recentCodes(for host: String) -> [CodeOffer] {
+        guard settings.offerInBrowser else { return [] }
         return recent.offers(for: host, now: config.now())
+    }
+
+    /// Every kept code with the code itself masked, for Settings' list.
+    public func recentCodeSummaries() -> [CodeOffer] {
+        recent.all(now: config.now()).map { offer in
+            var masked = offer
+            masked.code = String(repeating: "•", count: offer.code.count)
+            return masked
+        }
+    }
+
+    /// Whether a relay URL may carry the Mac's token: https, or a loopback http one when allowed.
+    func relayAllowed(_ url: URL) -> Bool {
+        guard url.host?.isEmpty == false, url.user == nil, url.query == nil else { return false }
+        if url.scheme == "https" { return true }
+        return config.allowLocalHTTPRelay && url.scheme == "http" && ["127.0.0.1", "localhost"].contains(url.host ?? "")
     }
 
     public func markUsed(_ id: String) { recent.markUsed(id) }
@@ -162,6 +200,7 @@ public final class CodesEngine {
     public func startPairing() async throws -> (uri: String, pairingID: String) {
         // Also while a pairing file exists whose keys can't be read: unpair first.
         guard record == nil else { throw Failure.alreadyPaired }
+        guard relayAllowed(config.relayURL) else { throw Failure.insecureRelay }
         await cancelPairing()
         pairingGeneration += 1
         let generation = pairingGeneration
@@ -264,20 +303,20 @@ public final class CodesEngine {
             // Cancelled while the relay confirmed; cancel already deleted it there.
             throw Failure.cancelled
         }
+        let secret = KeychainPairing(pairingId: session.pairingID, relayURL: session.relayURL,
+                                     phonePublicKey: Base64URL.encode(phone.publicKey),
+                                     macSecretKey: Base64URL.encode(session.keyPair.secretKey), macToken: session.macToken)
         do {
-            try config.secrets.save(session.keyPair.secretKey, as: Self.macKeyName)
-            try config.secrets.save(Data(session.macToken.utf8), as: Self.macTokenName)
+            try config.secrets.save(CodesJSON.encode(secret), as: Self.pairingSecretName)
         } catch {
             try? await api.pairDelete(token: session.macToken)
-            try? config.secrets.delete(Self.macKeyName)
-            try? config.secrets.delete(Self.macTokenName)
+            try? config.secrets.delete(Self.pairingSecretName)
             fail(session, "The Mac's key couldn't be saved in the Keychain (\(error)).")
             throw Failure.keychain("\(error)")
         }
-        let record = PairingRecord(relayURL: session.relayURL, pairingId: session.pairingID,
-                                   phonePublicKey: Base64URL.encode(phone.publicKey), phoneName: phone.name,
-                                   macPublicKey: Base64URL.encode(session.keyPair.publicKey), pairedAt: config.now())
+        let record = PairingRecord(pairingId: session.pairingID, phoneName: phone.name, pairedAt: config.now())
         try? FileManager.default.removeItem(at: seenURL)
+        SeenStore(fileURL: seenURL, pairingID: session.pairingID).create()
         try OwnerOnlyFile.write(CodesJSON.encode(record), to: pairingURL)
         pairing = nil
         verifiedPhone = nil
@@ -307,9 +346,9 @@ public final class CodesEngine {
     @discardableResult
     public func unpair() async -> String? {
         var warning: String?
-        if let record, let token = macToken {
+        if let relayURL, let token = macToken {
             do {
-                try await RelayAPI(baseURL: record.relayURL, session: config.session).pairDelete(token: token)
+                try await RelayAPI(baseURL: relayURL, session: config.session).pairDelete(token: token)
             } catch RelayError.unauthorized {
                 // Already gone at the relay.
             } catch {
@@ -325,11 +364,11 @@ public final class CodesEngine {
         stopStream()
         keychainRetry?.cancel()
         keychainRetry = nil
-        try? config.secrets.delete(Self.macKeyName)
-        try? config.secrets.delete(Self.macTokenName)
+        for name in [Self.pairingSecretName] + Self.legacySecretNames { try? config.secrets.delete(name) }
         try? FileManager.default.removeItem(at: pairingURL)
         try? FileManager.default.removeItem(at: seenURL)
         record = nil
+        relayURL = nil
         macKeyPair = nil
         macToken = nil
         receiver = nil
@@ -340,33 +379,44 @@ public final class CodesEngine {
 
     private func loadPairing() {
         guard let data = try? Data(contentsOf: pairingURL) else { return }
-        guard let record = CodesJSON.decode(PairingRecord.self, from: data),
-              let phonePub = Base64URL.decode(record.phonePublicKey), phonePub.count == BoxCrypto.keyBytes else {
+        guard let record = CodesJSON.decode(PairingRecord.self, from: data) else {
             problem = "The pairing file couldn't be read. Pair again."
             return
         }
+        // From here on a pairing exists: a new one is refused until it's unpaired.
+        self.record = record
+        let stored: Data?
         do {
-            guard let secret = try config.secrets.load(Self.macKeyName), let pair = BoxKeyPair(secretKey: secret),
-                  Base64URL.encode(pair.publicKey) == record.macPublicKey,
-                  let tokenData = try config.secrets.load(Self.macTokenName),
-                  let token = String(data: tokenData, encoding: .utf8), !token.isEmpty
-            else {
-                problem = "The Mac's key for \(record.phoneName) is missing from the Keychain. Unpair, then pair again."
-                self.record = record
-                return
-            }
-            self.record = record
-            problem = nil
-            macKeyPair = pair
-            macToken = token
-            receiver = Receiver(phonePublicKey: phonePub, macSecretKey: pair.secretKey,
-                                seen: SeenStore(fileURL: seenURL, pairingID: record.pairingId))
+            stored = try config.secrets.load(Self.pairingSecretName)
         } catch {
-            // Locked or refused just now: keep the record and try again every 30 seconds.
-            self.record = record
+            // Locked or refused just now: try again every 30 seconds.
             problem = "The Keychain couldn't be read (\(error)). Trying again."
             scheduleKeychainRetry()
+            return
         }
+        guard let stored, let secret = CodesJSON.decode(KeychainPairing.self, from: stored),
+              let macSecret = Base64URL.decode(secret.macSecretKey), let pair = BoxKeyPair(secretKey: macSecret),
+              let phonePub = Base64URL.decode(secret.phonePublicKey), phonePub.count == BoxCrypto.keyBytes,
+              !secret.macToken.isEmpty
+        else {
+            problem = "The Mac's key for \(record.phoneName) is missing from the Keychain. Unpair, then pair again."
+            return
+        }
+        guard secret.pairingId == record.pairingId else {
+            codesLog.error("pairing file doesn't match the Keychain; not using either")
+            problem = "The pairing file doesn't match the Keychain. Unpair, then pair again."
+            return
+        }
+        guard relayAllowed(secret.relayURL) else {
+            problem = "The pairing's relay isn't an https address. Unpair, then pair again."
+            return
+        }
+        problem = nil
+        relayURL = secret.relayURL
+        macKeyPair = pair
+        macToken = secret.macToken
+        receiver = Receiver(phonePublicKey: phonePub, macSecretKey: pair.secretKey,
+                            seen: SeenStore(fileURL: seenURL, pairingID: record.pairingId, expectFile: true, now: config.now()))
     }
 
     private func scheduleKeychainRetry() {
@@ -384,10 +434,10 @@ public final class CodesEngine {
     // MARK: - The stream
 
     private func startStream() {
-        guard let record, let token = macToken, stream == nil else { return }
+        guard let relayURL, let token = macToken, stream == nil else { return }
         streamGeneration += 1
         let generation = streamGeneration
-        let api = RelayAPI(baseURL: record.relayURL, session: config.session)
+        let api = RelayAPI(baseURL: relayURL, session: config.session)
         let stream = RelayStream(url: api.streamURL, token: token, session: config.session, timing: config.streamTiming,
                                  fallbackAck: { [weak self] ids in
                                      do {

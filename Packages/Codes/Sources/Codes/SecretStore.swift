@@ -48,10 +48,12 @@ public final class KeychainSecretStore: SecretStore {
         return data
     }
 
+    /// Always a new item: whatever is under the name is deleted first (fails if it can't be),
+    /// then the item is added. An item added by the agent without an explicit access object gets
+    /// the file Keychain's default access list, which trusts only the creating app, so an item
+    /// someone else created beforehand (with an "any app" list) is never written into.
     public func save(_ data: Data, as name: String) throws {
-        let update = SecItemUpdate(query(name) as CFDictionary, [kSecValueData as String: data] as CFDictionary)
-        if update == errSecSuccess { return }
-        guard update == errSecItemNotFound else { throw Failure(status: update) }
+        try delete(name)
         var add = query(name)
         add[kSecValueData as String] = data
         add[kSecAttrLabel as String] = "\(labelPrefix) \(name)"

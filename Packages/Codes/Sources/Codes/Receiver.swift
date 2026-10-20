@@ -40,16 +40,28 @@ public final class SeenStore {
     public let fileURL: URL?
     private(set) var pairingID: String
     private(set) var entries: [Entry] = []
+    /// Set when the set should have been on disk but wasn't readable (missing, corrupt, another
+    /// pairing's): it fails closed, accepting only messages whose `ts` is after this (Unix ms),
+    /// the moment it was loaded. Anything older might be a replay it can no longer recognize.
+    public private(set) var acceptOnlyAfter: Int64?
 
-    /// `fileURL` nil keeps the set in memory only (tests).
-    public init(fileURL: URL?, pairingID: String) {
+    /// `fileURL` nil keeps the set in memory only (tests). `expectFile`: a pairing is active, so
+    /// the file was created at confirm time and its absence means it was lost.
+    public init(fileURL: URL?, pairingID: String, expectFile: Bool = false, now: Date = Date()) {
         self.fileURL = fileURL
         self.pairingID = pairingID
-        if let fileURL, let data = try? Data(contentsOf: fileURL),
+        guard let fileURL else { return }
+        if let data = try? Data(contentsOf: fileURL),
            let file = try? JSONDecoder().decode(File.self, from: data), file.pairingID == pairingID {
             entries = file.entries
+        } else if expectFile {
+            acceptOnlyAfter = Int64(now.timeIntervalSince1970 * 1000)
+            codesLog.error("seen set missing or unreadable; accepting only messages sent from now on")
         }
     }
+
+    /// Writes the (empty) set, so a later start can tell "never written" from "lost".
+    public func create() { save() }
 
     public func contains(id: String, ctr: Int64) -> Bool {
         entries.contains { $0.id == id || $0.ctr == ctr }
@@ -71,7 +83,10 @@ public final class SeenStore {
         do {
             try OwnerOnlyFile.write(JSONEncoder().encode(File(pairingID: pairingID, entries: entries)), to: fileURL)
         } catch {
+            // A stale file would let a restart accept what this run already saw: remove it, so
+            // the next start fails closed instead.
             codesLog.error("seen set not saved: \(String(describing: error), privacy: .public)")
+            try? FileManager.default.removeItem(at: fileURL)
         }
     }
 }
@@ -87,6 +102,7 @@ public struct Receiver {
         case stale = "ts more than 10 minutes in the past"
         case future = "ts more than 2 minutes in the future"
         case replay = "id or ctr seen before"
+        case seenSetLost = "sent before the seen set was lost"
     }
 
     public enum Verdict: Equatable {
@@ -123,6 +139,7 @@ public struct Receiver {
         let nowMs = Int64(now.timeIntervalSince1970 * 1000)
         if message.ts < nowMs - Int64(Self.maxAge * 1000) { return .dropped(.stale) }
         if message.ts > nowMs + Int64(Self.maxSkew * 1000) { return .dropped(.future) }
+        if let floor = seen.acceptOnlyAfter, message.ts <= floor { return .dropped(.seenSetLost) }
         seen.prune(now: now)
         if seen.contains(id: message.id, ctr: message.ctr) { return .dropped(.replay) }
         seen.insert(id: message.id, ctr: message.ctr, now: now)

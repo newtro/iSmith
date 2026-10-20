@@ -50,6 +50,9 @@ public struct CodeMessage: Codable, Equatable, Sendable {
     public var code: String
     public var domain: String?
     public var body: String
+    /// Set by the receiver when the message named a WebOTP domain the Mac couldn't use: the code
+    /// is bound to no host at all (never offered on a page). Not part of the wire format.
+    public internal(set) var bindingUnusable = false
 
     public init(v: Int = 1, id: String, ctr: Int64, ts: Int64, sender: String, code: String, domain: String?, body: String) {
         self.v = v
@@ -98,18 +101,19 @@ public struct CodeMessage: Codable, Equatable, Sendable {
         return true
     }
 
-    /// The message with its WebOTP domain kept only when it's a plain lowercase ASCII host with
-    /// at least two labels. Anything else (non-ASCII, a single label, odd characters) loses the
-    /// binding but keeps the code, which is then offered like an unbound one.
+    /// The message with its WebOTP domain normalized (lowercased, one trailing dot removed).
+    /// A domain that still isn't a plain multi-label ASCII host (an IDN the phone didn't punycode,
+    /// an underscore, a single label) fails closed: the code is kept for the notification, but
+    /// `bindingUnusable` is set and it's never offered in iSmith.
     func withCheckedDomain() -> CodeMessage {
-        guard let d = domain else { return self }
-        let labels = d.split(separator: ".", omittingEmptySubsequences: false)
-        let ok = d.count <= 253 && d == d.lowercased() && labels.count >= 2
-            && labels.allSatisfy { !$0.isEmpty && $0.count <= 63 && !$0.hasPrefix("-") && !$0.hasSuffix("-") }
-            && d.unicodeScalars.allSatisfy { $0.isASCII && (CharacterSet.alphanumerics.contains($0) || $0 == "-" || $0 == ".") }
-        if ok { return self }
+        guard let raw = domain else { return self }
         var copy = self
-        copy.domain = nil
+        if let normal = Hostname.normalize(raw), normal.contains(".") {
+            copy.domain = normal
+        } else {
+            copy.domain = nil
+            copy.bindingUnusable = true
+        }
         return copy
     }
 
@@ -169,5 +173,24 @@ public struct PairStatusReply: Codable, Equatable, Sendable {
         self.phonePublicKey = phonePublicKey
         self.phoneName = phoneName
         self.proof = proof
+    }
+}
+
+/// Host names as the WebOTP binding compares them.
+public enum Hostname {
+    /// Lowercased, one trailing dot removed, and only when the result is a plain ASCII host name:
+    /// labels of 1–63 letters, digits and inner hyphens, at most 253 characters. nil otherwise
+    /// (empty, non-ASCII, `/`, `:`, `#`, spaces, `_`, empty labels, a leading dot).
+    public static func normalize(_ host: String) -> String? {
+        var h = host.lowercased()
+        if h.hasSuffix(".") { h.removeLast() }
+        guard !h.isEmpty, h.count <= 253 else { return nil }
+        let labels = h.split(separator: ".", omittingEmptySubsequences: false)
+        for label in labels {
+            guard (1...63).contains(label.count), !label.hasPrefix("-"), !label.hasSuffix("-"),
+                  label.unicodeScalars.allSatisfy({ ("a"..."z").contains($0) || ("0"..."9").contains($0) || $0 == "-" })
+            else { return nil }
+        }
+        return h
     }
 }
