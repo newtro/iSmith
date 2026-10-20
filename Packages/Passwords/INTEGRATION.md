@@ -88,9 +88,11 @@ offers to start over.
   as SQLite on macOS does by default; without them it's `.notSetUp`). Only the `-shm` index's
   read marks change. The app's inspection may checkpoint committed WAL pages into the file when
   it closes, which loses nothing.
-- Not yet crash-atomic: a move aside renames the main file, then its `-wal`, `-journal` and
-  `-shm`, one at a time. A crash between renames leaves the main file at the new name and its
-  `-wal` at the old one; nothing is deleted, but nothing reconciles it at the next launch yet.
+- Every commit is synced (`synchronous = FULL`), on the pool's writer after GRDB's WAL setup
+  (which sets NORMAL) and on every other connection: a save that returned survives power loss.
+- A missing database whose `-wal`, `-shm` or `-journal` is still there is never a first run: every
+  mode throws `.orphanedSideFiles` (naming them) and creates nothing, since a new database at
+  that path would discard the `-wal`. The app's alert says they're kept and where.
 - `close()` closes the store's connections and lets go of the lock (so does deallocating it).
 - The key is a 256-bit AES key in the file-based login Keychain, service
   `com.scottsmith.ismith.passwords-key`, account `passwords`, separate from the vault key. The
@@ -99,6 +101,14 @@ offers to start over.
   installed app's key.
 - Add `Packages/Passwords` to `project.yml` under `packages:` and as a dependency of the
   `iSmith` target. It depends on `SignInSync` (for `KeyStore`) and GRDB 7.11.1 (exact).
+
+## Known gaps
+
+- Move aside isn't crash-atomic (no move journal or reconciliation at launch): files move one rename at a time; a crash between them leaves the database at the new name and its `-wal` at the old, which `.orphanedSideFiles` now refuses rather than discards, but nothing puts them back together automatically.
+- `.existingOnly` keeps a read-write connection opened with GRDB's default create flag (GRDB 7.11.1 has no public way to drop it): the shared lock stops the app replacing the file meanwhile and the inode check rejects a swap, but a rejected open (e.g. a file missing its key check) can checkpoint its WAL on close. Deferred: no second process opens the store yet.
+- Backup names (`before-restore-<time>`) aren't reserved atomically, so two recoveries in the same second could pick the same file. Deferred: only the app restores, and two app instances can't both be restoring (the lock stops a second one moving files, and restore runs once at launch).
+- Two first launches at once: one can read no key, the other create it, and the first then report `.keyMissing` (an unneeded alert; "Try Again" opens it). Deferred: two app instances at first run are rare and nothing is lost.
+- `.app` is a convention, not enforced: any caller can pass it. Only the iSmith app should.
 
 ## Attaching to web views
 

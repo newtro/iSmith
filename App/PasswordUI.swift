@@ -70,6 +70,8 @@ extension BrowserState {
                 why = "The passwords key couldn't be read from the Keychain (\(reason)). Unlock the login Keychain or allow \(AppIdentity.displayName) to use it, then try again."
             } catch PasswordStoreError.databaseUnavailable(let reason) {
                 why = "The saved passwords file couldn't be read just now (\(reason)). If another copy of \(AppIdentity.displayName) is still quitting, wait a moment and try again."
+            } catch PasswordStoreError.orphanedSideFiles(let paths) {
+                why = "The saved passwords file (\(fileURL.path)) is missing, but files that belong to it are still there and may hold saved logins: \(paths.joined(separator: ", ")). They're kept where they are, and no new passwords file was started. If you moved or renamed passwords.sqlite, put it back next to them and try again."
             } catch PasswordStoreError.keyMissing {
                 why = "The key that unlocks your saved passwords isn't in the login Keychain, but the passwords file (\(fileURL.path)) holds logins sealed with it. If the Keychain is locked, restored from a backup or being synced, wait for it and try again."
                 canStartOver = true

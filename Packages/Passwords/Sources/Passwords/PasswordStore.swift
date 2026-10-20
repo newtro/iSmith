@@ -36,9 +36,15 @@ public enum PasswordStoreError: Error, Equatable, CustomStringConvertible {
     /// Moving an unreadable file aside failed part way and couldn't be fully undone. Says where
     /// each file is now (paths only). Nothing was deleted.
     case moveAsideIncomplete(String)
+    /// The database file is missing but SQLite files that belong to it (`-wal`, `-shm`,
+    /// `-journal`) are still there, as a move or a delete interrupted part way leaves them. The
+    /// `-wal` may hold committed logins, and a new database at this path would discard it, so
+    /// nothing is created; they're kept where they are (the paths are listed).
+    case orphanedSideFiles([String])
 
     public var description: String {
         switch self {
+        case .orphanedSideFiles(let paths): return "The saved passwords file is missing, but files that belong to it are still there: \(paths.joined(separator: ", "))."
         case .moveAsideIncomplete(let where_): return "The saved passwords file couldn't be moved aside completely: \(where_)"
         case .keyMissing: return "The passwords key isn't in the Keychain, but there is a saved passwords file that holds (or may hold) logins sealed with it."
         case .fileMissing: return "There is no saved passwords file."
@@ -148,6 +154,7 @@ public final class PasswordStore: @unchecked Sendable {
             // with the key is an error. Nothing below creates, moves, converts or checkpoints a
             // file (the -shm index aside, which every reader updates).
             guard let key else { throw PasswordStoreError.keyMissing }
+            try Self.refuseOrphanedSideFiles(fileURL)
             guard FileManager.default.fileExists(atPath: fileURL.path) else { throw PasswordStoreError.fileMissing }
             switch Self.format(of: fileURL) {
             case .notSQLite: throw PasswordStoreError.unrecognizedFile
@@ -204,6 +211,9 @@ public final class PasswordStore: @unchecked Sendable {
         try SecureFile.prepareDirectory(fileURL.deletingLastPathComponent())
         // Every open store holds the lock shared; moving the file aside needs it alone.
         let lock = try StoreLock(for: fileURL, create: true)
+        // A missing file is a first run only if nothing of it is left: a -wal without its
+        // database may hold committed logins that a new database would discard.
+        try Self.refuseOrphanedSideFiles(fileURL)
         let exists = FileManager.default.fileExists(atPath: fileURL.path)
 
         // What's on disk is judged before anything changes. A file that can't be read right now
@@ -253,6 +263,7 @@ public final class PasswordStore: @unchecked Sendable {
                     throw PasswordStoreError.databaseUnavailable("another process has the passwords file open")
                 }
                 exclusive = true
+                try Self.refuseOrphanedSideFiles(fileURL)
                 judged = FileManager.default.fileExists(atPath: fileURL.path) ? Self.inspect(fileURL, key: key) : .usable
             }
             switch judged {
@@ -279,6 +290,10 @@ public final class PasswordStore: @unchecked Sendable {
         let pool = try Self.openPool(fileURL)
         database = pool
         do {
+            // GRDB's WAL setup sets synchronous = NORMAL on the writer, after `prepareDatabase`:
+            // in WAL that can lose the last commits (a just-saved login) on power loss. FULL
+            // syncs the WAL at every commit. The pool's readers are read-only.
+            try pool.writeWithoutTransaction { db in try db.execute(sql: "PRAGMA synchronous = FULL") }
             try Self.migrator.migrate(pool)
             // The connection kept is checked the way `inspect` judged the file: its key check
             // opens with the key, or it holds nothing yet and gets one.
@@ -348,8 +363,20 @@ public final class PasswordStore: @unchecked Sendable {
         config.prepareDatabase { db in
             try db.execute(sql: "PRAGMA secure_delete = ON")
             try db.execute(sql: "PRAGMA trusted_schema = OFF")
+            // Every commit synced (a pool's writer is set again after GRDB's WAL setup).
+            try db.execute(sql: "PRAGMA synchronous = FULL")
         }
         return config
+    }
+
+    /// Throws `orphanedSideFiles` when the database is missing but its side files aren't.
+    private static func refuseOrphanedSideFiles(_ url: URL) throws {
+        guard !FileManager.default.fileExists(atPath: url.path) else { return }
+        let left = SecureFile.sideFiles(of: url).filter { FileManager.default.fileExists(atPath: $0.path) }
+        guard left.isEmpty else {
+            log.error("passwords database missing but \(left.count, privacy: .public) of its side files are there; nothing changed")
+            throw PasswordStoreError.orphanedSideFiles(left.map(\.path))
+        }
     }
 
     private static var migrator: DatabaseMigrator {
