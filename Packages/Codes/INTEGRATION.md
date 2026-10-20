@@ -149,6 +149,13 @@ At launch, when codes are on, iSmith makes sure the agent is registered and comp
 and launchd's KeepAlive starts the new binary from the bundle now on disk (about 10 s later,
 launchd's throttle). The end-to-end test checks that the process id changes and the pairing survives.
 
+That `quit` call can't work after a real update: the old agent's executable has been replaced on
+disk, so the running process no longer validates and the app's XPC code-signing requirement
+refuses it (seen with 1.4.0 → 1.4.1: the pane sat at "Starting iSmith Agent…"). So iSmith also
+records the app version that last started the agent (`codesAgentStartedFor`); on the first launch
+of a new version it runs `launchctl kickstart -k gui/<uid>/<agent label>`, which kills the old
+agent and starts the new binary at once. Registration and pairing are untouched.
+
 ## Settings ▸ Codes
 
 "Receive codes from my phone" registers or unregisters the agent (`SMAppService.agent`); when macOS

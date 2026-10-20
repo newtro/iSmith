@@ -41,8 +41,42 @@ final class CodesController: ObservableObject {
         guard enabled else { return }
         if serviceStatus != .enabled {
             register()
+        } else if UserDefaults.standard.string(forKey: Self.agentStartedForKey) != CodesClient.appVersion {
+            // A Sparkle update replaced the agent's binary under the running agent, so that agent
+            // no longer passes the XPC code-signing check and can't be asked to quit. Restart it
+            // through launchd instead; the new binary keeps its pairing (Keychain and files).
+            restartAgent()
         }
         Task { await replaceOutdatedAgent() }
+    }
+
+    /// The app version that last started the agent, so the launch after an update restarts it.
+    static let agentStartedForKey = "codesAgentStartedFor"
+
+    /// `launchctl kickstart -k` on the agent's job: kills the running agent and starts the one on
+    /// disk now (KeepAlive alone would wait for the old one to exit).
+    private func restartAgent() {
+        let label = CodesClient.identity.agentBundleID
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        process.arguments = ["kickstart", "-k", "gui/\(getuid())/\(label)"]
+        // Not waited for: launchd may take a while to stop a stuck agent, and launch mustn't stall.
+        process.terminationHandler = { finished in
+            let status = finished.terminationStatus
+            Task { @MainActor in
+                if status == 0 {
+                    NSLog("iSmith codes: restarted the agent for \(CodesClient.appVersion)")
+                    UserDefaults.standard.set(CodesClient.appVersion, forKey: Self.agentStartedForKey)
+                } else {
+                    NSLog("iSmith codes: launchctl kickstart exited \(status)")
+                }
+            }
+        }
+        do {
+            try process.run()
+        } catch {
+            NSLog("iSmith codes: couldn't restart the agent (\(error.localizedDescription))")
+        }
     }
 
     func replaceOutdatedAgent() async {
@@ -81,6 +115,7 @@ final class CodesController: ObservableObject {
     private func register() {
         do {
             try service.register()
+            UserDefaults.standard.set(CodesClient.appVersion, forKey: Self.agentStartedForKey)
             message = nil
         } catch {
             // `.requiresApproval` also throws; the pane explains that case.
