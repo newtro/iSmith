@@ -61,7 +61,7 @@ build script checks that the embedded agent's bundle id is the one it names.
 ## Pairing (PROTOCOL.md §2)
 
 `startPairing` → `POST /v1/pair/start`, a fresh key pair and 32-byte secret `S`, the QR URI
-`2fasync://pair?v=1&u=…&p=…&t=…&k=…&s=…&n=…`. The agent polls `GET /v1/pair` every second; on
+`twofasync://pair?v=1&u=…&p=…&t=…&k=…&s=…&n=…`. The agent polls `GET /v1/pair` every second; on
 `pending` it checks the phone's HMAC proof against `S` in constant time. A mismatch (a relay that
 swapped the key) deletes the pairing: "Pairing failed: the phone's key didn't check out." Otherwise
 `pairingState` reports `verify` with the fingerprint ("123 456") and phone name; `confirmPairing`
@@ -70,9 +70,6 @@ swapped the key) deletes the pairing: "Pairing failed: the phone's key didn't ch
 Starting a pairing while paired, or while a pairing file exists whose keys can't be read, is
 refused (unpair first). A Keychain that can't be read just now (locked) is retried every 30 s.
 Cancel overtakes a start or confirm still waiting on the relay, and confirm isn't re-entrant.
-
-Note: "2fasync" starts with a digit, which RFC 3986 doesn't allow in a URI scheme; Foundation's
-`URL`/`URLComponents` reject the whole string. The Mac only writes it; the test phone splits it by hand.
 
 ## Receiving (PROTOCOL.md §3)
 

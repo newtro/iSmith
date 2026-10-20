@@ -30,13 +30,10 @@ public final class FakePhone: @unchecked Sendable {
         public var macName: String
     }
 
-    /// Parses a `2fasync://pair?…` URI as the phone does (v=1, 32-byte k, t and s, a UUID p).
+    /// Parses a `twofasync://pair?…` URI as the phone does (v=1, 32-byte k, t and s, a UUID p).
     /// `allowHTTP` lets the fake relay's plain-http URL through.
     public static func parse(_ uri: String, allowHTTP: Bool = true) -> URIParts? {
-        // "2fasync" starts with a digit, which RFC 3986 doesn't allow in a scheme, so Foundation's
-        // URL parsers refuse the whole URI (Android's Uri is lenient). Split it by hand.
-        let prefix = "2fasync://pair?"
-        guard uri.hasPrefix(prefix), let parts = URLComponents(string: "x://pair?" + uri.dropFirst(prefix.count)) else { return nil }
+        guard let parts = URLComponents(string: uri), parts.scheme == "twofasync", parts.host == "pair" else { return nil }
         var q: [String: String] = [:]
         for item in parts.queryItems ?? [] { q[item.name] = item.value }
         guard q["v"] == "1", let u = q["u"], let relay = URL(string: u),

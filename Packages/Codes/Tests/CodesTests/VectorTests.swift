@@ -88,11 +88,13 @@ final class VectorTests: XCTestCase {
         XCTAssertEqual(session.check(PairStatusReply(state: "pending", phonePublicKey: p.phonePublicKey, phoneName: nil, proof: nil)), .rejected)
 
         XCTAssertEqual(session.qrURI,
-                       "2fasync://pair?v=1&u=https%3A%2F%2F2fa.johnnycode.ai&p=\(p.pairingId)"
+                       "twofasync://pair?v=1&u=https%3A%2F%2F2fa.johnnycode.ai&p=\(p.pairingId)"
                        + "&t=\(reply.registrationToken)&k=\(p.macPublicKey)&s=\(p.pairingSecret)&n=Scott%27s%20MacBook%20Pro")
-        // Foundation refuses "2fasync" as a scheme (it starts with a digit), so read the query alone.
-        XCTAssertNil(URLComponents(string: session.qrURI))
-        let items = URLComponents(string: "x://pair?" + session.qrURI.dropFirst("2fasync://pair?".count))!.queryItems!
+        // URLComponents (as a phone might) parses it and reads the relay URL and name back.
+        let parts = try XCTUnwrap(URLComponents(string: session.qrURI))
+        XCTAssertEqual(parts.scheme, "twofasync")
+        XCTAssertEqual(parts.host, "pair")
+        let items = try XCTUnwrap(parts.queryItems)
         XCTAssertEqual(items.first { $0.name == "u" }?.value, "https://2fa.johnnycode.ai")
         XCTAssertEqual(items.first { $0.name == "n" }?.value, "Scott's MacBook Pro")
     }

@@ -35,7 +35,7 @@ final class CodesWiringTests: XCTestCase {
     }
 
     func testQRCodeDecodesToTheURI() throws {
-        let uri = "2fasync://pair?v=1&u=https%3A%2F%2F2fa.johnnycode.ai&p=3b241101-e2bb-4255-8caf-4136c566a962"
+        let uri = "twofasync://pair?v=1&u=https%3A%2F%2F2fa.johnnycode.ai&p=3b241101-e2bb-4255-8caf-4136c566a962"
             + "&t=AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE&k=PP-onxJH-U3_xeHL4KsrZsvYwBEnNbgj_J2V99kPTVw"
             + "&s=ed-iFKx6u8JMsXxwlg16tavkxruP0p8EX4sFBM5Glb0&n=Scott%27s%20MacBook%20Pro"
         let image = try XCTUnwrap(CodesController.qrImage(uri))

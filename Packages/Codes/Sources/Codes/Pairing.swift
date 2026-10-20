@@ -26,7 +26,7 @@ public struct PairingSession: Sendable {
         self.secret = secret
     }
 
-    /// `2fasync://pair?v=1&u=<relay>&p=<pairingId>&t=<token>&k=<macPub>&s=<S>&n=<macName>`.
+    /// `twofasync://pair?v=1&u=<relay>&p=<pairingId>&t=<token>&k=<macPub>&s=<S>&n=<macName>`.
     public var qrURI: String {
         let items: [(String, String)] = [
             ("v", "1"),
@@ -37,7 +37,7 @@ public struct PairingSession: Sendable {
             ("s", Base64URL.encode(secret)),
             ("n", Self.percentEncode(macName)),
         ]
-        return "2fasync://pair?" + items.map { "\($0.0)=\($0.1)" }.joined(separator: "&")
+        return "twofasync://pair?" + items.map { "\($0.0)=\($0.1)" }.joined(separator: "&")
     }
 
     /// What the phone sent back through the relay, checked against `S`.
