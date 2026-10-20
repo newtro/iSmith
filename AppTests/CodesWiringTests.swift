@@ -106,7 +106,7 @@ final class CodesWiringTests: XCTestCase {
         XCTAssertFalse(status.paired)
 
         let (uri, pairingID) = try await client.startPairing()
-        XCTAssertTrue(uri.contains("\(relay.host ?? "")%3A\(relay.port ?? 0)"), "the Debug agent was pointed at the fake relay")
+        XCTAssertTrue(uri.contains(relay.port.map { "\(relay.host ?? "")%3A\($0)" } ?? "\(relay.host ?? "")"), "the Debug agent was pointed at the relay under test")
         try await post(phone.appendingPathComponent("test/phone/pair"), ["uri": uri, "phoneName": "E2E Phone"])
         let verifying = await eventually(timeout: 15) { (try? await client.pairingState())?.state == .verify }
         XCTAssertTrue(verifying)
