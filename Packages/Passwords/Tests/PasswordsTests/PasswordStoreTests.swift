@@ -2,6 +2,7 @@ import CryptoKit
 import GRDB
 @testable import Passwords
 import SignInSync
+import os
 import XCTest
 
 /// The encrypted store: crypto, files on disk, CRUD, matching, proposals, never-save, and what
@@ -20,6 +21,27 @@ final class PasswordStoreTests: XCTestCase {
 
     override func tearDownWithError() throws {
         try? FileManager.default.removeItem(at: dir)
+    }
+
+    /// Every file in the folder, by name, with its bytes (the -shm index by name only).
+    private func snapshot() throws -> [String: Data] {
+        guard FileManager.default.fileExists(atPath: dir.path) else { return [:] }
+        var files: [String: Data] = [:]
+        for name in try FileManager.default.contentsOfDirectory(atPath: dir.path) {
+            // The -shm is SQLite's shared-memory index, not data: any connection that reads the
+            // file updates it (read marks), so only its presence is compared.
+            files[name] = name.hasSuffix("-shm") ? Data() : try Data(contentsOf: dir.appendingPathComponent(name))
+        }
+        return files
+    }
+
+    /// Turns a closed store's file back into the rollback-journal format it had before WAL.
+    private func makeRollbackJournal(_ url: URL) throws {
+        let queue = try DatabaseQueue(path: url.path)
+        try queue.writeWithoutTransaction { db in
+            XCTAssertEqual(try String.fetchOne(db, sql: "PRAGMA journal_mode = DELETE"), "delete")
+        }
+        try queue.close()
     }
 
     private func permissions(_ url: URL) throws -> Int {
@@ -48,15 +70,23 @@ final class PasswordStoreTests: XCTestCase {
 
     func testSecretsAreNotOnDiskOrInDescriptions() throws {
         let keys = InMemoryKeyStore()
-        let store = try PasswordStore(fileURL: dbURL, keyStore: keys)
+        let store = try PasswordStore(fileURL: dbURL, keyStore: keys, mode: .app)
         XCTAssertNotNil(keys.key, "a first run creates a key")
         let login = try store.add(origin: example, username: "scott@example.com", password: "Correct-Horse-Battery-77")
 
+        // While open, the new rows are in the WAL; after closing, in the main file.
+        let wal = URL(fileURLWithPath: dbURL.path + "-wal"), shm = URL(fileURLWithPath: dbURL.path + "-shm")
+        let live = try Data(contentsOf: dbURL) + Data(contentsOf: wal)
+        XCTAssertEqual(try permissions(wal), 0o600, "the WAL is owner-only")
+        XCTAssertEqual(try permissions(shm), 0o600, "the shared-memory index is owner-only")
+        try store.close()
         let raw = try Data(contentsOf: dbURL)
         for secret in ["scott@example.com", "Correct-Horse-Battery-77", "Correct-Horse"] {
+            XCTAssertNil(live.range(of: Data(secret.utf8)), "\(secret) is not in the file or its WAL in the clear")
             XCTAssertNil(raw.range(of: Data(secret.utf8)), "\(secret) is not in the file in the clear")
         }
-        XCTAssertNotNil(raw.range(of: Data("https://example.com".utf8)), "origins are in the clear, for matching")
+        XCTAssertNotNil(live.range(of: Data("https://example.com".utf8)), "origins are in the clear, for matching")
+        XCTAssertNotNil(raw.range(of: Data("https://example.com".utf8)), "and checkpointed into the file on close")
         XCTAssertEqual(try permissions(dbURL), 0o600, "database is owner-only")
         XCTAssertEqual(try permissions(dir), 0o700, "folder is owner-only")
 
@@ -76,7 +106,7 @@ final class PasswordStoreTests: XCTestCase {
 
     func testCreateReadUpdateDelete() throws {
         let keys = InMemoryKeyStore()
-        let store = try PasswordStore(fileURL: dbURL, keyStore: keys)
+        let store = try PasswordStore(fileURL: dbURL, keyStore: keys, mode: .app)
         let t0 = Date(timeIntervalSince1970: 1_700_000_000)
         let a = try store.add(origin: example, username: "alice", password: "pw-a-1", date: t0)
         let b = try store.add(origin: example, username: "bob", password: "pw-b-1", date: t0)
@@ -86,7 +116,7 @@ final class PasswordStoreTests: XCTestCase {
         }
 
         // Reopened, as on the next launch.
-        let reopened = try PasswordStore(fileURL: dbURL, keyStore: keys)
+        let reopened = try PasswordStore(fileURL: dbURL, keyStore: keys, mode: .app)
         XCTAssertNil(reopened.movedAside)
         XCTAssertEqual(try reopened.allLogins().map(\.id), [a.id, b.id, c.id], "by site, then username")
         XCTAssertEqual(try reopened.login(id: a.id)?.password, "pw-a-1")
@@ -118,7 +148,7 @@ final class PasswordStoreTests: XCTestCase {
     }
 
     func testSearchMatchesHostsAndUsernamesNotPasswords() throws {
-        let store = try PasswordStore(fileURL: dbURL, keyStore: InMemoryKeyStore())
+        let store = try PasswordStore(fileURL: dbURL, keyStore: InMemoryKeyStore(), mode: .app)
         try store.add(origin: example, username: "Scott.Smith", password: "findme-not")
         try store.add(origin: other, username: "someone", password: "x-123")
         XCTAssertEqual(try store.search("EXAMPLE").count, 1)
@@ -128,7 +158,7 @@ final class PasswordStoreTests: XCTestCase {
     }
 
     func testLoginsForOriginAndLastUsed() throws {
-        let store = try PasswordStore(fileURL: dbURL, keyStore: InMemoryKeyStore())
+        let store = try PasswordStore(fileURL: dbURL, keyStore: InMemoryKeyStore(), mode: .app)
         let exact = try store.add(origin: example, username: "exact", password: "1")
         let older = try store.add(origin: www, username: "sibling-old", password: "2")
         let newer = try store.add(origin: www, username: "sibling-new", password: "3")
@@ -146,7 +176,7 @@ final class PasswordStoreTests: XCTestCase {
     }
 
     func testProposalsAndNeverSave() throws {
-        let store = try PasswordStore(fileURL: dbURL, keyStore: InMemoryKeyStore())
+        let store = try PasswordStore(fileURL: dbURL, keyStore: InMemoryKeyStore(), mode: .app)
         XCTAssertEqual(try store.proposal(for: example, username: "alice", password: "one"), .save)
         let a = try store.save(origin: example, username: "alice", password: "one")
         XCTAssertEqual(try store.proposal(for: example, username: "alice", password: "one"), .unchanged(existing: a.id))
@@ -174,21 +204,21 @@ final class PasswordStoreTests: XCTestCase {
 
     func testKeychainUnavailableTouchesNothing() throws {
         let keys = InMemoryKeyStore()
-        try PasswordStore(fileURL: dbURL, keyStore: keys).add(origin: example, username: "a", password: "b")
+        try PasswordStore(fileURL: dbURL, keyStore: keys, mode: .app).add(origin: example, username: "a", password: "b")
         let before = try Data(contentsOf: dbURL)
-        XCTAssertThrowsError(try PasswordStore(fileURL: dbURL, keyStore: FailingKeyStore())) {
+        XCTAssertThrowsError(try PasswordStore(fileURL: dbURL, keyStore: FailingKeyStore(), mode: .app)) {
             guard case .keychainUnavailable = $0 as? PasswordStoreError else { return XCTFail("\($0)") }
         }
         XCTAssertEqual(try Data(contentsOf: dbURL), before, "the database is untouched")
-        XCTAssertEqual(try PasswordStore(fileURL: dbURL, keyStore: keys).allLogins().count, 1, "and opens once the Keychain does")
+        XCTAssertEqual(try PasswordStore(fileURL: dbURL, keyStore: keys, mode: .app).allLogins().count, 1, "and opens once the Keychain does")
     }
 
     func testWrongKeyMovesTheDatabaseAsideAndKeepsTheKey() throws {
-        try PasswordStore(fileURL: dbURL, keyStore: InMemoryKeyStore()).add(origin: example, username: "a", password: "b")
+        try PasswordStore(fileURL: dbURL, keyStore: InMemoryKeyStore(), mode: .app).add(origin: example, username: "a", password: "b")
         let original = try Data(contentsOf: dbURL)
         let otherKey = SymmetricKey(size: .bits256)
         let keys = InMemoryKeyStore(key: otherKey)
-        let store = try PasswordStore(fileURL: dbURL, keyStore: keys)
+        let store = try PasswordStore(fileURL: dbURL, keyStore: keys, mode: .app)
         let aside = try XCTUnwrap(store.movedAside)
         XCTAssertTrue(aside.lastPathComponent.hasPrefix("passwords.unreadable-"))
         XCTAssertEqual(try Data(contentsOf: aside), original, "the unreadable database is kept as it was")
@@ -196,30 +226,311 @@ final class PasswordStoreTests: XCTestCase {
         XCTAssertEqual(keys.key.map { $0.withUnsafeBytes { Data($0) } }, otherKey.withUnsafeBytes { Data($0) },
                        "an existing key is never replaced")
         try store.add(origin: example, username: "new", password: "new")
-        XCTAssertEqual(try PasswordStore(fileURL: dbURL, keyStore: keys).allLogins().count, 1)
+        XCTAssertEqual(try PasswordStore(fileURL: dbURL, keyStore: keys, mode: .app).allLogins().count, 1)
     }
 
-    func testMissingKeyWithSavedLoginsMovesTheDatabaseAside() throws {
-        try PasswordStore(fileURL: dbURL, keyStore: InMemoryKeyStore()).add(origin: example, username: "a", password: "b")
+    func testAppModeMissingKeyWithLoginsThrowsAndTouchesNothing() throws {
+        try PasswordStore(fileURL: dbURL, keyStore: InMemoryKeyStore(), mode: .app).add(origin: example, username: "a", password: "b")
+        let before = try snapshot()
         let keys = InMemoryKeyStore()
-        let store = try PasswordStore(fileURL: dbURL, keyStore: keys)
-        XCTAssertNotNil(store.movedAside)
-        XCTAssertNotNil(keys.key)
-        XCTAssertTrue(try store.allLogins().isEmpty)
+        XCTAssertThrowsError(try PasswordStore(fileURL: dbURL, keyStore: keys, mode: .app)) {
+            XCTAssertEqual($0 as? PasswordStoreError, .keyMissing)
+        }
+        XCTAssertNil(keys.key, "no key is created over a file that holds logins")
+        XCTAssertEqual(try snapshot(), before, "the file is untouched and nothing was moved aside")
     }
 
-    func testDamagedFileIsMovedAside() throws {
+    func testAppModeMissingKeyWithOnlyAKeyCheckThrows() throws {
+        // Opened once (so it holds a key check) but never given a login.
+        _ = try PasswordStore(fileURL: dbURL, keyStore: InMemoryKeyStore(), mode: .app)
+        let before = try snapshot()
+        let keys = InMemoryKeyStore()
+        XCTAssertThrowsError(try PasswordStore(fileURL: dbURL, keyStore: keys, mode: .app)) {
+            XCTAssertEqual($0 as? PasswordStoreError, .keyMissing)
+        }
+        XCTAssertNil(keys.key)
+        XCTAssertEqual(try snapshot(), before)
+    }
+
+    func testFirstRunCreatesTheKeyAndTheFile() throws {
+        let keys = InMemoryKeyStore()
+        let store = try PasswordStore(fileURL: dbURL, keyStore: keys, mode: .app)
+        XCTAssertNotNil(keys.key)
+        XCTAssertNil(store.movedAside)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: dbURL.path))
+        try store.add(origin: example, username: "a", password: "b")
+        XCTAssertEqual(try PasswordStore(fileURL: dbURL, keyStore: keys, mode: .app).allLogins().count, 1)
+
+        // A file that holds nothing (created, never set up) is a first run too.
+        let emptyURL = dir.appendingPathComponent("empty.sqlite")
+        try Data().write(to: emptyURL)
+        let emptyKeys = InMemoryKeyStore()
+        let empty = try PasswordStore(fileURL: emptyURL, keyStore: emptyKeys, mode: .app)
+        XCTAssertNotNil(emptyKeys.key)
+        XCTAssertNil(empty.movedAside)
+    }
+
+    func testStartOverKeepsTheOldFileAsideWithANewKey() throws {
+        let oldKeys = InMemoryKeyStore()
+        try PasswordStore(fileURL: dbURL, keyStore: oldKeys, mode: .app).add(origin: example, username: "a", password: "b")
+        let original = try Data(contentsOf: dbURL)
+        let keys = InMemoryKeyStore()
+        let store = try PasswordStore(fileURL: dbURL, keyStore: keys, mode: .appStartOver)
+        let aside = try XCTUnwrap(store.movedAside)
+        XCTAssertEqual(PasswordStore.setAsideCopies(of: dbURL), [aside])
+        XCTAssertEqual(try Data(contentsOf: aside), original, "the old file is kept as it was")
+        XCTAssertNotNil(keys.key, "a new key")
+        XCTAssertNotEqual(keys.key.map { $0.withUnsafeBytes { Data($0) } }, oldKeys.key.map { $0.withUnsafeBytes { Data($0) } })
+        XCTAssertTrue(try store.allLogins().isEmpty)
+        try store.add(origin: example, username: "new", password: "new")
+        XCTAssertNil(try store.recover(from: aside), "sealed with the old key")
+        // The old file still opens with the old key.
+        XCTAssertEqual(try PasswordStore(fileURL: aside, keyStore: oldKeys, mode: .app).allLogins().count, 1)
+    }
+
+    func testStartOverWithAUsableFileChangesNothing() throws {
+        let keys = InMemoryKeyStore()
+        try PasswordStore(fileURL: dbURL, keyStore: keys, mode: .app).add(origin: example, username: "a", password: "b")
+        let store = try PasswordStore(fileURL: dbURL, keyStore: keys, mode: .appStartOver)
+        XCTAssertNil(store.movedAside)
+        XCTAssertEqual(try store.allLogins().count, 1)
+    }
+
+    func testDamagedFileIsMovedAsideOnlyWithAKey() throws {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         try Data("not a database".utf8).write(to: dbURL)
-        let store = try PasswordStore(fileURL: dbURL, keyStore: InMemoryKeyStore())
+        // Without a key a damaged file might hold logins: no key is created over it.
+        let noKey = InMemoryKeyStore()
+        XCTAssertThrowsError(try PasswordStore(fileURL: dbURL, keyStore: noKey, mode: .app)) {
+            XCTAssertEqual($0 as? PasswordStoreError, .keyMissing)
+        }
+        XCTAssertNil(noKey.key)
+        XCTAssertEqual(try Data(contentsOf: dbURL), Data("not a database".utf8))
+
+        let store = try PasswordStore(fileURL: dbURL, keyStore: InMemoryKeyStore(key: SymmetricKey(size: .bits256)), mode: .app)
         XCTAssertNotNil(store.movedAside)
         try store.add(origin: example, username: "a", password: "b")
         XCTAssertEqual(try store.allLogins().count, 1)
     }
 
+    // MARK: Existing-only (any process other than the app)
+
+    func testExistingOnlyWithoutAKeyThrowsAndChangesNothing() throws {
+        try PasswordStore(fileURL: dbURL, keyStore: InMemoryKeyStore(), mode: .app).add(origin: example, username: "a", password: "b")
+        let before = try snapshot()
+        let keys = InMemoryKeyStore()
+        XCTAssertThrowsError(try PasswordStore(fileURL: dbURL, keyStore: keys, mode: .existingOnly)) {
+            XCTAssertEqual($0 as? PasswordStoreError, .keyMissing)
+        }
+        XCTAssertNil(keys.key, "no key is created")
+        XCTAssertEqual(try snapshot(), before, "every file byte for byte, and no file added or moved")
+    }
+
+    func testExistingOnlyWithoutAFileCreatesNothing() throws {
+        let keys = InMemoryKeyStore(key: SymmetricKey(size: .bits256))
+        XCTAssertThrowsError(try PasswordStore(fileURL: dbURL, keyStore: keys, mode: .existingOnly)) {
+            XCTAssertEqual($0 as? PasswordStoreError, .fileMissing)
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: dir.path), "not even the folder")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        XCTAssertThrowsError(try PasswordStore(fileURL: dbURL, keyStore: keys, mode: .existingOnly)) {
+            XCTAssertEqual($0 as? PasswordStoreError, .fileMissing)
+        }
+        XCTAssertEqual(try snapshot(), [:])
+        // And with no key either.
+        XCTAssertThrowsError(try PasswordStore(fileURL: dbURL, keyStore: InMemoryKeyStore(), mode: .existingOnly))
+        XCTAssertEqual(try snapshot(), [:])
+    }
+
+    func testExistingOnlyWithAWrongKeyMovesNothing() throws {
+        try PasswordStore(fileURL: dbURL, keyStore: InMemoryKeyStore(), mode: .app).add(origin: example, username: "a", password: "b")
+        let before = try snapshot()
+        let keys = InMemoryKeyStore(key: SymmetricKey(size: .bits256))
+        XCTAssertThrowsError(try PasswordStore(fileURL: dbURL, keyStore: keys, mode: .existingOnly)) {
+            XCTAssertEqual($0 as? PasswordStoreError, .wrongKey)
+        }
+        XCTAssertEqual(try snapshot(), before)
+        XCTAssertTrue(PasswordStore.setAsideCopies(of: dbURL).isEmpty)
+    }
+
+    func testExistingOnlyLeavesADamagedFileAlone() throws {
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try Data("not a database".utf8).write(to: dbURL)
+        let before = try snapshot()
+        XCTAssertThrowsError(try PasswordStore(fileURL: dbURL, keyStore: InMemoryKeyStore(key: SymmetricKey(size: .bits256)), mode: .existingOnly)) {
+            XCTAssertEqual($0 as? PasswordStoreError, .unrecognizedFile)
+        }
+        XCTAssertEqual(try snapshot(), before)
+    }
+
+    func testExistingOnlyDoesntConvertAnOlderFile() throws {
+        let keys = InMemoryKeyStore()
+        try PasswordStore(fileURL: dbURL, keyStore: keys, mode: .app).add(origin: example, username: "a", password: "b")
+        try makeRollbackJournal(dbURL)
+        let before = try snapshot()
+        XCTAssertThrowsError(try PasswordStore(fileURL: dbURL, keyStore: keys, mode: .existingOnly)) {
+            XCTAssertEqual($0 as? PasswordStoreError, .notSetUp)
+        }
+        XCTAssertEqual(try snapshot(), before, "still the older format: only the app converts it")
+    }
+
+    func testExistingOnlyDoesntSetUpAFileTheAppHasnt() throws {
+        // A WAL file with the tables but no key check yet: the app writes that, not another process.
+        let keys = InMemoryKeyStore(key: SymmetricKey(size: .bits256))
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let queue = try DatabasePool(path: dbURL.path)
+        try queue.write { db in
+            try db.execute(sql: "CREATE TABLE meta (key TEXT PRIMARY KEY NOT NULL, value BLOB NOT NULL); CREATE TABLE login (id TEXT)")
+        }
+        try queue.close()
+        XCTAssertThrowsError(try PasswordStore(fileURL: dbURL, keyStore: keys, mode: .existingOnly)) {
+            XCTAssertEqual($0 as? PasswordStoreError, .notSetUp)
+        }
+    }
+
+    func testExistingOnlyCantRestoreOrBackUp() throws {
+        let keys = InMemoryKeyStore()
+        let app = try PasswordStore(fileURL: dbURL, keyStore: keys, mode: .app)
+        try app.add(origin: example, username: "a", password: "b")
+        let agent = try PasswordStore(fileURL: dbURL, keyStore: keys, mode: .existingOnly)
+        XCTAssertNil(agent.movedAside)
+        XCTAssertEqual(try agent.allLogins().count, 1)
+        XCTAssertThrowsError(try agent.recover(from: dbURL)) { XCTAssertEqual($0 as? PasswordStoreError, .appOnly) }
+        XCTAssertThrowsError(try agent.backUp(reason: "x")) { XCTAssertEqual($0 as? PasswordStoreError, .appOnly) }
+    }
+
+    // MARK: Two processes, WAL
+
+    func testAppAndExistingOnlyShareTheFile() throws {
+        let keys = InMemoryKeyStore()
+        let app = try PasswordStore(fileURL: dbURL, keyStore: keys, mode: .app)
+        let agent = try PasswordStore(fileURL: dbURL, keyStore: keys, mode: .existingOnly)
+        let a = try app.add(origin: example, username: "from-app", password: "1")
+        XCTAssertEqual(try agent.login(id: a.id)?.password, "1", "the other store reads the app's write")
+        let b = try agent.add(origin: other, username: "from-agent", password: "2")
+        XCTAssertEqual(try app.login(id: b.id)?.password, "2", "and the app reads the other's")
+        try agent.delete(id: a.id)
+        XCTAssertNil(try app.login(id: a.id))
+    }
+
+    func testConcurrentWritesFromTwoStoresDontFailBusy() throws {
+        let keys = InMemoryKeyStore()
+        let stores = [try PasswordStore(fileURL: dbURL, keyStore: keys, mode: .app),
+                      try PasswordStore(fileURL: dbURL, keyStore: keys, mode: .existingOnly)]
+        let failures = OSAllocatedUnfairLock(initialState: [String]())
+        DispatchQueue.concurrentPerform(iterations: 4) { i in
+            let store = stores[i % 2]
+            for j in 0..<40 {
+                do {
+                    let login = try store.save(origin: Origin(string: "https://w\(i).example")!, username: "u\(j)", password: "p\(j)")
+                    try store.markUsed(id: login.id)
+                    _ = try store.allLogins()
+                } catch {
+                    failures.withLock { $0.append(String(describing: error)) }
+                }
+            }
+        }
+        XCTAssertEqual(failures.withLock { $0 }, [])
+        XCTAssertEqual(try stores[0].allLogins().count, 160)
+        XCTAssertEqual(try stores[1].allLogins().count, 160)
+    }
+
+    func testPragmasAndWALOnEveryConnection() throws {
+        let store = try PasswordStore(fileURL: dbURL, keyStore: InMemoryKeyStore(), mode: .app)
+        for read in [true, false] {
+            let values = try (read ? store.database.read : store.database.write) { db in
+                [try String.fetchOne(db, sql: "PRAGMA journal_mode"),
+                 try String.fetchOne(db, sql: "PRAGMA secure_delete"),
+                 try String.fetchOne(db, sql: "PRAGMA trusted_schema"),
+                 try String.fetchOne(db, sql: "PRAGMA busy_timeout")]
+            }
+            XCTAssertEqual(values, ["wal", "1", "0", read ? "10000" : "5000"], read ? "reader" : "writer")
+        }
+        XCTAssertTrue(PasswordStore.isWAL(dbURL))
+    }
+
+    func testOlderRollbackJournalFileConvertsToWALAndKeepsEveryLogin() throws {
+        let keys = InMemoryKeyStore()
+        var saved: [Login] = []
+        do {
+            let store = try PasswordStore(fileURL: dbURL, keyStore: keys, mode: .app)
+            for i in 0..<50 { saved.append(try store.add(origin: Origin(string: "https://s\(i).example")!, username: "u\(i)", password: "p\(i)")) }
+            try store.setNeverSave(other)
+            try store.close()
+        }
+        // As the store wrote it before WAL (a DatabaseQueue in rollback-journal mode).
+        try makeRollbackJournal(dbURL)
+        XCTAssertFalse(PasswordStore.isWAL(dbURL))
+        let store = try PasswordStore(fileURL: dbURL, keyStore: keys, mode: .app)
+        XCTAssertNil(store.movedAside)
+        XCTAssertTrue(PasswordStore.isWAL(dbURL), "converted to WAL")
+        XCTAssertEqual(try store.health(), PasswordStore.Health(rows: 50, unreadable: 0))
+        XCTAssertEqual(Set(try store.allLogins().map(\.id)), Set(saved.map(\.id)))
+        XCTAssertTrue(try store.isNeverSave(other))
+        // And now another process can open it too.
+        XCTAssertEqual(try PasswordStore(fileURL: dbURL, keyStore: keys, mode: .existingOnly).allLogins().count, 50)
+    }
+
+    func testMoveAsideKeepsRowsStillInTheWAL() throws {
+        let key = SymmetricKey(size: .bits256)
+        // A store with rows only in its WAL, as a crash leaves it: copied while still open.
+        let source = dir.appendingPathComponent("live", isDirectory: true)
+        let live = source.appendingPathComponent("passwords.sqlite")
+        let store = try PasswordStore(fileURL: live, keyStore: InMemoryKeyStore(key: key), mode: .app)
+        for i in 0..<20 { try store.add(origin: Origin(string: "https://s\(i).example")!, username: "u\(i)", password: "p\(i)") }
+        for (from, to) in zip([live] + SecureFile.sideFiles(of: live), [dbURL] + SecureFile.sideFiles(of: dbURL))
+        where FileManager.default.fileExists(atPath: from.path) {
+            try FileManager.default.copyItem(at: from, to: to)
+        }
+        try store.close()
+        let wal = URL(fileURLWithPath: dbURL.path + "-wal")
+        XCTAssertGreaterThan(try Data(contentsOf: wal).count, 0, "the rows are in the WAL")
+
+        let aside = try SecureFile.moveAside(dbURL, reason: "unreadable")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: wal.path), "the WAL went with it")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: aside.path + "-wal"))
+        XCTAssertEqual(try PasswordStore(fileURL: aside, keyStore: InMemoryKeyStore(key: key), mode: .app).allLogins().count, 20,
+                       "the copy set aside has every row")
+    }
+
+    func testWrongKeyOnACrashedWALFileKeepsEveryRowInTheCopy() throws {
+        let key = SymmetricKey(size: .bits256)
+        let source = dir.appendingPathComponent("live", isDirectory: true)
+        let live = source.appendingPathComponent("passwords.sqlite")
+        let store = try PasswordStore(fileURL: live, keyStore: InMemoryKeyStore(key: key), mode: .app)
+        for i in 0..<20 { try store.add(origin: Origin(string: "https://s\(i).example")!, username: "u\(i)", password: "p\(i)") }
+        for (from, to) in zip([live] + SecureFile.sideFiles(of: live), [dbURL] + SecureFile.sideFiles(of: dbURL))
+        where FileManager.default.fileExists(atPath: from.path) {
+            try FileManager.default.copyItem(at: from, to: to)
+        }
+        try store.close()
+        let other = try PasswordStore(fileURL: dbURL, keyStore: InMemoryKeyStore(key: SymmetricKey(size: .bits256)), mode: .app)
+        let aside = try XCTUnwrap(other.movedAside)
+        XCTAssertTrue(try other.allLogins().isEmpty)
+        let recovered = try PasswordStore(fileURL: aside, keyStore: InMemoryKeyStore(key: key), mode: .app)
+        XCTAssertEqual(try recovered.allLogins().count, 20)
+    }
+
+    func testBackupIsOneSelfContainedFile() throws {
+        let keys = InMemoryKeyStore()
+        let store = try PasswordStore(fileURL: dbURL, keyStore: keys, mode: .app)
+        for i in 0..<10 { try store.add(origin: Origin(string: "https://s\(i).example")!, username: "u\(i)", password: "p\(i)") }
+        let backup = try store.backUp(reason: "before-restore")
+        XCTAssertEqual(try permissions(backup), 0o600)
+        for side in SecureFile.sideFiles(of: backup) {
+            XCTAssertFalse(FileManager.default.fileExists(atPath: side.path), "\(side.lastPathComponent) isn't needed")
+        }
+        // Copied on its own somewhere else, it still holds every login.
+        let elsewhere = dir.appendingPathComponent("elsewhere", isDirectory: true)
+        try FileManager.default.createDirectory(at: elsewhere, withIntermediateDirectories: true)
+        let copy = elsewhere.appendingPathComponent("passwords.sqlite")
+        try FileManager.default.copyItem(at: backup, to: copy)
+        XCTAssertEqual(try PasswordStore(fileURL: copy, keyStore: keys, mode: .app).allLogins().count, 10)
+    }
+
     func testTamperedRowsAreSkipped() throws {
         let keys = InMemoryKeyStore()
-        let store = try PasswordStore(fileURL: dbURL, keyStore: keys)
+        let store = try PasswordStore(fileURL: dbURL, keyStore: keys, mode: .app)
         let bank = try store.add(origin: Origin(string: "https://bank.com")!, username: "me", password: "bank-secret")
         try store.add(origin: other, username: "me", password: "other")
         // An attacker with write access to the file points the bank login at their own site.
@@ -228,7 +539,7 @@ final class PasswordStoreTests: XCTestCase {
             try db.execute(sql: "UPDATE login SET origin = 'https://evil.example' WHERE id = ?", arguments: [bank.id.uuidString])
         }
         try queue.close()
-        let reopened = try PasswordStore(fileURL: dbURL, keyStore: keys)
+        let reopened = try PasswordStore(fileURL: dbURL, keyStore: keys, mode: .app)
         XCTAssertTrue(try reopened.logins(for: Origin(string: "https://evil.example")!).isEmpty, "the moved row doesn't open")
         XCTAssertEqual(try reopened.unreadableCount(), 1)
         XCTAssertEqual(try reopened.allLogins().count, 1)
@@ -239,7 +550,7 @@ final class PasswordStoreTests: XCTestCase {
 
     func testReopeningKeepsEveryLoginReadable() throws {
         let keys = InMemoryKeyStore()
-        let store = try PasswordStore(fileURL: dbURL, keyStore: keys)
+        let store = try PasswordStore(fileURL: dbURL, keyStore: keys, mode: .app)
         let origins = ["https://example.com", "https://EXAMPLE.com.", "https://bücher.example", "http://localhost:3000",
                        "https://[::1]:8443", "http://10.0.0.5", "https://login.microsoftonline.com:443",
                        "https://dev.azure.com", "https://a.b.c.d.example.co.uk"].map { Origin(string: $0)! }
@@ -249,7 +560,7 @@ final class PasswordStoreTests: XCTestCase {
                                        date: Date(timeIntervalSince1970: 1_600_000_000 + Double(i))))
         }
         // A new process: the same file and the same Keychain key.
-        let reopened = try PasswordStore(fileURL: dbURL, keyStore: keys)
+        let reopened = try PasswordStore(fileURL: dbURL, keyStore: keys, mode: .app)
         XCTAssertNil(reopened.movedAside)
         XCTAssertEqual(try reopened.health(), PasswordStore.Health(rows: 300, unreadable: 0))
         XCTAssertEqual(try reopened.allLogins().count, 300)
@@ -261,27 +572,58 @@ final class PasswordStoreTests: XCTestCase {
 
     func testLockedDatabaseIsLeftAloneNotMovedAside() throws {
         let keys = InMemoryKeyStore()
-        try PasswordStore(fileURL: dbURL, keyStore: keys).add(origin: example, username: "a", password: "b")
-        // Another process (an older copy of the app still quitting, say) holds a write lock.
+        try PasswordStore(fileURL: dbURL, keyStore: keys, mode: .app).add(origin: example, username: "a", password: "b")
+        // An older copy of the app (rollback journal) still quitting holds a write lock: in that
+        // mode it blocks readers too. (In WAL mode a writer doesn't block opening; see
+        // testAWriterInAnotherProcessDoesntBlockOpening.)
+        try makeRollbackJournal(dbURL)
         var config = Configuration()
         config.allowsUnsafeTransactions = true
         let other = try DatabaseQueue(path: dbURL.path, configuration: config)
         try other.writeWithoutTransaction { db in try db.execute(sql: "BEGIN EXCLUSIVE") }
-        XCTAssertThrowsError(try PasswordStore(fileURL: dbURL, keyStore: keys)) {
+        XCTAssertThrowsError(try PasswordStore(fileURL: dbURL, keyStore: keys, mode: .app)) {
             guard case .databaseUnavailable = $0 as? PasswordStoreError else { return XCTFail("\($0)") }
         }
         XCTAssertTrue(PasswordStore.setAsideCopies(of: dbURL).isEmpty, "nothing was moved aside")
         try other.writeWithoutTransaction { db in try db.execute(sql: "COMMIT") }
         try other.close()
-        let store = try PasswordStore(fileURL: dbURL, keyStore: keys)
+        let store = try PasswordStore(fileURL: dbURL, keyStore: keys, mode: .app)
         XCTAssertNil(store.movedAside)
         XCTAssertEqual(try store.allLogins().count, 1)
     }
 
-    func testMissingKeyThatCantBeSavedTouchesNothing() throws {
-        try PasswordStore(fileURL: dbURL, keyStore: InMemoryKeyStore()).add(origin: example, username: "a", password: "b")
+    func testAWriterInAnotherProcessDoesntBlockOpening() throws {
+        let keys = InMemoryKeyStore()
+        let store = try PasswordStore(fileURL: dbURL, keyStore: keys, mode: .app)
+        try store.add(origin: example, username: "a", password: "b")
+        var config = Configuration()
+        config.allowsUnsafeTransactions = true
+        let other = try DatabaseQueue(path: dbURL.path, configuration: config)
+        // Another process is in the middle of a write.
+        try other.writeWithoutTransaction { db in try db.execute(sql: "BEGIN IMMEDIATE; INSERT INTO neverSave VALUES ('https://x.example', 0)") }
+        XCTAssertEqual(try store.allLogins().count, 1, "reads don't wait for the other writer")
+        // Writes, and opening another store, wait their turn (the busy timeout) rather than fail.
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) {
+            try? other.writeWithoutTransaction { db in try db.execute(sql: "COMMIT") }
+        }
+        try store.add(origin: www, username: "c", password: "d")
+        XCTAssertEqual(try store.allLogins().count, 2)
+        try other.writeWithoutTransaction { db in try db.execute(sql: "BEGIN IMMEDIATE") }
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) {
+            try? other.writeWithoutTransaction { db in try db.execute(sql: "COMMIT") }
+        }
+        let reopened = try PasswordStore(fileURL: dbURL, keyStore: keys, mode: .app)
+        XCTAssertNil(reopened.movedAside)
+        XCTAssertEqual(try reopened.allLogins().count, 2)
+        XCTAssertTrue(try reopened.isNeverSave(Origin(string: "https://x.example")!))
+        XCTAssertTrue(PasswordStore.setAsideCopies(of: dbURL).isEmpty)
+        try other.close()
+    }
+
+    func testStartOverWithAKeyThatCantBeSavedTouchesNothing() throws {
+        try PasswordStore(fileURL: dbURL, keyStore: InMemoryKeyStore(), mode: .app).add(origin: example, username: "a", password: "b")
         let before = try Data(contentsOf: dbURL)
-        XCTAssertThrowsError(try PasswordStore(fileURL: dbURL, keyStore: NoKeyRefusingSaves())) {
+        XCTAssertThrowsError(try PasswordStore(fileURL: dbURL, keyStore: NoKeyRefusingSaves(), mode: .appStartOver)) {
             guard case .keychainUnavailable = $0 as? PasswordStoreError else { return XCTFail("\($0)") }
         }
         XCTAssertEqual(try Data(contentsOf: dbURL), before, "the file stays where it is")
@@ -292,14 +634,15 @@ final class PasswordStoreTests: XCTestCase {
 
     func testRecoverAddsLoginsFromACopySetAsideWithoutLosingAny() throws {
         let keys = InMemoryKeyStore()
-        let first = try PasswordStore(fileURL: dbURL, keyStore: keys)
+        let first = try PasswordStore(fileURL: dbURL, keyStore: keys, mode: .app)
         for i in 0..<5 { try first.add(origin: Origin(string: "https://site\(i).example")!, username: "u\(i)", password: "old-\(i)") }
         try first.setNeverSave(other)
+        try first.close()
         // The file was moved aside (as an unreadable file would be) and a new one started.
         let aside = dir.appendingPathComponent("passwords.unreadable-100.sqlite")
         try FileManager.default.moveItem(at: dbURL, to: aside)
         let asideBytes = try Data(contentsOf: aside)
-        let store = try PasswordStore(fileURL: dbURL, keyStore: keys)
+        let store = try PasswordStore(fileURL: dbURL, keyStore: keys, mode: .app)
         XCTAssertEqual(PasswordStore.setAsideCopies(of: dbURL), [aside])
         try store.add(origin: Origin(string: "https://site0.example")!, username: "u0", password: "newer")
         try store.add(origin: Origin(string: "https://fresh.example")!, username: "f", password: "f")
@@ -310,7 +653,7 @@ final class PasswordStoreTests: XCTestCase {
         XCTAssertEqual(result.unreadable, 0)
         let backup = try XCTUnwrap(result.backup)
         XCTAssertEqual(try permissions(backup), 0o600)
-        XCTAssertEqual(try PasswordStore(fileURL: backup, keyStore: keys).allLogins().count, 2, "the backup is the store before restoring")
+        XCTAssertEqual(try PasswordStore(fileURL: backup, keyStore: keys, mode: .app).allLogins().count, 2, "the backup is the store before restoring")
 
         let all = try store.allLogins()
         XCTAssertEqual(all.count, 6)
@@ -331,13 +674,14 @@ final class PasswordStoreTests: XCTestCase {
         let newer = dir.appendingPathComponent("passwords.unreadable-200.sqlite")
         let sameSecond = dir.appendingPathComponent("passwords.unreadable-200-2.sqlite")
         for (copy, password) in [(older, "old"), (newer, "new"), (sameSecond, "newest")] {
-            let store = try PasswordStore(fileURL: dbURL, keyStore: keys)
+            let store = try PasswordStore(fileURL: dbURL, keyStore: keys, mode: .app)
             try store.add(origin: site, username: "me", password: password)
+            try store.close()
             try FileManager.default.moveItem(at: dbURL, to: copy)
         }
         XCTAssertEqual(PasswordStore.setAsideCopies(of: dbURL), [sameSecond, newer, older], "newest first")
 
-        let store = try PasswordStore(fileURL: dbURL, keyStore: keys)
+        let store = try PasswordStore(fileURL: dbURL, keyStore: keys, mode: .app)
         for copy in PasswordStore.setAsideCopies(of: dbURL) where try !store.wasRecovered(copy) {
             _ = try store.recover(from: copy)
         }
@@ -346,16 +690,16 @@ final class PasswordStoreTests: XCTestCase {
 
         // Deleted after it was restored: the next launch leaves it deleted.
         try store.delete(id: try XCTUnwrap(store.allLogins().first).id)
-        let relaunched = try PasswordStore(fileURL: dbURL, keyStore: keys)
+        let relaunched = try PasswordStore(fileURL: dbURL, keyStore: keys, mode: .app)
         XCTAssertTrue(try PasswordStore.setAsideCopies(of: dbURL).allSatisfy { try relaunched.wasRecovered($0) })
         XCTAssertTrue(try relaunched.allLogins().isEmpty)
     }
 
     func testRecoverIgnoresACopySealedWithAnotherKey() throws {
-        try PasswordStore(fileURL: dbURL, keyStore: InMemoryKeyStore()).add(origin: example, username: "a", password: "b")
+        try PasswordStore(fileURL: dbURL, keyStore: InMemoryKeyStore(), mode: .app).add(origin: example, username: "a", password: "b")
         let aside = dir.appendingPathComponent("passwords.unreadable-100.sqlite")
         try FileManager.default.moveItem(at: dbURL, to: aside)
-        let store = try PasswordStore(fileURL: dbURL, keyStore: InMemoryKeyStore())
+        let store = try PasswordStore(fileURL: dbURL, keyStore: InMemoryKeyStore(), mode: .app)
         XCTAssertNil(try store.recover(from: aside))
         XCTAssertTrue(try store.allLogins().isEmpty)
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: dir.path).filter { $0.contains("before-restore") }, [])

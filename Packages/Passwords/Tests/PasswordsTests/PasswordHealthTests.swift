@@ -50,7 +50,7 @@ final class PasswordHealthTests: XCTestCase {
     func testStoreSecurityReport() throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("Health-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: dir) }
-        let store = try PasswordStore(fileURL: dir.appendingPathComponent("p.sqlite"), keyStore: InMemoryKeyStore())
+        let store = try PasswordStore(fileURL: dir.appendingPathComponent("p.sqlite"), keyStore: InMemoryKeyStore(), mode: .app)
         let weak = try store.add(origin: Origin(string: "https://a.com")!, username: "u", password: "123456")
         let r1 = try store.add(origin: Origin(string: "https://b.com")!, username: "u", password: "Reused-Twice-88z")
         let r2 = try store.add(origin: Origin(string: "https://c.com")!, username: "u", password: "Reused-Twice-88z")

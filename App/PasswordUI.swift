@@ -41,25 +41,48 @@ final class PasswordOffer: ObservableObject, Identifiable {
 }
 
 extension BrowserState {
-    /// Opens the passwords store with this build's Keychain key. If the Keychain can't be read
-    /// (locked, or access denied), asks "Try Again" or continues without passwords, as for the
-    /// vault; nothing on disk is touched. Errors carry no secrets.
+    /// What the user chose when the passwords store couldn't be opened.
+    enum PasswordOpenChoice: Equatable {
+        case tryAgain
+        case continueWithout
+        /// "Start a New Passwords File…", confirmed: the key is really gone. Offered only for
+        /// `keyMissing`; the old file is moved aside, never deleted.
+        case startOver
+    }
+
+    /// Opens the passwords store with this build's Keychain key, as the app (`OpenMode.app`).
     /// Any failure is said out loud: an alert with "Try Again", never a silently empty store.
+    /// If the Keychain can't be read or the file is busy, it's "Try Again" or "Continue Without
+    /// Passwords", and nothing on disk is touched. If the key is missing but the file holds
+    /// logins, a third choice starts a new file (`OpenMode.appStartOver`) after a confirmation
+    /// that the old file is kept. `ask` gets the reason and whether starting over is offered.
+    /// Errors carry no secrets.
     static func openPasswordStore(fileURL: URL, keyStore: KeyStore,
-                                  ask: (String) -> Bool = BrowserState.askToRetryPasswords) -> (store: PasswordStore?, problem: String?) {
+                                  ask: (_ why: String, _ canStartOver: Bool) -> PasswordOpenChoice = BrowserState.askToRetryPasswords)
+        -> (store: PasswordStore?, problem: String?) {
+        var mode = PasswordStore.OpenMode.app
         while true {
             let why: String
+            var canStartOver = false
             do {
-                return (try PasswordStore(fileURL: fileURL, keyStore: keyStore), nil)
+                return (try PasswordStore(fileURL: fileURL, keyStore: keyStore, mode: mode), nil)
             } catch PasswordStoreError.keychainUnavailable(let reason) {
                 why = "The passwords key couldn't be read from the Keychain (\(reason)). Unlock the login Keychain or allow \(AppIdentity.displayName) to use it, then try again."
             } catch PasswordStoreError.databaseUnavailable(let reason) {
                 why = "The saved passwords file couldn't be read just now (\(reason)). If another copy of \(AppIdentity.displayName) is still quitting, wait a moment and try again."
+            } catch PasswordStoreError.keyMissing {
+                why = "The key that unlocks your saved passwords isn't in the login Keychain, but the passwords file (\(fileURL.path)) holds logins sealed with it. If the Keychain is locked, restored from a backup or being synced, wait for it and try again."
+                canStartOver = true
             } catch {
                 why = "The saved passwords file couldn't be opened (\((error as? PasswordStoreError)?.description ?? String(describing: error)))."
             }
             Self.passwordsLog.error("passwords store not opened: \(why, privacy: .public)")
-            if !ask(why) {
+            switch ask(why, canStartOver) {
+            case .tryAgain:
+                mode = .app
+            case .startOver where canStartOver:
+                mode = .appStartOver
+            case .startOver, .continueWithout:
                 return (nil, "Saved passwords are off for this session. \(why) Nothing has been changed; quit and reopen \(AppIdentity.displayName) to try again.")
             }
         }
@@ -67,14 +90,29 @@ extension BrowserState {
 
     static let passwordsLog = Logger(subsystem: "com.scottsmith.ismith", category: "passwords")
 
-    /// "Try Again" (true) or "Continue Without Passwords" (false).
-    static func askToRetryPasswords(_ why: String) -> Bool {
-        let alert = NSAlert()
-        alert.messageText = "\(AppIdentity.displayName) can't open its saved passwords"
-        alert.informativeText = "\(why) Nothing has been changed."
-        alert.addButton(withTitle: "Try Again")
-        alert.addButton(withTitle: "Continue Without Passwords")
-        return alert.runModal() == .alertFirstButtonReturn
+    /// "Try Again", "Continue Without Passwords", or (for a missing key) "Start a New Passwords
+    /// File…", which asks again before choosing it.
+    static func askToRetryPasswords(_ why: String, canStartOver: Bool) -> PasswordOpenChoice {
+        while true {
+            let alert = NSAlert()
+            alert.messageText = "\(AppIdentity.displayName) can't open its saved passwords"
+            alert.informativeText = "\(why) Nothing has been changed."
+            alert.addButton(withTitle: "Try Again")
+            alert.addButton(withTitle: "Continue Without Passwords")
+            if canStartOver { alert.addButton(withTitle: "Start a New Passwords File…") }
+            switch alert.runModal() {
+            case .alertFirstButtonReturn: return .tryAgain
+            case .alertThirdButtonReturn where canStartOver:
+                let confirm = NSAlert()
+                confirm.alertStyle = .critical
+                confirm.messageText = "Start a new, empty passwords file?"
+                confirm.informativeText = "The current passwords file is kept, renamed to passwords.unreadable-<time>.sqlite next to it; nothing is deleted. Its logins can only be read with the key that's missing, so they won't appear in the new file. Only do this if that key is gone for good."
+                confirm.addButton(withTitle: "Start New File")
+                confirm.addButton(withTitle: "Cancel")
+                if confirm.runModal() == .alertFirstButtonReturn { return .startOver }
+            default: return .continueWithout
+            }
+        }
     }
 
     /// What the launch found in the passwords store, said once at launch: a file moved aside,
@@ -84,13 +122,15 @@ extension BrowserState {
     struct PasswordLaunchReport: Equatable {
         var health: PasswordStore.Health?
         var movedAside: URL?
+        /// The user chose "Start a New Passwords File…" (the key was missing).
+        var startedOver = false
         /// Earlier copies set aside whose logins were added back, and how many.
         var restored: [(copy: URL, count: Int, backup: URL?)] = []
         /// Earlier copies sealed with another key: nothing in them can be read.
         var unopenable: [URL] = []
 
         static func == (a: Self, b: Self) -> Bool {
-            a.health == b.health && a.movedAside == b.movedAside && a.unopenable == b.unopenable
+            a.health == b.health && a.movedAside == b.movedAside && a.startedOver == b.startedOver && a.unopenable == b.unopenable
                 && a.restored.map(\.copy) == b.restored.map(\.copy) && a.restored.map(\.count) == b.restored.map(\.count)
         }
 
@@ -98,7 +138,9 @@ extension BrowserState {
         var message: (title: String, text: String)? {
             var parts: [String] = []
             if let movedAside {
-                parts.append("The saved passwords file couldn't be decrypted with the key in your Keychain, so a new one was started. The old file was kept at \(movedAside.path).")
+                parts.append(startedOver
+                             ? "A new passwords file was started, as you chose. The old file was kept at \(movedAside.path)."
+                             : "The saved passwords file couldn't be decrypted with the key in your Keychain, so a new one was started. The old file was kept at \(movedAside.path).")
             }
             for item in restored {
                 parts.append("\(item.count) saved login\(item.count == 1 ? "" : "s") from an earlier copy (\(item.copy.lastPathComponent)) were added back."
@@ -111,7 +153,8 @@ extension BrowserState {
                 parts.append("\(unopenable.count == 1 ? "An earlier copy" : "\(unopenable.count) earlier copies") of the passwords file can't be opened with the current key and \(unopenable.count == 1 ? "was" : "were") left as \(unopenable.count == 1 ? "it was" : "they were"): \(unopenable.map(\.lastPathComponent).joined(separator: ", ")).")
             }
             guard !parts.isEmpty else { return nil }
-            let title = movedAside != nil || (health?.unreadable ?? 0) > 0 ? "Some saved passwords couldn't be opened" : "Saved passwords were restored"
+            let title = startedOver && movedAside != nil ? "A new passwords file was started"
+                : movedAside != nil || (health?.unreadable ?? 0) > 0 ? "Some saved passwords couldn't be opened" : "Saved passwords were restored"
             return (title, parts.joined(separator: "\n\n"))
         }
     }
@@ -120,8 +163,10 @@ extension BrowserState {
     /// those that decrypt with the current key and aren't already saved; a backup is made
     /// first), counts what doesn't decrypt, and logs the counts. `reported` holds the copies
     /// already told about (copies with another key are mentioned once).
+    /// Only for a store the app opened (`OpenMode.app`/`.appStartOver`): restoring is app-only.
     static func checkPasswordStore(_ store: PasswordStore, reported: inout Set<String>) -> PasswordLaunchReport {
-        var report = PasswordLaunchReport(movedAside: store.movedAside)
+        var report = PasswordLaunchReport(movedAside: store.movedAside, startedOver: store.openMode == .appStartOver)
+        guard store.openMode.isApp else { return report }
         for copy in PasswordStore.setAsideCopies(of: store.fileURL) where copy != store.movedAside {
             do {
                 // Once per copy: a login deleted after it was restored stays deleted.

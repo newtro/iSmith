@@ -17,9 +17,31 @@ public enum PasswordStoreError: Error, Equatable, CustomStringConvertible {
     /// The database file exists but couldn't be read just now (locked by another process, a
     /// permissions or disk error). Nothing was changed; try again.
     case databaseUnavailable(String)
+    /// The Keychain has no passwords key, but the file holds logins (or a key check) sealed with
+    /// one. Nothing was created, moved or changed. The app offers "Start a New Passwords File…"
+    /// (`OpenMode.appStartOver`); any other process just reports it.
+    case keyMissing
+    /// `existingOnly`: there's no passwords file. Nothing was created.
+    case fileMissing
+    /// `existingOnly`: the file holds logins sealed with another key. Nothing was moved.
+    case wrongKey
+    /// `existingOnly`: the file isn't a passwords database (or is damaged). Nothing was moved.
+    case unrecognizedFile
+    /// `existingOnly`: the file isn't fully set up yet (an older format, migrations still to run,
+    /// or no key check). Only the iSmith app sets a file up; open iSmith once.
+    case notSetUp
+    /// The call is for the iSmith app only (restoring copies set aside), and this store was
+    /// opened `existingOnly`.
+    case appOnly
 
     public var description: String {
         switch self {
+        case .keyMissing: return "The passwords key isn't in the Keychain, but there is a saved passwords file that holds (or may hold) logins sealed with it."
+        case .fileMissing: return "There is no saved passwords file."
+        case .wrongKey: return "The saved passwords file doesn't open with the key in the Keychain."
+        case .unrecognizedFile: return "The saved passwords file isn't one iSmith can read."
+        case .notSetUp: return "The saved passwords file hasn't been set up by iSmith yet."
+        case .appOnly: return "Only the iSmith app can do this."
         case .keychainUnavailable(let why): return "The passwords key could not be read from the Keychain (\(why))."
         case .duplicate: return "A login with this username is already saved for this site."
         case .notFound: return "The login no longer exists."
@@ -39,11 +61,39 @@ public enum PasswordStoreError: Error, Equatable, CustomStringConvertible {
 /// (`com.scottsmith.ismith.passwords-key`). Secrets are never logged: errors and log lines carry
 /// ids, origins and counts only, and GRDB's statement arguments stay out of its error messages.
 ///
-/// Opening follows the vault's rules. If the Keychain can't be read, `init` throws and nothing is
-/// touched. If the database can't be opened with the key (a missing or different key, or a
-/// damaged file), the file is moved aside as `passwords.unreadable-<time>.sqlite` and a new one
-/// starts; an existing Keychain key is never replaced.
+/// Opening depends on who opens it (`OpenMode`): only the iSmith app ever creates a key or a
+/// file, or moves a file aside, and it never creates a key over a file that holds logins. If the
+/// Keychain can't be read, `init` throws and nothing is touched.
+///
+/// The file is in WAL mode with a busy timeout, so the app and another process (the iSmith
+/// Agent) can have it open at once: readers never wait, and writers wait their turn.
 public final class PasswordStore: @unchecked Sendable {
+    /// Who is opening the store, which decides what `init` may change on disk.
+    public enum OpenMode: Equatable, Sendable {
+        /// The iSmith app. On a true first run (no file, or a file that holds nothing) it creates
+        /// the key and the file. A missing key over a file that holds logins (or a key check)
+        /// throws `keyMissing`: a key is never created over existing data. A key that is there
+        /// but doesn't open the file (a different key, or a damaged file) moves the file aside
+        /// as `passwords.unreadable-<time>.sqlite` and starts a new one; `recover(from:)` adds
+        /// its logins back if the key that sealed them returns. Converts an older file to WAL
+        /// and runs migrations.
+        case app
+        /// Any process other than the iSmith app. Never creates a key or a file, never moves,
+        /// deletes, migrates or converts one, and never restores or backs up. A missing key
+        /// (`keyMissing`), a missing file (`fileMissing`), a file sealed with another key
+        /// (`wrongKey`), a file that isn't ours (`unrecognizedFile`) or one the app hasn't set
+        /// up yet (`notSetUp`) is an error, and everything is left as it was.
+        case existingOnly
+        /// The app, after the user chose "Start a New Passwords File…" because the key is
+        /// really gone. Like `app`, except that a missing key over a file that holds logins
+        /// creates a new key and moves the old file aside (never deletes it). Only ever from an
+        /// explicit user choice.
+        case appStartOver
+
+        /// `app` or `appStartOver`.
+        public var isApp: Bool { self != .existingOnly }
+    }
+
     public static let keychainService = "com.scottsmith.ismith.passwords-key"
 
     /// The passwords key in the login Keychain, next to (not shared with) the vault key.
@@ -58,16 +108,22 @@ public final class PasswordStore: @unchecked Sendable {
         return dir.appendingPathComponent("passwords.sqlite")
     }
 
+    /// How long a write waits for another connection (or process) to finish its own.
+    public static let busyTimeout: TimeInterval = 5
+
     public let fileURL: URL
-    /// Where an unreadable database was moved when this store opened, if it was.
+    public let openMode: OpenMode
+    /// Where an unreadable database was moved when this store opened, if it was (app modes only).
     public let movedAside: URL?
-    private let dbQueue: DatabaseQueue
+    /// A `DatabasePool` in the app; a `DatabaseQueue` in `existingOnly`, which (unlike a pool)
+    /// opens a WAL file without writing to it.
+    let database: any DatabaseWriter
     private let key: SymmetricKey
     private static let log = Logger(subsystem: "com.scottsmith.ismith", category: "passwords")
 
-    public init(fileURL: URL, keyStore: KeyStore) throws {
+    public init(fileURL: URL, keyStore: KeyStore, mode: OpenMode) throws {
         self.fileURL = fileURL
-        try SecureFile.prepareDirectory(fileURL.deletingLastPathComponent())
+        self.openMode = mode
 
         var key: SymmetricKey?
         do {
@@ -77,18 +133,59 @@ public final class PasswordStore: @unchecked Sendable {
             throw PasswordStoreError.keychainUnavailable(String(describing: error))
         }
 
+        let exists = FileManager.default.fileExists(atPath: fileURL.path)
+        if mode == .existingOnly {
+            // Judged without changing anything: no key, no file or a file that doesn't open
+            // with the key is an error. Nothing below creates, moves or converts a file.
+            guard let key else { throw PasswordStoreError.keyMissing }
+            guard exists else { throw PasswordStoreError.fileMissing }
+            switch Self.inspect(fileURL, key: key) {
+            case .usable: break
+            case .wrongKey: throw PasswordStoreError.wrongKey
+            case .notOurs: throw PasswordStoreError.unrecognizedFile
+            case .unavailable(let why): throw PasswordStoreError.databaseUnavailable(why)
+            }
+            // An older (rollback-journal) file is converted to WAL by the app, not here.
+            guard Self.isWAL(fileURL) else { throw PasswordStoreError.notSetUp }
+            // A queue, not a pool: a pool's setup writes to the file when its WAL is empty.
+            let queue: DatabaseQueue
+            do {
+                queue = try DatabaseQueue(path: fileURL.path, configuration: Self.configuration())
+            } catch let error as DatabaseError {
+                throw PasswordStoreError.databaseUnavailable("SQLite error \(error.resultCode.rawValue)")
+            }
+            let ready = try queue.read { db -> Bool in
+                guard try Self.migrator.hasCompletedMigrations(db) else { return false }
+                return try Data.fetchOne(db, sql: "SELECT value FROM meta WHERE key = 'keyCheck'") != nil
+            }
+            guard ready else { throw PasswordStoreError.notSetUp }
+            self.key = key
+            self.movedAside = nil
+            self.database = queue
+            return
+        }
+
+        try SecureFile.prepareDirectory(fileURL.deletingLastPathComponent())
+
         // What's on disk is judged before anything changes. A file that can't be read right now
         // (locked, a disk or permissions error) is left alone: only a file that is definitely not
         // a passwords database, or is sealed with another key, is ever moved aside.
-        let exists = FileManager.default.fileExists(atPath: fileURL.path)
         if exists, case .unavailable(let why) = Self.inspect(fileURL, key: key) {
             Self.log.error("passwords database could not be read; nothing changed")
             throw PasswordStoreError.databaseUnavailable(why)
         }
 
-        // A first run (or a missing key) gets a new key, saved before any file is moved, so a
-        // Keychain that refuses the new key leaves everything as it was.
         if key == nil {
+            // A key is created only on a true first run: no file, or a file that holds nothing.
+            // A file with logins (or a key check) without a key is a Keychain problem to report,
+            // not a reason to start over, unless the user chose to (`appStartOver`). A file that
+            // can't be judged (damaged) counts as holding logins.
+            if exists, Self.inspect(fileURL, key: nil) != .usable, mode != .appStartOver {
+                Self.log.error("passwords key missing but the database holds logins; nothing changed")
+                throw PasswordStoreError.keyMissing
+            }
+            // Saved before any file is moved, so a Keychain that refuses the new key leaves
+            // everything as it was.
             let fresh = SymmetricKey(size: .bits256)
             do {
                 try keyStore.saveKey(fresh)
@@ -120,22 +217,54 @@ public final class PasswordStore: @unchecked Sendable {
         self.movedAside = movedAside
 
         try SecureFile.ensureOwnerOnlyFile(fileURL)
-        dbQueue = try DatabaseQueue(path: fileURL.path, configuration: Self.configuration())
-        try Self.migrator.migrate(dbQueue)
-        try dbQueue.write { db in
-            if try Data.fetchOne(db, sql: "SELECT value FROM meta WHERE key = 'keyCheck'") == nil {
-                try db.execute(sql: "INSERT INTO meta (key, value) VALUES ('keyCheck', ?)",
-                               arguments: [LoginCrypto.sealKeyCheck(key)])
+        // Converts an older (rollback-journal) file to WAL; needs a moment alone with the file.
+        let pool = try Self.openPool(fileURL)
+        database = pool
+        do {
+            try Self.migrator.migrate(pool)
+            try pool.write { db in
+                if try Data.fetchOne(db, sql: "SELECT value FROM meta WHERE key = 'keyCheck'") == nil {
+                    try db.execute(sql: "INSERT INTO meta (key, value) VALUES ('keyCheck', ?)",
+                                   arguments: [LoginCrypto.sealKeyCheck(key)])
+                }
             }
+        } catch let error as DatabaseError {
+            throw PasswordStoreError.databaseUnavailable("SQLite error \(error.resultCode.rawValue)")
         }
+        // SQLite gives its side files the database's mode; make sure of it.
+        try SecureFile.limitSideFilesToOwner(of: fileURL)
+    }
+
+    /// Closes the database. The store can't be used afterwards.
+    public func close() throws {
+        try database.close()
+    }
+
+    private static func openPool(_ url: URL) throws -> DatabasePool {
+        do {
+            return try DatabasePool(path: url.path, configuration: configuration())
+        } catch let error as DatabaseError {
+            // Locked by another process, or WAL couldn't be turned on just now.
+            throw PasswordStoreError.databaseUnavailable("SQLite error \(error.resultCode.rawValue)")
+        }
+    }
+
+    /// Whether the file's header says WAL (format versions 2), without opening it in SQLite.
+    static func isWAL(_ url: URL) -> Bool {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return false }
+        defer { try? handle.close() }
+        guard let header = try? handle.read(upToCount: 20), header.count == 20 else { return false }
+        return header[18] == 2 && header[19] == 2
     }
 
     private static func configuration() -> Configuration {
         var config = Configuration()
         config.label = "iSmith.passwords"
+        // Another process may be writing: wait rather than fail with SQLITE_BUSY.
+        config.busyMode = .timeout(busyTimeout)
         // Deleted rows are overwritten with zeros rather than left in free pages.
         // The file is untrusted input: schema objects (triggers, views) may not call functions
-        // with side effects.
+        // with side effects. Run on every connection (the writer and each reader).
         config.prepareDatabase { db in
             try db.execute(sql: "PRAGMA secure_delete = ON")
             try db.execute(sql: "PRAGMA trusted_schema = OFF")
@@ -177,13 +306,22 @@ public final class PasswordStore: @unchecked Sendable {
         case unavailable(String)
     }
 
+    /// A connection to an existing file that never writes to it.
+    static func openForReading(_ url: URL) throws -> DatabaseQueue {
+        var config = configuration()
+        config.prepareDatabase { db in try db.execute(sql: "PRAGMA query_only = ON") }
+        return try DatabaseQueue(path: url.path, configuration: config)
+    }
+
     /// What an existing database file is, judged by reading it. A missing key can open only an
     /// empty database.
-    static func inspect(_ url: URL, key: SymmetricKey?, readOnly: Bool = false) -> Inspection {
+    ///
+    /// The file is opened read-write but queried only (`query_only`): a read-only connection
+    /// can't open a WAL file whose `-shm` is gone (a copy set aside after its last connection
+    /// closed), and a read-write one replays a `-wal` left by a crash rather than missing it.
+    static func inspect(_ url: URL, key: SymmetricKey?) -> Inspection {
         do {
-            var config = configuration()
-            config.readonly = readOnly
-            let queue = try DatabaseQueue(path: url.path, configuration: config)
+            let queue = try openForReading(url)
             defer { try? queue.close() }
             return try queue.read { db in
                 guard try db.tableExists("meta"), try db.tableExists("login") else {
@@ -227,7 +365,7 @@ public final class PasswordStore: @unchecked Sendable {
     }
 
     public func health() throws -> Health {
-        try dbQueue.read { db in
+        try database.read { db in
             let rows = try Row.fetchAll(db, sql: "SELECT * FROM login")
             return Health(rows: rows.count, unreadable: rows.filter { decode($0) == nil }.count)
         }
@@ -256,7 +394,7 @@ public final class PasswordStore: @unchecked Sendable {
     /// Whether `recover(from:)` already went through this copy. Each copy is restored once, so
     /// a login deleted after it was restored doesn't come back at the next launch.
     public func wasRecovered(_ copy: URL) throws -> Bool {
-        try dbQueue.read { db in
+        try database.read { db in
             try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM meta WHERE key = ?", arguments: ["recovered:" + copy.lastPathComponent]) ?? 0 > 0
         }
     }
@@ -282,14 +420,13 @@ public final class PasswordStore: @unchecked Sendable {
     /// `databaseUnavailable` when it can't be read just now. The copy is marked as gone through
     /// (`wasRecovered`); callers restore each copy once.
     public func recover(from copy: URL) throws -> Recovery? {
-        switch Self.inspect(copy, key: key, readOnly: true) {
+        guard openMode.isApp else { throw PasswordStoreError.appOnly }
+        switch Self.inspect(copy, key: key) {
         case .usable: break
         case .wrongKey, .notOurs: return nil
         case .unavailable(let why): throw PasswordStoreError.databaseUnavailable(why)
         }
-        var config = Self.configuration()
-        config.readonly = true
-        let source = try DatabaseQueue(path: copy.path, configuration: config)
+        let source = try Self.openForReading(copy)
         defer { try? source.close() }
         let (rows, neverSave) = try source.read { db -> ([Row], [Row]) in
             guard try db.tableExists("login") else { return ([], []) }
@@ -298,7 +435,7 @@ public final class PasswordStore: @unchecked Sendable {
         }
         var result = Recovery()
         var toAdd: [Login] = []
-        try dbQueue.read { db in
+        try database.read { db in
             for row in rows {
                 guard let login = decode(row) else {
                     result.unreadable += 1
@@ -315,7 +452,7 @@ public final class PasswordStore: @unchecked Sendable {
         }
         let marker = "recovered:" + copy.lastPathComponent
         if !toAdd.isEmpty { result.backup = try backUp(reason: "before-restore") }
-        try dbQueue.write { db in
+        try database.write { db in
             try db.execute(sql: "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
                            arguments: [marker, Data(String(Date().timeIntervalSince1970).utf8)])
             for login in toAdd { try insert(db, login) }
@@ -334,6 +471,7 @@ public final class PasswordStore: @unchecked Sendable {
 
     /// A consistent copy of the store next to it, owner-only from the start.
     func backUp(reason: String) throws -> URL {
+        guard openMode.isApp else { throw PasswordStoreError.appOnly }
         let stamp = Int(Date().timeIntervalSince1970)
         let base = fileURL.deletingPathExtension()
         var target = base.appendingPathExtension("\(reason)-\(stamp).\(fileURL.pathExtension)")
@@ -344,8 +482,10 @@ public final class PasswordStore: @unchecked Sendable {
         }
         // The empty file is made 0600 first, so the copy is never readable by others.
         try SecureFile.ensureOwnerOnlyFile(target)
+        // The backup reads through the pool, so it includes what's still in the WAL. Closing the
+        // destination checkpoints it, so the copy is one self-contained file.
         let destination = try DatabaseQueue(path: target.path, configuration: Self.configuration())
-        try dbQueue.backup(to: destination)
+        try database.backup(to: destination)
         try destination.close()
         return target
     }
@@ -355,25 +495,25 @@ public final class PasswordStore: @unchecked Sendable {
     /// Every readable login, by site and then username. Rows that fail to decrypt are skipped and
     /// counted by `unreadableCount()`.
     public func allLogins() throws -> [Login] {
-        try dbQueue.read { db in try Row.fetchAll(db, sql: "SELECT * FROM login").compactMap(decode) }
+        try database.read { db in try Row.fetchAll(db, sql: "SELECT * FROM login").compactMap(decode) }
             .sorted(by: Self.listOrder)
     }
 
     public func login(id: UUID) throws -> Login? {
-        try dbQueue.read { db in
+        try database.read { db in
             try Row.fetchOne(db, sql: "SELECT * FROM login WHERE id = ?", arguments: [id.uuidString]).flatMap(decode)
         }
     }
 
     /// Rows that exist but can't be decrypted with the current key (tampered or damaged).
     public func unreadableCount() throws -> Int {
-        try dbQueue.read { db in try Row.fetchAll(db, sql: "SELECT * FROM login").filter { decode($0) == nil }.count }
+        try database.read { db in try Row.fetchAll(db, sql: "SELECT * FROM login").filter { decode($0) == nil }.count }
     }
 
     /// Logins that may be offered on a frame of `origin`: exact matches first, then same-site
     /// ones, each most recently used first. See `Origin` for the rules.
     public func logins(for origin: Origin) throws -> [LoginMatch] {
-        try dbQueue.read { db -> [LoginMatch] in
+        try database.read { db -> [LoginMatch] in
             // Origins are in the clear, so only matching rows are decrypted.
             try Row.fetchAll(db, sql: "SELECT * FROM login").compactMap { row -> LoginMatch? in
                 guard let saved = Origin(string: row["origin"]),
@@ -407,7 +547,7 @@ public final class PasswordStore: @unchecked Sendable {
     @discardableResult
     public func add(origin: Origin, username: String, password: String, date: Date = Date()) throws -> Login {
         let login = Login(origin: origin, username: username, password: password, created: date)
-        try dbQueue.write { db in
+        try database.write { db in
             guard try existing(db, origin: origin, username: username) == nil else { throw PasswordStoreError.duplicate }
             try insert(db, login)
         }
@@ -418,7 +558,7 @@ public final class PasswordStore: @unchecked Sendable {
     /// `updated` to now. Throws `.duplicate` if the new origin and username belong to another login.
     @discardableResult
     public func update(_ login: Login, date: Date = Date()) throws -> Login {
-        try dbQueue.write { db in
+        try database.write { db in
             guard let row = try Row.fetchOne(db, sql: "SELECT * FROM login WHERE id = ?", arguments: [login.id.uuidString]) else {
                 throw PasswordStoreError.notFound
             }
@@ -441,7 +581,7 @@ public final class PasswordStore: @unchecked Sendable {
     /// or adds a new login.
     @discardableResult
     public func save(origin: Origin, username: String, password: String, date: Date = Date()) throws -> Login {
-        try dbQueue.write { db in
+        try database.write { db in
             if var login = try existing(db, origin: origin, username: username) {
                 if login.password != password {
                     login.password = password
@@ -462,12 +602,12 @@ public final class PasswordStore: @unchecked Sendable {
     }
 
     public func delete(id: UUID) throws {
-        try dbQueue.write { db in try db.execute(sql: "DELETE FROM login WHERE id = ?", arguments: [id.uuidString]) }
+        try database.write { db in try db.execute(sql: "DELETE FROM login WHERE id = ?", arguments: [id.uuidString]) }
     }
 
     /// Records that a login was filled or signed in with.
     public func markUsed(id: UUID, date: Date = Date()) throws {
-        try dbQueue.write { db in
+        try database.write { db in
             try db.execute(sql: "UPDATE login SET lastUsed = ?, timesUsed = timesUsed + 1 WHERE id = ?",
                            arguments: [date.timeIntervalSince1970, id.uuidString])
         }
@@ -495,27 +635,27 @@ public final class PasswordStore: @unchecked Sendable {
     // MARK: Never save
 
     public func setNeverSave(_ origin: Origin, date: Date = Date()) throws {
-        try dbQueue.write { db in
+        try database.write { db in
             try db.execute(sql: "INSERT OR REPLACE INTO neverSave (origin, created) VALUES (?, ?)",
                            arguments: [origin.serialized, date.timeIntervalSince1970])
         }
     }
 
     public func removeNeverSave(_ origin: Origin) throws {
-        try dbQueue.write { db in
+        try database.write { db in
             try db.execute(sql: "DELETE FROM neverSave WHERE origin = ?", arguments: [origin.serialized])
         }
     }
 
     /// "Never save" is per exact origin.
     public func isNeverSave(_ origin: Origin) throws -> Bool {
-        try dbQueue.read { db in
+        try database.read { db in
             try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM neverSave WHERE origin = ?", arguments: [origin.serialized]) ?? 0 > 0
         }
     }
 
     public func neverSaveOrigins() throws -> [Origin] {
-        try dbQueue.read { db in
+        try database.read { db in
             try String.fetchAll(db, sql: "SELECT origin FROM neverSave ORDER BY origin").compactMap { Origin(string: $0) }
         }
     }

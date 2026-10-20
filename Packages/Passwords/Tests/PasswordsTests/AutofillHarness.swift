@@ -24,7 +24,7 @@ final class AutofillHarness: NSObject, PasswordAutofillDelegate, WKNavigationDel
 
     override init() {
         dir = FileManager.default.temporaryDirectory.appendingPathComponent("AutofillTests-\(UUID().uuidString)")
-        store = try! PasswordStore(fileURL: dir.appendingPathComponent("passwords.sqlite"), keyStore: InMemoryKeyStore())
+        store = try! PasswordStore(fileURL: dir.appendingPathComponent("passwords.sqlite"), keyStore: InMemoryKeyStore(), mode: .app)
         autofill = PasswordAutofill(store: store)
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .nonPersistent()

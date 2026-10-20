@@ -6,6 +6,20 @@ and the native UI the app adds on top.
 
 ## Setup at launch
 
+Every `PasswordStore` is opened with an explicit `OpenMode`, which decides what `init` may change
+on disk:
+
+| Mode | Who | Missing key | Missing file | Key doesn't open the file |
+|---|---|---|---|---|
+| `.app` | the iSmith app | first run only (no file, or a file holding nothing): creates the key; a file with logins or a key check throws `.keyMissing`, nothing changed | creates it | moves it aside as `passwords.unreadable-<time>.sqlite` (with its `-wal`/`-shm`) and starts a new one |
+| `.appStartOver` | the app, after the user confirmed "Start a New Passwords File…" | creates a new key, moves the old file aside (never deletes it) | creates it | as `.app` |
+| `.existingOnly` | any other process (the iSmith Agent) | throws `.keyMissing` | throws `.fileMissing` | throws `.wrongKey` (`.unrecognizedFile` for a damaged file) |
+
+`.existingOnly` never creates a key or a file, never moves, deletes, migrates or converts one, and
+throws `.notSetUp` for a file the app hasn't set up yet (an older rollback-journal file, pending
+migrations, no key check): open the app once. `recover(from:)` (and its backup) throws `.appOnly`
+on such a store, and `BrowserState.checkPasswordStore` does nothing with it.
+
 ```swift
 import Passwords
 
@@ -14,7 +28,13 @@ func openPasswords(dataDir: URL?) -> PasswordAutofill? {
     do {
         store = try PasswordStore(fileURL: PasswordStore.defaultFileURL(dataDirectory: dataDir),
                                   keyStore: KeychainKeyStore(service: AppIdentity.passwordsKeyService,
-                                                            account: "passwords", label: "iSmith passwords key"))
+                                                            account: "passwords", label: "iSmith passwords key"),
+                                  mode: .app)
+    } catch PasswordStoreError.keyMissing {
+        // The key is gone but the file holds logins: never start over on our own. Offer
+        // "Try Again", "Continue Without Passwords" and, after a confirmation that the old file
+        // is kept, "Start a New Passwords File…" (open again with `mode: .appStartOver`).
+        return nil
     } catch {
         // `.keychainUnavailable` or `.databaseUnavailable` (the file is locked or can't be read
         // just now): same handling as the vault ("Try Again", or run without passwords). Nothing
@@ -40,8 +60,20 @@ func openPasswords(dataDir: URL?) -> PasswordAutofill? {
 }
 ```
 
+Another process opens the same file with `mode: .existingOnly` and reports any error; it never
+offers to start over.
+
 - The file is `~/Library/Application Support/iSmith/passwords.sqlite` (0600, folder 0700). With
   `ISMITH_DATA_DIR`, pass that folder as `dataDirectory`.
+- The file is in WAL mode (the app converts an older rollback-journal file on its first open,
+  which needs a moment with no other connection), with a 5-second busy timeout: the app and
+  another process can have it open at once, readers never wait, and a write waits for another
+  one rather than failing with `SQLITE_BUSY`. Its `-wal` and `-shm` side files are 0600 like the
+  file, and anything that moves or copies the store must take the `-wal` with it (or use
+  `backUp`, which writes one self-contained file). `secure_delete` and `trusted_schema = OFF`
+  apply on every connection. The app opens a `DatabasePool`; `.existingOnly` opens a single
+  `DatabaseQueue`, which (unlike a pool) doesn't write to the file when it opens.
+- `close()` closes the store's connections; tests use it before moving a file.
 - The key is a 256-bit AES key in the file-based login Keychain, service
   `com.scottsmith.ismith.passwords-key`, account `passwords`, separate from the vault key. The
   app passes `AppIdentity.passwordsKeyService` rather than the package default, so the Debug

@@ -1,8 +1,9 @@
 import Foundation
 
 /// Owner-only files for the password database, as SignInSync does for the vault: the folder is
-/// 0700 and the database 0600 from the moment it exists. SQLite gives its journal the database's
-/// mode, so the journal is owner-only too.
+/// 0700 and the database 0600 from the moment it exists. SQLite gives its side files (`-journal`,
+/// `-wal`, `-shm`) the database's mode, so they're owner-only too; `limitSideFilesToOwner` makes
+/// sure of it.
 enum SecureFile {
     static func prepareDirectory(_ dir: URL) throws {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true,
@@ -26,22 +27,46 @@ enum SecureFile {
         ["-journal", "-wal", "-shm"].map { URL(fileURLWithPath: url.path + $0) }
     }
 
-    /// Moves a database that can't be opened (and its side files) aside, so it can be recovered
-    /// later, and returns where it went. Nothing is overwritten.
+    /// Limits the side files that exist to the owner.
+    static func limitSideFilesToOwner(of url: URL) throws {
+        for side in sideFiles(of: url) where FileManager.default.fileExists(atPath: side.path) {
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: side.path)
+        }
+    }
+
+    /// Moves a database that can't be opened, with its side files, aside so it can be recovered
+    /// later, and returns where it went. Nothing is overwritten or deleted.
+    ///
+    /// The `-wal` (logins not yet checkpointed into the main file) and `-journal` move with it:
+    /// left behind, they'd be lost to the copy and could be replayed into the new file. If one
+    /// can't be moved, everything is put back and the move throws. The `-shm` is only an index
+    /// SQLite rebuilds; it moves too when it can.
     static func moveAside(_ url: URL, reason: String) throws -> URL {
         let stamp = Int(Date().timeIntervalSince1970)
         let base = url.deletingPathExtension()
         let ext = url.pathExtension
         var target = base.appendingPathExtension("\(reason)-\(stamp).\(ext)")
         var n = 2
-        while FileManager.default.fileExists(atPath: target.path) {
+        func taken(_ candidate: URL) -> Bool {
+            ([candidate] + sideFiles(of: candidate)).contains { FileManager.default.fileExists(atPath: $0.path) }
+        }
+        while taken(target) {
             target = base.appendingPathExtension("\(reason)-\(stamp)-\(n).\(ext)")
             n += 1
         }
-        try FileManager.default.moveItem(at: url, to: target)
-        for (side, newSide) in zip(sideFiles(of: url), sideFiles(of: target))
-        where FileManager.default.fileExists(atPath: side.path) {
-            try? FileManager.default.moveItem(at: side, to: newSide)
+        let fm = FileManager.default
+        try fm.moveItem(at: url, to: target)
+        var moved: [(from: URL, to: URL)] = [(url, target)]
+        for (side, newSide) in zip(sideFiles(of: url), sideFiles(of: target)) where fm.fileExists(atPath: side.path) {
+            do {
+                try fm.moveItem(at: side, to: newSide)
+                moved.append((side, newSide))
+            } catch where side.path.hasSuffix("-shm") {
+                continue
+            } catch {
+                for item in moved.reversed() { try? fm.moveItem(at: item.to, to: item.from) }
+                throw error
+            }
         }
         return target
     }
