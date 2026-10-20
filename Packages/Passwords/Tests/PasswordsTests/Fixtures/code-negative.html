@@ -1,0 +1,27 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Checkout</title></head>
+<body>
+<!-- Numeric fields that are not one-time codes. -->
+<form id="address" onsubmit="event.preventDefault()">
+  <p><input id="zip" name="zip" inputmode="numeric" maxlength="5" autocomplete="postal-code" style="width:200px;height:28px"></p>
+  <p><label>ZIP code <input id="zip2" name="postal" inputmode="numeric" maxlength="5" style="width:200px;height:28px"></label></p>
+  <p><input id="qty" name="quantity" type="number" inputmode="numeric" maxlength="4" style="width:200px;height:28px"></p>
+  <p><input id="promo" name="promoCode" placeholder="Promo code" maxlength="8" style="width:200px;height:28px"></p>
+  <p><input id="pw" type="password" autocomplete="one-time-code" style="width:200px;height:28px"></p>
+  <p><input id="year" name="birthYear" inputmode="numeric" maxlength="4" style="width:200px;height:28px"></p>
+</form>
+<form role="search" onsubmit="event.preventDefault()"><input id="search" type="search" placeholder="Search by verification code" style="width:200px;height:28px"></form>
+<!-- Login identifiers that look like the bare inputmode rule. -->
+<form id="login" onsubmit="event.preventDefault()">
+  <p><input id="phone" name="phoneNumber" type="tel" inputmode="numeric" maxlength="10" style="width:200px;height:28px"></p>
+  <p><input id="customer" inputmode="numeric" maxlength="8" style="width:200px;height:28px"></p>
+  <p><input id="loginpw" type="password" style="width:200px;height:28px"></p>
+</form>
+<!-- A card form: its "security code" is the card's CVC. -->
+<form id="pay" onsubmit="event.preventDefault()">
+  <p><input id="ccnum" name="cardnumber" autocomplete="cc-number" inputmode="numeric" maxlength="19" style="width:200px;height:28px"></p>
+  <p><input id="ccexp" autocomplete="cc-exp" maxlength="5" style="width:200px;height:28px"></p>
+  <p><input id="csc" name="securityCode" inputmode="numeric" maxlength="4" placeholder="Security code" style="width:200px;height:28px"></p>
+  <p><input id="cccode" autocomplete="cc-csc" inputmode="numeric" maxlength="4" style="width:200px;height:28px"></p>
+</form>
+</body></html>

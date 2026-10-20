@@ -1,0 +1,45 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Verify</title></head>
+<body>
+<h1>We texted you a code</h1>
+<!-- Six single-digit boxes kept in state the way React OTP widgets keep them: each input event
+     schedules `setDigits([...digits])` from the digits of the last render (a microtask later),
+     moves focus to the next box, and every render writes state back into all boxes. Boxes typed
+     in one go, without a render in between, lose all but the last digit. -->
+<form id="verify" onsubmit="event.preventDefault()" style="display:flex;gap:8px">
+  <input id="b0" inputmode="numeric" maxlength="1" style="width:36px;height:40px">
+  <input id="b1" inputmode="numeric" maxlength="1" style="width:36px;height:40px">
+  <input id="b2" inputmode="numeric" maxlength="1" style="width:36px;height:40px">
+  <input id="b3" inputmode="numeric" maxlength="1" style="width:36px;height:40px">
+  <input id="b4" inputmode="numeric" maxlength="1" style="width:36px;height:40px">
+  <input id="b5" inputmode="numeric" maxlength="1" style="width:36px;height:40px">
+</form>
+<!-- Two 1-character boxes are not a code. -->
+<div style="margin-top:20px"><input id="m0" maxlength="1" style="width:30px;height:30px"> <input id="m1" maxlength="1" style="width:30px;height:30px"></div>
+<script>
+  const desc = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value");
+  const boxes = [0, 1, 2, 3, 4, 5].map((i) => document.getElementById("b" + i));
+  const tracked = boxes.map(() => "");
+  window.digits = ["", "", "", "", "", ""];
+  window.state = { code: "" };
+  const render = () => {
+    boxes.forEach((el, k) => { if (desc.get.call(el) !== window.digits[k]) desc.set.call(el, window.digits[k]); tracked[k] = window.digits[k]; });
+    window.state.code = window.digits.join("");
+  };
+  boxes.forEach((el, i) => {
+    el.addEventListener("input", () => {
+      const now = desc.get.call(el);
+      if (now === tracked[i]) return;
+      const rendered = window.digits;
+      queueMicrotask(() => {
+        const next = rendered.slice();
+        next[i] = now.slice(-1);
+        window.digits = next;
+        render();
+        if (now && boxes[i + 1]) boxes[i + 1].focus();
+      });
+    });
+  });
+  setInterval(render, 30);
+</script>
+</body></html>

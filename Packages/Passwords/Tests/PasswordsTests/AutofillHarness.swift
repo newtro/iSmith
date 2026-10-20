@@ -20,6 +20,8 @@ final class AutofillHarness: NSObject, PasswordAutofillDelegate, WKNavigationDel
     private(set) var focuses: [LoginFieldFocus] = []
     private(set) var captures: [PasswordCapture] = []
     private(set) var forms: [(kinds: Set<FormKind>, frame: PasswordFrame)] = []
+    private(set) var codeFocuses: [CodeFieldFocus] = []
+    private(set) var codeBlurs: [String] = []
     private var navigationWaiters: [CheckedContinuation<Void, Error>] = []
 
     override init() {
@@ -55,6 +57,8 @@ final class AutofillHarness: NSObject, PasswordAutofillDelegate, WKNavigationDel
         focuses.removeAll()
         captures.removeAll()
         forms.removeAll()
+        codeFocuses.removeAll()
+        codeBlurs.removeAll()
     }
 
     // MARK: Delegate
@@ -69,6 +73,14 @@ final class AutofillHarness: NSObject, PasswordAutofillDelegate, WKNavigationDel
 
     func passwordAutofill(_ autofill: PasswordAutofill, foundForms kinds: Set<FormKind>, in frame: PasswordFrame) {
         forms.append((kinds, frame))
+    }
+
+    func passwordAutofill(_ autofill: PasswordAutofill, codeFieldFocused focus: CodeFieldFocus) {
+        codeFocuses.append(focus)
+    }
+
+    func passwordAutofill(_ autofill: PasswordAutofill, codeFieldBlurred fieldID: String, in frame: PasswordFrame) {
+        codeBlurs.append(fieldID)
     }
 
     // MARK: Navigation

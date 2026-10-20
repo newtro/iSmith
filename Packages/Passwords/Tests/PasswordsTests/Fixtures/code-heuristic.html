@@ -1,0 +1,15 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Two-step verification</title></head>
+<body>
+<!-- Code fields without autocomplete="one-time-code", found by name, label, placeholder,
+     aria-label or inputmode and length, in a few languages. -->
+<p><input id="named" name="verificationCode" type="text" style="width:200px;height:28px"></p>
+<p><label for="labelled">Enter the code we sent to your phone</label> <input id="labelled" type="tel" style="width:200px;height:28px"></p>
+<p><input id="numeric" inputmode="numeric" maxlength="6" style="width:200px;height:28px"></p>
+<p><input id="mfa" name="mfaCode" type="number" style="width:200px;height:28px"></p>
+<p><label>Código de verificación <input id="spanish" style="width:200px;height:28px"></label></p>
+<p><input id="german" placeholder="Bestätigungscode" style="width:200px;height:28px"></p>
+<p><input id="japanese" aria-label="認証コード" style="width:200px;height:28px"></p>
+<!-- One transparent input over drawn boxes (the input-otp widget): its text can't be seen. -->
+<p style="position:relative"><input id="clear" autocomplete="one-time-code" inputmode="numeric" maxlength="6" style="width:200px;height:28px;color:transparent;caret-color:transparent;background:transparent"></p>
+</body></html>

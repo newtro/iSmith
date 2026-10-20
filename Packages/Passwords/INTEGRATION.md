@@ -123,6 +123,8 @@ All on the main actor.
 | `loginFieldFocused(focus)` | A visible username or password field of a recognized form is focused or clicked. `focus.isUserInitiated` is true when the user clicked it or tabbed into it; a page calling `focus()` reports it false. | If `isUserInitiated`, show the **autofill popover** anchored to `focus.rectInWebView` (main frame) or the mouse location (iframes; `rectInWebView` is nil). If not, show at most a small key button in the field's corner that opens the popover on click. |
 | `captured(capture)` | A form was submitted with a new login (`.save`) or a changed password (`.update`). Unchanged logins and never-save origins aren't reported. | Show the **save bar**. |
 | `foundForms(kinds, frame)` | A frame gained login forms (sent when the set of kinds changes). | Optional: a key icon in the address bar; enables ⌘\\. |
+| `codeFieldFocused(focus)` | A visible one-time-code field was focused, by the user (`isUserInitiated`) or by the page (verification pages usually focus their own field). | Look up codes for `focus.pageHost` (always the tab's top-level host), keep those `OneTimeCodeBinding.mayOffer(domain:in:)` allows and `focus.accepts(_:)` fits, and show the **code popover** when there are any. Keep looking (every second, up to 2 minutes) while the field stays focused. |
+| `codeFieldBlurred(fieldID, frame)` | Focus left that code field, or its page was hidden or unloaded. A click in the app's popover isn't reported (the field stays the page's active element). | Stop looking; leave an open popover until it's answered. |
 
 ## Actions
 
@@ -153,6 +155,17 @@ trigger.
   cross-site frames, with an exact-origin login; everything else goes through the popover.
 - Save bar: `autofill.save(capture, username: editedUsername)`, `autofill.neverSave(capture)` (per
   exact origin), or dismiss.
+- `try await autofill.fillCode(code, into: codeFocus)`: types a one-time code into the focused code
+  field, or into each box of a split field, only for a code the user picked. Refuses `.disabled`,
+  `.tooSoon`, `.stale` / `.frameOriginChanged`, `.noField` (gone, hidden, no longer a code
+  field), `.codeDoesNotFit` (not 3–12 ASCII letters and digits, longer than the field's
+  `maxlength`, or not exactly one character per box) and `.codeNotAccepted` (a box or the field
+  doesn't hold the code right after: don't mark it used). `autofill.lastCodeFocus(in:)` is the
+  code field focused now (cleared when focus leaves it, or a login field is focused; the page
+  re-focusing a field the user clicked keeps it user-initiated). ⌘\\ goes to it when it was
+  focused after the last login field, and when the user focused it or didn't focus that login
+  field: a page moving focus to a code field after the user clicked a password field doesn't get
+  the ⌘\\ meant for the password.
 
 ## Native UI expected
 
@@ -170,6 +183,30 @@ trigger.
   (`fill` itself refuses within 0.3 s of the focus).
 - Keyboard: ↑/↓, Return fills, Esc closes. Close it on navigation, scroll or tab switch.
 - Show nothing when `logins` is empty and there's no generator row.
+
+### Code popover (`NSPopover`, anchored to the code field; the app's `CodeFill.swift`)
+
+- One row per code, newest first: "Fill **123456** from Chase" (the SMS sender) and, for a code
+  bound to a domain, "· for chase.com"; an unbound code names the page it goes into ("· into
+  example.com"). A field in a cross-site frame says so first ("Fill a code into
+  **auth.example.com**, a frame on this page?").
+- A field only the page focused gets only codes bound to the site; unbound codes wait for the
+  user's click or Tab into the field (a page can't focus a field by itself and put another
+  site's unbound code under the pointer).
+- Opened right after the user's click: first row preselected, 0.5 s input delay. Opened by itself
+  (a code arrived while the field was focused): nothing preselected, so the Return that submits
+  a code typed by hand goes to the page, and a 1 s input delay. Never anchored at the pointer
+  (an iframe's field, whose position isn't known, gets the top of the web view).
+- Keys, Esc and closing as the login popover; ⌘\\ over it fills the highlighted row. A code
+  already shown for the field isn't shown again unasked; a new code is. A click on the field
+  asks again. The page focusing the field again doesn't extend the 2-minute watch; a click does.
+- ⌘\\ with no popover fills the newest code directly only into a field the user focused outside
+  a cross-site frame; otherwise it opens the popover.
+- Before filling, look the code up again (it may have been used or expired), then call
+  `markUsed(id)` on the agent.
+- Nothing when codes are off, the agent isn't registered (`SMAppService` status), it doesn't
+  answer, "Offer codes in iSmith" is off (the agent then returns nothing), the tab is driven by
+  an agent, or the page isn't https (http only on loopback hosts).
 
 ### Save bar (below the toolbar of the tab that submitted)
 
@@ -206,6 +243,57 @@ trigger.
   testing looks through it), and a page script on the site itself can always read what's filled
   into its own visible form. Same-origin script is trusted with that origin's logins, as in every
   browser.
+
+## One-time-code fields
+
+The script reports a focused field as a code field when it is a visible `text`, `tel`, `number`
+or untyped input (never `password`, `search`, `hidden` or read-only, never inside `role=search`)
+and one of these holds:
+
+- `autocomplete` includes `one-time-code` (and no `cc-*` token);
+- its name, id, placeholder, aria-label, title, `<label>` or `aria-labelledby` text (camelCase
+  and snake_case split into words) names a code: otp, totp, 2fa, mfa, passcode, one-time
+  (code/password/pin), two-factor, two-step, multi-factor, verification / verify / confirmation /
+  security / SMS / text / login / sign-in / authentication / access code, "enter the code",
+  "code we sent"; Spanish and Portuguese "código de verificación/segurança/…", French "code de
+  vérification/sécurité/confirmation", German "Bestätigungscode", "Sicherheitscode",
+  "Einmalcode", Italian, Dutch, Polish and Swedish equivalents, and 認証コード, 验证码, 驗證碼,
+  인증번호, "код подтверждения";
+- `inputmode="numeric"` with `maxlength` 4 to 10, unless its text names an identifier (phone,
+  mobile, tel, customer, member, account, user, login, email, id, card) or it is the username of
+  a login form;
+- it is one of a row of 4 to 8 inputs with `maxlength="1"` side by side in one form (a split
+  field: reported once, by its first box, with `boxes`).
+
+Except, for the last three (heuristics): a `maxlength` under 4 or over 12; an `autocomplete`
+token for something else (`cc-*`, `postal-code`, `bday*`, `tel*`, `email`, `username`, passwords,
+names, addresses); text naming zip/postal code, area or country code, promo, coupon, voucher,
+discount, gift, referral, invite, quantity, amount, price, search, captcha, card, CVV/CVC/CSC,
+expiry, month, year, birth date, age, SSN, IBAN or routing; and any form with card fields
+(`cc-*` autocomplete, or card-number/CVC names), where "security code" is the card's CVC. A code
+field is never also offered as a username field. Code fields may have invisible text (a
+transparent input over drawn boxes, as the `input-otp` widget does); login fields may not.
+
+Wrongly detected fields cost little: the popover only appears when a code has just arrived for
+the page, and nothing is filled without the user.
+
+**The binding** (`OneTimeCodeBinding`): codes are always looked up with the tab's **top-level**
+host (`CodeFieldFocus.pageHost`: the main frame's own origin, or the tab's page for an iframe),
+never an iframe's, and only for https pages (http on loopback). iSmith Agent returns codes bound
+to that host or a parent domain and unbound codes under 2 minutes old. The app then keeps a
+bound code only when its domain matches the top-level host **and**, for a field in an iframe,
+the frame's own host: a page can't get chase.com's code by framing chase.com, and chase.com
+can't hand its code to a third-party frame. Unbound codes follow the top-level page alone.
+
+**Filling** runs in the content world, like a login fill: the frame must still show the same
+document at the same origin, and the field must still be a visible code field the code fits. A
+code is typed as a key down, the value through the element's own setter, an `insertText` input
+event carrying the text, a key up and change, box by box for split fields with a 16 ms turn of
+the event loop between boxes (so a React widget that keeps the digits in state re-renders before
+the next box), so React and Vue controlled inputs and split-box widgets accept it. Right after
+the last box, every box must hold its character (ignoring spaces and case; a box the page
+already replaced counts), else `.codeNotAccepted`. The code is passed only to that call: it is
+never in any of the page's worlds before the user picks it, and the page can't list codes.
 
 ## Rules the app must keep (threat model)
 

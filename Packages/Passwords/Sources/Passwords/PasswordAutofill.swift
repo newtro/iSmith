@@ -121,6 +121,12 @@ public enum AutofillError: Error, Equatable {
     case disabled
     /// The field, or the form's password field, is gone or hidden.
     case noField
+    /// The code doesn't fit the code field (more characters than it takes, or not one per box),
+    /// or isn't a plausible code.
+    case codeDoesNotFit
+    /// The page didn't keep the code (a box or the field doesn't hold it after the fill): don't
+    /// count the code as used.
+    case codeNotAccepted
     case scriptFailed(String)
 }
 
@@ -134,12 +140,20 @@ public protocol PasswordAutofillDelegate: AnyObject {
     func passwordAutofill(_ autofill: PasswordAutofill, captured capture: PasswordCapture)
     /// A frame has login forms (sent when the set of kinds changes).
     func passwordAutofill(_ autofill: PasswordAutofill, foundForms kinds: Set<FormKind>, in frame: PasswordFrame)
+    /// A one-time-code field was focused (by the user or the page): offer a recent code for the
+    /// tab's top-level host (`focus.pageHost`) under `OneTimeCodeBinding`, and keep looking for
+    /// one while the field stays focused.
+    func passwordAutofill(_ autofill: PasswordAutofill, codeFieldFocused focus: CodeFieldFocus)
+    /// Focus left that code field (or its page was hidden): stop looking for codes for it.
+    func passwordAutofill(_ autofill: PasswordAutofill, codeFieldBlurred fieldID: String, in frame: PasswordFrame)
 }
 
 public extension PasswordAutofillDelegate {
     func passwordAutofill(_ autofill: PasswordAutofill, loginFieldFocused focus: LoginFieldFocus) {}
     func passwordAutofill(_ autofill: PasswordAutofill, captured capture: PasswordCapture) {}
     func passwordAutofill(_ autofill: PasswordAutofill, foundForms kinds: Set<FormKind>, in frame: PasswordFrame) {}
+    func passwordAutofill(_ autofill: PasswordAutofill, codeFieldFocused focus: CodeFieldFocus) {}
+    func passwordAutofill(_ autofill: PasswordAutofill, codeFieldBlurred fieldID: String, in frame: PasswordFrame) {}
 }
 
 /// Password capture and autofill for web views: attach it to each `WKWebViewConfiguration`
@@ -174,6 +188,8 @@ public final class PasswordAutofill {
 
     final class TabState {
         var lastFocus: LoginFieldFocus?
+        /// The code field focused now, if any (cleared when focus leaves it).
+        var lastCodeFocus: CodeFieldFocus?
         /// Usernames from the first step of a two-step sign-in, per site, with where and when.
         /// Keyed by site so a frame from another site can't replace or clear one.
         var pendingUsernames: [String: (origin: Origin, username: String, date: Date)] = [:]
@@ -227,6 +243,11 @@ public final class PasswordAutofill {
     /// The field last focused in a web view, for ⌘\ ("fill the best login here").
     public func lastFocus(in webView: WKWebView) -> LoginFieldFocus? {
         tabs.object(forKey: webView)?.lastFocus
+    }
+
+    /// The one-time-code field focused in a web view, while it keeps focus (for ⌘\).
+    public func lastCodeFocus(in webView: WKWebView) -> CodeFieldFocus? {
+        tabs.object(forKey: webView)?.lastCodeFocus
     }
 
     /// Drops what's remembered for a tab (the two-step username, the last focus).
@@ -296,16 +317,33 @@ public final class PasswordAutofill {
         _ = try await runFill(in: webView, focus: focus, request: ["mode": "generated", "username": "", "password": password])
     }
 
+    /// Types a one-time code into the focused code field (each box of a split field), with the
+    /// key and input events typing makes. Call only for a code the user picked (a popover click,
+    /// Return, ⌘\). The code reaches the page only here: until then it was never in any of the
+    /// page's worlds. The frame must still show the same document at the same origin, and the
+    /// field must still be a visible code field that the code fits.
+    public func fillCode(_ code: String, into focus: CodeFieldFocus) async throws {
+        guard let webView = focus.frame.webView else { throw AutofillError.frameGone }
+        guard !isDisabled(for: webView) else { throw AutofillError.disabled }
+        guard Date().timeIntervalSince(focus.receivedAt) >= minimumFocusAge else { throw AutofillError.tooSoon }
+        guard focus.accepts(code) else { throw AutofillError.codeDoesNotFit }
+        _ = try await runFill(in: webView, frame: focus.frame, fieldID: focus.fieldID, request: ["mode": "code", "code": code])
+    }
+
     private func runFill(in webView: WKWebView, focus: LoginFieldFocus, request: [String: String]) async throws -> FillResult {
+        try await runFill(in: webView, frame: focus.frame, fieldID: focus.fieldID, request: request)
+    }
+
+    private func runFill(in webView: WKWebView, frame: PasswordFrame, fieldID: String, request: [String: String]) async throws -> FillResult {
         var args: [String: Any] = request
-        args["docID"] = focus.frame.documentID
-        args["fieldID"] = focus.fieldID
-        args["origin"] = focus.frame.origin.serialized
+        args["docID"] = frame.documentID
+        args["fieldID"] = fieldID
+        args["origin"] = frame.origin.serialized
         let body = "const fill = window[\(Self.jsonString(Self.fillFunctionName))]; return fill ? fill(request) : \"noScript\";"
         let result: Any?
         do {
             result = try await webView.callAsyncJavaScript(body, arguments: ["request": args],
-                                                           in: focus.frame.frameInfo, contentWorld: contentWorld)
+                                                           in: frame.frameInfo, contentWorld: contentWorld)
         } catch {
             // The frame went away, usually. The error text has no secrets but isn't logged anyway.
             throw AutofillError.frameGone
@@ -316,6 +354,8 @@ public final class PasswordAutofill {
         case "stale": throw AutofillError.stale
         case "originMismatch": throw AutofillError.frameOriginChanged
         case "noField": throw AutofillError.noField
+        case "lengthMismatch", "badCode": throw AutofillError.codeDoesNotFit
+        case "notAccepted": throw AutofillError.codeNotAccepted
         case let other: throw AutofillError.scriptFailed(other ?? "no result")
         }
     }
@@ -354,6 +394,14 @@ public final class PasswordAutofill {
                                   isMainFrame: info.isMainFrame, topOrigin: webView.url.flatMap { Origin(url: $0) })
         switch type {
         case "focus": receiveFocus(body, frame: frame, webView: webView)
+        case "codeFocus": receiveCodeFocus(body, frame: frame, webView: webView)
+        case "codeBlur":
+            guard let fieldID = body["fieldID"] as? String, fieldID.count <= 16 else { return }
+            let tab = state(for: webView)
+            if let current = tab.lastCodeFocus, current.fieldID == fieldID, current.frame.documentID == docID {
+                tab.lastCodeFocus = nil
+            }
+            delegate?.passwordAutofill(self, codeFieldBlurred: fieldID, in: frame)
         case "submit": receiveSubmit(body, frame: frame, webView: webView)
         case "forms":
             let kinds = Set((body["kinds"] as? [String] ?? []).compactMap(FormKind.init(rawValue:)))
@@ -362,10 +410,8 @@ public final class PasswordAutofill {
         }
     }
 
-    private func receiveFocus(_ body: [String: Any], frame: PasswordFrame, webView: WKWebView) {
-        guard let fieldID = body["fieldID"] as? String, fieldID.count <= 16,
-              let field = (body["field"] as? String).flatMap(FieldKind.init(rawValue:)),
-              let form = (body["form"] as? String).flatMap(FormKind.init(rawValue:)) else { return }
+    /// The field's box from a focus message, and the same in the web view (main frame only).
+    private func rects(_ body: [String: Any], frame: PasswordFrame, webView: WKWebView) -> (CGRect, CGRect?) {
         let r = body["rect"] as? [String: Any] ?? [:]
         func number(_ v: Any?) -> CGFloat {
             guard let d = (v as? NSNumber)?.doubleValue, d.isFinite else { return 0 }
@@ -378,6 +424,32 @@ public final class PasswordAutofill {
             rectInWebView = CGRect(x: rect.minX * scale, y: rect.minY * scale,
                                    width: rect.width * scale, height: rect.height * scale)
         }
+        return (rect, rectInWebView)
+    }
+
+    private func receiveCodeFocus(_ body: [String: Any], frame: PasswordFrame, webView: WKWebView) {
+        guard let fieldID = body["fieldID"] as? String, fieldID.count <= 16,
+              let boxes = (body["boxes"] as? NSNumber)?.intValue, (1...8).contains(boxes) else { return }
+        let maxLength = (body["maxLength"] as? NSNumber).map(\.intValue).flatMap { (1...64).contains($0) ? $0 : nil }
+        let (rect, rectInWebView) = rects(body, frame: frame, webView: webView)
+        let tab = state(for: webView)
+        // The page focusing the field the user clicked (a split field moving to its next box)
+        // doesn't make it the page's.
+        var user = body["userInitiated"] as? Bool == true
+        if let last = tab.lastCodeFocus, last.fieldID == fieldID, last.frame.documentID == frame.documentID, last.isUserInitiated {
+            user = true
+        }
+        let focus = CodeFieldFocus(frame: frame, fieldID: fieldID, boxes: boxes, maxLength: boxes > 1 ? boxes : maxLength,
+                                   rect: rect, rectInWebView: rectInWebView, isUserInitiated: user, receivedAt: Date())
+        tab.lastCodeFocus = focus
+        delegate?.passwordAutofill(self, codeFieldFocused: focus)
+    }
+
+    private func receiveFocus(_ body: [String: Any], frame: PasswordFrame, webView: WKWebView) {
+        guard let fieldID = body["fieldID"] as? String, fieldID.count <= 16,
+              let field = (body["field"] as? String).flatMap(FieldKind.init(rawValue:)),
+              let form = (body["form"] as? String).flatMap(FormKind.init(rawValue:)) else { return }
+        let (rect, rectInWebView) = rects(body, frame: frame, webView: webView)
         let matches: [LoginMatch]
         do {
             matches = try store.logins(for: frame.origin)
@@ -405,6 +477,8 @@ public final class PasswordAutofill {
             requirements: PasswordRequirements(minLength: intValue("minLength"), maxLength: intValue("maxLength"), rules: rules),
             isUserInitiated: body["userInitiated"] as? Bool == true, receivedAt: Date())
         tab.lastFocus = focus
+        // Focus moved from a code field to a login field.
+        tab.lastCodeFocus = nil
         delegate?.passwordAutofill(self, loginFieldFocused: focus)
     }
 

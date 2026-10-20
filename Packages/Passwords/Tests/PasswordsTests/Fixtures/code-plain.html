@@ -1,0 +1,37 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Verify</title></head>
+<body>
+<h1>Enter your code</h1>
+<!-- A plain one-time-code field, controlled like a React input. -->
+<form id="verify" onsubmit="event.preventDefault()">
+  <input id="otp" name="otp" autocomplete="one-time-code" inputmode="numeric" maxlength="6" style="width:200px;height:28px">
+  <input id="other" name="nickname" type="text" style="width:200px;height:28px">
+  <button type="submit">Verify</button>
+</form>
+<script>
+  // A controlled input as React keeps one: the value lives in state, an instance value setter
+  // (React's value tracker) remembers what the page last wrote, an input event whose value
+  // differs from that updates state, and every render puts state back into the field. A value
+  // set without an input event the page can see is reverted at the next render.
+  window.events = [];
+  function controlled(el, onValue) {
+    const desc = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value");
+    let tracked = desc.get.call(el);
+    let state = tracked;
+    Object.defineProperty(el, "value", { configurable: true,
+      get() { return desc.get.call(this); },
+      set(v) { tracked = String(v); desc.set.call(this, v); } });
+    for (const type of ["keydown", "keyup", "change"]) el.addEventListener(type, () => window.events.push(el.id + ":" + type));
+    el.addEventListener("input", (e) => {
+      window.events.push(el.id + ":input:" + (e.inputType || "") + ":" + (e.data || ""));
+      const now = desc.get.call(el);
+      if (now === tracked) return;
+      state = now;
+      tracked = now;
+      onValue(state);
+    });
+    setInterval(() => { if (desc.get.call(el) !== state) el.value = state; }, 30);
+  }
+</script>
+<script>window.state = { otp: "" }; controlled(document.getElementById("otp"), (v) => { window.state.otp = v; });</script>
+</body></html>

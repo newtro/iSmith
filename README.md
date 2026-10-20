@@ -82,7 +82,8 @@ iSmith's own per-tab browser tools.
   `iSmith.app/Contents/Library/LoginItems/` and started by launchd once Settings ▸ Codes turns it
   on (its plist is written into `Contents/Library/LaunchAgents/` at build time). It holds the relay
   stream and the Mac's key and token, and shows a notification per code. In the app,
-  `CodesClient.swift` (XPC) and `CodesSettings.swift` (Settings ▸ Codes).
+  `CodesClient.swift` (XPC), `CodesSettings.swift` (Settings ▸ Codes) and `CodeFill.swift` (the
+  code popover in one-time-code fields).
 - `Packages/Routing/`: link routing, with no UI: URL patterns, ordered rules, the space last used
   for shared-address sites (Outlook, Teams, Gmail, Etsy), the Default space, Safe Links
   unwrapping and learned rules, saved in `routing.json`.
@@ -232,7 +233,12 @@ seed or runs longer.
   and scan the QR code with 2FASync on the Android phone; check the two 6-digit numbers match.
   Verification codes texted to the phone then show as a notification ("123456 from chase.com",
   with Copy), even when iSmith is closed. Copying to the clipboard as codes arrive is off by
-  default; copies are cleared after 90 seconds.
+  default; copies are cleared after 90 seconds. In a page's verification-code field (including
+  six separate digit boxes) iSmith offers the code: "Fill 123456 from Chase", with "· for
+  chase.com" when the text names the site. Click it, press Return, or press ⌘\\; nothing is
+  filled until you do. A code that arrives while the field is focused shows up then. Codes bound
+  to a site are only offered on that site; others only in their first 2 minutes. Turn it off with
+  "Offer codes in iSmith's code fields".
 - **Agent panel** (needs Codex: `npm install -g @openai/codex`, then `codex login`): the toolbar's
   three buttons dock it on the right, at the bottom or hide it (per window; ⌥⌘A shows or hides
   it). Ask about the space's tabs; the agent reads pages and clicks and types in them with real

@@ -63,7 +63,7 @@
   const MAX_VALUE = 4096;
   const TEXT_TYPES = new Set(["text", "email", "tel", "username", "url", ""]);
   const USERNAME_HINT = /user|e-?mail|login|logon|account|identifier|loginfmt|signin|phone|mobile|member|customer/i;
-  const NOT_USERNAME = /search|query|^q$|captcha|otp|one-?time|2fa|totp|verification|coupon|promo|zip|postal|city|address|first.?name|last.?name|company/i;
+  const NOT_USERNAME = /search|query|^q$|captcha|otp|one-?time|2fa|totp|mfa|passcode|verification|security.?code|sms.?code|auth.?code|coupon|promo|zip|postal|city|address|first.?name|last.?name|company/i;
   const NEW_PASSWORD_HINT = /new|create|confirm|repeat|retype|again|verify|register|signup|sign-up/i;
   const CURRENT_PASSWORD_HINT = /current|old|existing/i;
   const SUBMIT_TEXT = /\b(log ?in|log ?on|sign ?in|sign ?on|next|continue|submit|weiter|suivant|sign ?up|register|create|join|save|change|update|reset|verify|done|go|ok|enter)\b/i;
@@ -157,10 +157,12 @@
   // be the field, so a field narrowed to a sliver or half covered doesn't count. Otherwise (the
   // field the user just clicked) one of three points is enough, allowing for icons drawn over
   // its ends.
-  const isVisibleToUser = (el, strict) => {
+  // `clearText`: the field's own text may be invisible (one-time-code widgets that draw their
+  // digits in boxes under a transparent input). Never for a field a password goes into.
+  const isVisibleToUser = (el, strict, clearText) => {
     if (!isRendered(el)) return false;
     const style = getComputedStyle(el);
-    if (alphaOf(style.webkitTextFillColor || style.color) < 0.3) return false;
+    if (!clearText && alphaOf(style.webkitTextFillColor || style.color) < 0.3) return false;
     const r = el.getBoundingClientRect();
     const y = r.top + r.height / 2;
     if (strict) return hits(el, r.left + r.width / 2, y) && hits(el, r.left + r.width / 4, y);
@@ -170,11 +172,11 @@
   // A field below the fold (or scrolled away in its container) is brought into view before it's
   // judged, as the user would scroll to it.
   const scrollIntoView = Element.prototype.scrollIntoView;
-  const visibleOrScrolled = (el, strict) => {
-    if (isVisibleToUser(el, strict)) return true;
+  const visibleOrScrolled = (el, strict, clearText) => {
+    if (isVisibleToUser(el, strict, clearText)) return true;
     if (!isRendered(el)) return false;
     scrollIntoView.call(el, { block: "nearest", inline: "nearest" });
-    return isVisibleToUser(el, strict);
+    return isVisibleToUser(el, strict, clearText);
   };
 
   // Forms and documents have named properties that override built-ins (`<input name="elements">`
@@ -279,6 +281,149 @@
     return "";
   };
 
+  // MARK: One-time-code fields
+
+  // A field for an SMS or authenticator code: `autocomplete="one-time-code"`, or a text, tel or
+  // number field whose name, id, placeholder, aria-label, title or label says so (in a few
+  // languages), or an `inputmode="numeric"` field taking 4 to 10 characters, or a row of 4 to 8
+  // single-character boxes (one code split over several inputs). Never a password, search or
+  // hidden field, and never anything in a payment form or named like a zip code, quantity, card
+  // or coupon field. The app only offers a code here when one has just arrived for this page, so
+  // a field wrongly taken for a code field costs little, and nothing is ever filled unasked.
+  const CODE_TYPES = new Set(["text", "tel", "number", ""]);
+  // camelCase, snake_case and kebab-case become words: "otpCode" -> "otp code".
+  const words = (s) => String(s || "").replace(/([a-z])([A-Z])/g, "$1 $2").replace(/[_\-.:\[\]()]+/g, " ").toLowerCase();
+  const CODE_HINT = new RegExp([
+    "\\b(otp|otc|totp|hotp|2fa|mfa|tfa|passcode|one ?time( ?(pass ?word|pass ?code|code|pin))?)\\b",
+    "\\btwo ?(factor|step)\\b", "\\bmulti ?factor\\b",
+    "\\b(verification|verify|confirmation|security|sms|text|login|sign ?in|auth|authentication|access) ?code\\b",
+    "\\benter (the |your |a )?(\\d+ ?digit )?code\\b", "\\bcode (we |that was )?(sent|texted)\\b",
+    // es, pt, fr, de, it, nl, pl, sv
+    "c[oó]digo( de)? (verifica[cç]i?[oó]n?|seguran[cç]a|seguridad|confirma[cç][aã]o|confirmaci[oó]n|acceso)",
+    "code (de )?(v[ée]rification|s[ée]curit[ée]|confirmation)",
+    "(best[aä]tigungs|verifizierungs|sicherheits|einmal|anmelde)code", "codice (di )?(verifica|sicurezza)",
+    "verificatiecode|beveiligingscode", "kod (weryfikacyjny|sms)", "(verifierings|engångs)kod",
+  ].join("|"), "i");
+  // CJK and Cyrillic don't have \b word edges.
+  const CODE_HINT_SCRIPT = /認証コード|確認コード|ワンタイム|验证码|驗證碼|校验码|인증 ?(번호|코드)|код (подтверждения|из смс)|одноразов/;
+  // Named like something else: these never count as code fields by heuristics.
+  const NOT_CODE = /\b(zip|postal|post ?code|postcode|plz|cep|area ?code|country ?code|dial ?code|promo|coupon|voucher|discount|gift|referral|invite|invitation|quantity|qty|amount|price|search|query|captcha|card|cc|cvv|cvc|csc|cid|exp|expiry|expiration|month|year|birth|dob|age|ssn|iban|routing)\b/;
+  const NOT_CODE_AUTOCOMPLETE = /^(cc-|postal-code|bday|tel|transaction-|street|address|country|email|username|current-password|new-password|name|given-name|family-name|organization)/;
+  // Fields like these are login identifiers (a phone number, a customer number): the bare
+  // inputmode-and-length rule never takes them for a code field.
+  const IDENTIFIER = /\b(phone|mobile|cell|tel|telephone|customer|member|account|user|username|login|email|id|card)\b/;
+  const CODE_MAX = 12;
+
+  const labelsOf = getter(HTMLInputElement.prototype, "labels");
+  const getElementById = Document.prototype.getElementById;
+  const textOf = (node) => (node && node.textContent ? node.textContent.replace(/\s+/g, " ").trim().slice(0, 200) : "");
+  const labelText = (el) => {
+    const parts = [];
+    const labels = labelsOf.call(el);
+    if (labels) for (const label of Array.from(labels).slice(0, 3)) parts.push(textOf(label));
+    for (const id of (el.getAttribute("aria-labelledby") || "").split(/\s+/).filter(Boolean).slice(0, 3)) {
+      parts.push(textOf(getElementById.call(document, id)));
+    }
+    return parts.join(" ");
+  };
+  const codeText = (el) => words([attrText(el), el.getAttribute("title"), labelText(el)].filter(Boolean).join(" "));
+
+  // A payment form: card fields anywhere in the scope turn the heuristics off there ("security
+  // code" next to a card number is the card's CVC).
+  const isPaymentScope = (scope) => scopeInputs(scope).some((el) =>
+    autocompleteTokens(el).some((t) => t.startsWith("cc-")) ||
+    /\b(card ?(number|num|no)|cc ?(number|num)|credit ?card|cvv|cvc|csc)\b/.test(words([el.name, el.id].join(" "))));
+
+  const inSearch = (el) => !!closest.call(el, "[role=search], [role=searchbox]");
+
+  const codeShaped = (el) => isInput(el) && CODE_TYPES.has(el.type) && !el.readOnly && !el.disabled && !isPasswordField(el);
+
+  // Names that rule a field out, unless the page said one-time-code itself.
+  const ruledOut = (el) => {
+    const ac = autocompleteTokens(el).filter(Boolean);
+    if (ac.some((t) => NOT_CODE_AUTOCOMPLETE.test(t))) return true;
+    return NOT_CODE.test(codeText(el));
+  };
+
+  const isSingleCodeField = (el, scope) => {
+    if (!codeShaped(el) || inSearch(el)) return false;
+    const ac = autocompleteTokens(el);
+    if (ac.includes("one-time-code")) return !ac.some((t) => t.startsWith("cc-"));
+    const max = el.maxLength;
+    if (max > 0 && (max < 4 || max > CODE_MAX)) return false;
+    if (ruledOut(el) || isPaymentScope(scope)) return false;
+    const text = codeText(el);
+    if (CODE_HINT.test(text) || CODE_HINT_SCRIPT.test(text)) return true;
+    if ((el.getAttribute("inputmode") || "").toLowerCase() !== "numeric" || max < 4 || max > 10) return false;
+    if (IDENTIFIER.test(text) || ac.includes("username") || ac.includes("tel")) return false;
+    // The username of a login form is not a code field.
+    const a = analyze(scope);
+    return !(a.username === el && (a.password || a.kind === "usernameOnly"));
+  };
+
+  // One character per box, side by side.
+  const isBox = (el) => codeShaped(el) && el.maxLength === 1 && isRendered(el);
+  const splitBoxes = (el, scope) => {
+    if (!isBox(el) || inSearch(el)) return null;
+    const inputs = scopeInputs(scope).filter((x) => x.type !== "hidden" && isRendered(x));
+    const i = inputs.indexOf(el);
+    if (i < 0) return null;
+    let a = i, b = i;
+    while (a > 0 && isBox(inputs[a - 1])) a--;
+    while (b < inputs.length - 1 && isBox(inputs[b + 1])) b++;
+    const boxes = inputs.slice(a, b + 1);
+    if (boxes.length < 4 || boxes.length > 8) return null;
+    if (isPaymentScope(scope) || boxes.some((x) => ruledOut(x) && !autocompleteTokens(x).includes("one-time-code"))) return null;
+    // On one line, left to right (a grid of 1-character cells is something else).
+    const rects = boxes.map((x) => x.getBoundingClientRect());
+    for (let k = 1; k < rects.length; k++) {
+      if (Math.abs(rects[k].top - rects[0].top) > rects[0].height / 2 || rects[k].left <= rects[k - 1].left) return null;
+    }
+    return boxes;
+  };
+
+  // The code field `el` belongs to: its boxes (one for an ordinary field) and the longest code it
+  // takes, or null.
+  const codeFieldOf = (el) => {
+    if (!isInput(el)) return null;
+    const scope = scopeOf(el);
+    const boxes = splitBoxes(el, scope);
+    if (boxes) return { boxes, maxLength: boxes.length, scope };
+    if (isSingleCodeField(el, scope)) return { boxes: [el], maxLength: el.maxLength > 0 ? el.maxLength : null, scope };
+    return null;
+  };
+
+  // The element that has focus, inside shadow roots too.
+  const deepActive = () => {
+    let active = document.activeElement;
+    while (active && active.shadowRoot && active.shadowRoot.activeElement) active = active.shadowRoot.activeElement;
+    return active;
+  };
+
+  // The code field last reported as focused, until focus leaves it.
+  let focusedCode = null;
+  // While a code is being typed into its boxes, the focus moving along them reports nothing.
+  let fillingCode = false;
+  const codeBlurred = () => {
+    if (!focusedCode) return;
+    const id = focusedCode.id;
+    focusedCode = null;
+    post({ type: "codeBlur", fieldID: id });
+  };
+  document.addEventListener("focusout", () => {
+    if (!focusedCode) return;
+    setTimeout(() => {
+      // The window losing focus (a click in the app's popover) leaves the field the active
+      // element: that isn't the field losing focus.
+      if (!focusedCode) return;
+      const active = deepActive();
+      if (active && focusedCode.boxes.some((ref) => ref.deref() === active)) return;
+      codeBlurred();
+    }, 0);
+  }, true);
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") codeBlurred(); }, true);
+  window.addEventListener("pagehide", codeBlurred, true);
+
   // MARK: Focus
 
   // A focus counts as the user's when it comes from their click on the field, or from Tab just
@@ -299,16 +444,40 @@
   const onFocus = (event) => {
     if (!event.isTrusted) return;
     const el = event.composedPath ? event.composedPath()[0] : event.target;
-    if (!isInput(el) || !isVisibleToUser(el)) return;
+    if (!isInput(el)) return;
+    const visible = isVisibleToUser(el);
+    if (!visible && !isVisibleToUser(el, false, true)) return;
+    const now = Date.now();
+    const user = event.type === "mousedown" ||
+      (lastPointer.el === el && now - lastPointer.at < 1000) || now - lastTab < 500;
+    if (fillingCode) return;
+    const code = codeFieldOf(el);
+    if (code) {
+      // A split field is one field, named by its first box: moving between boxes is no new focus.
+      const id = fieldID(code.boxes[0]);
+      if (lastFocus.id === id && now - lastFocus.at < 400 && (lastFocus.user || !user)) return;
+      lastFocus = { id, at: now, user };
+      scopeAtFocus.set(code.boxes[0], code.scope);
+      focusedCode = { id, boxes: code.boxes.map((b) => new WeakRef(b)) };
+      const first = code.boxes[0].getBoundingClientRect(), last = code.boxes[code.boxes.length - 1].getBoundingClientRect();
+      post({
+        type: "codeFocus",
+        fieldID: id,
+        boxes: code.boxes.length,
+        maxLength: code.maxLength,
+        userInitiated: user,
+        rect: { x: first.left, y: first.top, width: last.right - first.left, height: Math.max(first.height, last.height) },
+        mainFrame: window === window.top,
+      });
+      return;
+    }
+    if (!visible) return;
     const scope = scopeOf(el);
     const a = analyze(scope);
     if (!a.kind) return;
     const role = fieldRole(el, a);
     if (!role) return;
     const id = fieldID(el);
-    const now = Date.now();
-    const user = event.type === "mousedown" ||
-      (lastPointer.el === el && now - lastPointer.at < 1000) || now - lastTab < 500;
     if (lastFocus.id === id && now - lastFocus.at < 400 && (lastFocus.user || !user)) return;
     lastFocus = { id, at: now, user };
     scopeAtFocus.set(el, scope);
@@ -438,13 +607,64 @@
 
   // Sets a value the way typing would be seen by frameworks: through the element's own value
   // setter (this world's, which page scripts can't patch), then input and change events.
+  const valueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set;
   const setValue = (el, value) => {
     el.focus();
-    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set;
-    setter.call(el, value);
+    valueSetter.call(el, value);
     userValues.set(el, el.value);
     el.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
     el.dispatchEvent(new Event("change", { bubbles: true }));
+  };
+
+  // A code goes in as typing would: a key down, the value through the element's own setter, an
+  // `insertText` input event carrying the text, a key up, then change. Controlled inputs (React,
+  // Vue) read the new value from the input event; split-box widgets that move focus on input or
+  // keydown see each character arrive.
+  const key = (el, type, ch) => el.dispatchEvent(new KeyboardEvent(type, {
+    key: ch, code: /\d/.test(ch) ? "Digit" + ch : "Key" + ch.toUpperCase(), bubbles: true, cancelable: true, composed: true,
+  }));
+  const typeText = (el, text) => {
+    el.focus();
+    key(el, "keydown", text.slice(-1));
+    valueSetter.call(el, text);
+    el.dispatchEvent(new InputEvent("input", { inputType: "insertText", data: text, bubbles: true, composed: true }));
+    key(el, "keyup", text.slice(-1));
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+  };
+
+  // Box by box, with a turn of the event loop between boxes: frameworks that keep the code in
+  // state (React's `setOtp([...otp])`) re-render after each box, so the next box's handler
+  // sees the digits before it. Checked again before each box, and right after the last one
+  // (before the page can submit on the last digit and navigate): a code only counts as filled
+  // when every box (or the field) took it, ignoring spaces and case a field may add.
+  const nextTurn = () => new Promise((resolve) => setTimeout(resolve, 16));
+  const fillCode = async (el, request) => {
+    const code = String(request.code);
+    if (!/^[A-Za-z0-9]{3,12}$/.test(code)) return "badCode";
+    const field = codeFieldOf(el);
+    if (!field || field.boxes[0] !== el || scopeAtFocus.get(el) !== field.scope) return "noField";
+    const boxes = field.boxes;
+    if (!boxes.every((b) => visibleOrScrolled(b, false, true))) return "noField";
+    if (boxes.length > 1 ? code.length !== boxes.length : el.maxLength > 0 && el.maxLength < code.length) {
+      return "lengthMismatch";
+    }
+    const parts = boxes.length > 1 ? Array.from(code) : [code];
+    // Focus moving along the boxes (ours, or the page's own auto-advance) is no new focus.
+    fillingCode = true;
+    try {
+      for (let i = 0; i < boxes.length; i++) {
+        if (i > 0) {
+          await nextTurn();
+          if (!boxes[i].isConnected || !isRendered(boxes[i])) return "noField";
+        }
+        typeText(boxes[i], parts[i]);
+      }
+    } finally {
+      fillingCode = false;
+    }
+    const same = (a, b) => a.replace(/\s+/g, "").toLowerCase() === b.toLowerCase();
+    // A box the page already replaced (the next step) took its character.
+    return boxes.every((b, i) => !b.isConnected || same(b.value, parts[i])) ? "filled" : "notAccepted";
   };
 
   const normalizedOrigin = () => {
@@ -458,7 +678,8 @@
       if (normalizedOrigin() !== request.origin) return "originMismatch";
       const ref = fieldsByID.get(request.fieldID);
       const el = ref && ref.deref();
-      if (!el || !el.isConnected || !isVisibleToUser(el, false)) return "noField";
+      if (!el || !el.isConnected || !isVisibleToUser(el, false, request.mode === "code")) return "noField";
+      if (request.mode === "code") return fillCode(el, request);
       const scope = scopeOf(el);
       if (scopeAtFocus.get(el) !== scope) return "noField";
       const a = analyze(scope);

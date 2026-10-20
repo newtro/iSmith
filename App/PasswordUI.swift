@@ -273,8 +273,18 @@ extension BrowserState {
 
 // MARK: - Autofill popover
 
+/// What the popover's keyboard handling needs of the list it shows (logins or codes).
 @MainActor
-final class AutofillPopoverModel: ObservableObject {
+protocol PopoverList: AnyObject {
+    var highlighted: Int? { get }
+    /// False for `AutofillPopoverModel.inputDelay` after the popover appeared.
+    var acceptsInput: Bool { get }
+    func move(_ step: Int)
+    func pick(_ index: Int)
+}
+
+@MainActor
+final class AutofillPopoverModel: ObservableObject, PopoverList {
     struct Row: Identifiable {
         enum Kind {
             case login(LoginSummary)
@@ -314,6 +324,8 @@ final class AutofillPopoverModel: ObservableObject {
     }
 
     var acceptsInput: Bool { Date().timeIntervalSince(shownAt) >= Self.inputDelay }
+
+    func pick(_ index: Int) { choose(index) }
 
     func move(_ step: Int) {
         guard !rows.isEmpty else { return }
@@ -408,6 +420,12 @@ final class PasswordUI: NSObject, PasswordAutofillDelegate, NSPopoverDelegate {
     weak var browser: BrowserState?
     private(set) var popover: NSPopover?
     private(set) var model: AutofillPopoverModel?
+    /// The one-time-code popover's model, while that one is up.
+    private(set) var codeModel: CodePopoverModel?
+    /// The list the keys go to (`model` or `codeModel`).
+    private weak var list: PopoverList?
+    /// Codes texted to the phone, offered in one-time-code fields.
+    let codeFill = CodeFill()
     private weak var anchor: WKWebView?
     /// An empty view over the field, the popover's positioning view.
     private var anchorView: NSView?
@@ -418,6 +436,8 @@ final class PasswordUI: NSObject, PasswordAutofillDelegate, NSPopoverDelegate {
     // MARK: Delegate
 
     func passwordAutofill(_ autofill: PasswordAutofill, loginFieldFocused focus: LoginFieldFocus) {
+        // Focus moved from a code field to a login field: its code popover goes.
+        if let webView = focus.frame.webView { codeFill.loginFocused(in: webView) }
         // A page calling focus() by itself never opens the popover; ⌘\ can, on the user's request.
         guard focus.isUserInitiated, let webView = focus.frame.webView else { return }
         if let model, model.focus.fieldID == focus.fieldID, model.focus.frame.documentID == focus.frame.documentID,
@@ -427,6 +447,15 @@ final class PasswordUI: NSObject, PasswordAutofillDelegate, NSPopoverDelegate {
 
     func passwordAutofill(_ autofill: PasswordAutofill, captured capture: PasswordCapture) {
         browser?.offerToSave(capture)
+    }
+
+    func passwordAutofill(_ autofill: PasswordAutofill, codeFieldFocused focus: CodeFieldFocus) {
+        codeFill.ui = self
+        codeFill.focused(focus)
+    }
+
+    func passwordAutofill(_ autofill: PasswordAutofill, codeFieldBlurred fieldID: String, in frame: PasswordFrame) {
+        codeFill.blurred(fieldID, documentID: frame.documentID)
     }
 
     // MARK: Popover
@@ -453,6 +482,24 @@ final class PasswordUI: NSObject, PasswordAutofillDelegate, NSPopoverDelegate {
     }
 
     private func present(_ model: AutofillPopoverModel, in webView: WKWebView, at rect: NSRect) {
+        present(NSHostingController(rootView: AutofillPopoverView(model: model)), list: model, in: webView, at: rect)
+        self.model = model
+    }
+
+    /// Shows the code popover for a focused one-time-code field.
+    func presentCodes(_ model: CodePopoverModel, in webView: WKWebView) {
+        // Never at the pointer: a code popover that opens by itself mustn't land under it.
+        present(NSHostingController(rootView: CodePopoverView(model: model)), list: model, in: webView,
+                at: anchorRect(rectInWebView: model.focus.rectInWebView, in: webView, atPointer: false))
+        codeModel = model
+    }
+
+    func isShowingCodes(fieldID: String, documentID: String) -> Bool {
+        guard popover?.isShown == true, let codeModel else { return false }
+        return codeModel.focus.fieldID == fieldID && codeModel.focus.frame.documentID == documentID
+    }
+
+    private func present<Content: View>(_ content: NSHostingController<Content>, list: PopoverList, in webView: WKWebView, at rect: NSRect) {
         close()
         let popover = NSPopover()
         popover.behavior = .transient
@@ -460,12 +507,11 @@ final class PasswordUI: NSObject, PasswordAutofillDelegate, NSPopoverDelegate {
         popover.delegate = self
         // Sized before it's shown: a popover that shrinks after appearing keeps its bottom edge
         // and so drifts away from the field.
-        let content = NSHostingController(rootView: AutofillPopoverView(model: model))
         content.sizingOptions = [.preferredContentSize]
         popover.contentViewController = content
         popover.contentSize = content.view.fittingSize
         self.popover = popover
-        self.model = model
+        self.list = list
         anchor = webView
         // Positioned against a plain view over the field, removed when the popover closes.
         let host = webView.superview ?? webView
@@ -481,29 +527,38 @@ final class PasswordUI: NSObject, PasswordAutofillDelegate, NSPopoverDelegate {
     /// The field's box in the web view's coordinates, or a point at the mouse for an iframe
     /// (whose offset in the page isn't known), clamped to the web view.
     func anchorRect(for focus: LoginFieldFocus, in webView: WKWebView) -> NSRect {
+        anchorRect(rectInWebView: focus.rectInWebView, in: webView)
+    }
+
+    func anchorRect(rectInWebView: CGRect?, in webView: WKWebView, atPointer: Bool = true) -> NSRect {
         let bounds = webView.bounds
-        if let r = focus.rectInWebView, r.width > 0, r.height > 0 {
+        if let r = rectInWebView, r.width > 0, r.height > 0 {
             // rectInWebView is top-left based.
             var rect = webView.isFlipped ? r : NSRect(x: r.minX, y: bounds.height - r.maxY, width: r.width, height: r.height)
             rect = rect.intersection(bounds)
             if !rect.isNull, !rect.isEmpty { return rect }
         }
-        if let window = webView.window {
+        if atPointer, let window = webView.window {
             let point = webView.convert(window.mouseLocationOutsideOfEventStream, from: nil)
             if bounds.contains(point) { return NSRect(x: point.x - 1, y: point.y - 1, width: 2, height: 2) }
         }
         return NSRect(x: bounds.midX - 1, y: webView.isFlipped ? bounds.minY : bounds.maxY - 2, width: 2, height: 2)
     }
 
-    /// Keys while the popover is up: ↑/↓ move, Return fills the highlighted login, Escape closes.
+    /// Keys while the popover is up: ↑/↓ move, Return fills the highlighted row, Escape closes.
     /// Any other key goes to the page and closes the popover; so does scrolling.
     private func handle(_ event: NSEvent) -> NSEvent? {
-        guard let popover, popover.isShown, let model, let webView = anchor, event.window === webView.window else { return event }
+        guard let popover, popover.isShown, let model = list, let webView = anchor, event.window === webView.window else { return event }
         if event.type == .scrollWheel {
             close()
             return event
         }
         let flags = event.modifierFlags.intersection([.command, .option, .control, .shift])
+        // ⌘\ over the code popover fills the highlighted code (the menu would see a closed one).
+        if Int(event.keyCode) == 42, flags == .command, codeModel != nil {
+            model.pick(model.highlighted ?? 0)
+            return nil
+        }
         switch Int(event.keyCode) {
         case 125 where flags.isEmpty: // ↓
             model.move(1)
@@ -513,7 +568,7 @@ final class PasswordUI: NSObject, PasswordAutofillDelegate, NSPopoverDelegate {
             return nil
         case 36, 76: // Return, Enter
             if flags.isEmpty, let index = model.highlighted {
-                if model.acceptsInput { choose(index) }
+                if model.acceptsInput { model.pick(index) }
                 return nil
             }
             close()
@@ -533,6 +588,8 @@ final class PasswordUI: NSObject, PasswordAutofillDelegate, NSPopoverDelegate {
         let open = popover
         popover = nil
         model = nil
+        codeModel = nil
+        list = nil
         anchor = nil
         open?.close()
         anchorView?.removeFromSuperview()
@@ -546,6 +603,7 @@ final class PasswordUI: NSObject, PasswordAutofillDelegate, NSPopoverDelegate {
     /// The page navigated, or its web view left the window (tab switch, closed): close.
     func webViewChanged(_ webView: WKWebView) {
         if anchor === webView { close() }
+        codeFill.webViewChanged(webView)
     }
 
     // MARK: Filling (only ever from the user's click, Return or ⌘\)
@@ -576,6 +634,16 @@ final class PasswordUI: NSObject, PasswordAutofillDelegate, NSPopoverDelegate {
     /// ⌘\: fills the best exact-origin login into the field the user last clicked, or opens the
     /// popover when there's a choice to make.
     func fillShortcut(in webView: WKWebView?) {
+        // A one-time-code field focused after any login field: fill a code there.
+        // Not when the page moved focus to a code field after the user clicked a login field: the
+        // ⌘\ is for that login.
+        if let webView, let autofill = browser?.passwords, let code = autofill.lastCodeFocus(in: webView),
+           code.receivedAt >= autofill.lastFocus(in: webView)?.receivedAt ?? .distantPast,
+           code.isUserInitiated || autofill.lastFocus(in: webView)?.isUserInitiated != true {
+            codeFill.ui = self
+            codeFill.shortcut(code, in: webView)
+            return
+        }
         guard let webView, let autofill = browser?.passwords, let focus = autofill.lastFocus(in: webView) else {
             NSSound.beep()
             return
@@ -609,7 +677,7 @@ final class PasswordUI: NSObject, PasswordAutofillDelegate, NSPopoverDelegate {
         }
     }
 
-    private func refocus(_ webView: WKWebView) {
+    func refocus(_ webView: WKWebView) {
         if let window = webView.window, window.firstResponder !== webView { window.makeFirstResponder(webView) }
     }
 
