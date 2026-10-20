@@ -37,8 +37,9 @@ final class AgentDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         let bundleID = Bundle.main.bundleIdentifier ?? ""
         guard let identity = CodesIdentity(agentBundleID: bundleID) else {
-            agentLog.fault("unexpected bundle id \(bundleID, privacy: .public); exiting")
-            exit(1)
+            // Exiting would only have launchd's KeepAlive start it again in a loop: stay idle.
+            agentLog.fault("unexpected bundle id \(bundleID, privacy: .public); not starting")
+            return
         }
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         // Its own folder, named by its bundle id: the Debug and Release agents never share one.

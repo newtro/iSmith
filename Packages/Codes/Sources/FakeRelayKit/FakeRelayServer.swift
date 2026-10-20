@@ -48,6 +48,15 @@ public final class FakeRelayServer: @unchecked Sendable {
     }
     private var _answersPings = true
 
+    /// When set, the stream upgrade is answered with this status (403, 500…) instead of 101.
+    public var refuseUpgrades: Int? {
+        get { queue.sync { _refuseUpgrades } }
+        set { queue.sync { _refuseUpgrades = newValue } }
+    }
+    private var _refuseUpgrades: Int?
+    public var refusedUpgrades: Int { queue.sync { _refusedUpgrades } }
+    private var _refusedUpgrades = 0
+
     /// The relay pings the client this often (PROTOCOL.md: 25 s).
     public var pingInterval: TimeInterval = 25
 
@@ -139,7 +148,7 @@ public final class FakeRelayServer: @unchecked Sendable {
     private func reply(_ connection: NWConnection, _ status: Int, _ json: Any? = nil) {
         let body = json.flatMap { try? JSONSerialization.data(withJSONObject: $0) } ?? Data()
         let reason = [101: "Switching Protocols", 200: "OK", 201: "Created", 202: "Accepted", 204: "No Content",
-                      400: "Bad Request", 401: "Unauthorized", 404: "Not Found", 409: "Conflict"][status] ?? "Status"
+                      400: "Bad Request", 401: "Unauthorized", 403: "Forbidden", 404: "Not Found", 409: "Conflict"][status] ?? "Status"
         var head = "HTTP/1.1 \(status) \(reason)\r\nConnection: close\r\n"
         if status != 204 { head += "Content-Type: application/json\r\nContent-Length: \(body.count)\r\n" }
         head += "\r\n"
@@ -245,6 +254,10 @@ public final class FakeRelayServer: @unchecked Sendable {
             }
             guard let who = lookup(bearer(request)), who.isMac, pairings[who.id]?.state == "active" else {
                 return error(connection, 401, "unauthorized")
+            }
+            if let status = _refuseUpgrades {
+                _refusedUpgrades += 1
+                return error(connection, status, "refused")
             }
             upgrade(connection, key: key, pairingID: who.id)
 

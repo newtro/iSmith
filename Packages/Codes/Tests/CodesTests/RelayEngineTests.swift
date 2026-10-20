@@ -10,7 +10,9 @@ import XCTest
 final class RelayEngineTests: XCTestCase {
     final class Sink: CodeSink {
         var delivered: [CodeMessage] = []
+        var forgotten = 0
         func deliver(_ message: CodeMessage, settings: CodesSettings) async { delivered.append(message) }
+        func pairingForgotten() { forgotten += 1 }
     }
 
     var relay: FakeRelayServer!
@@ -259,6 +261,55 @@ final class RelayEngineTests: XCTestCase {
         other.stop()
         let back = await eventually { self.relay.streamConnections >= 3 && self.engine.connected }
         XCTAssertTrue(back, "it reconnects once the backoff has passed")
+    }
+
+    /// A 403 at the upgrade is a passing refusal, not a revocation: the pairing stays and the
+    /// stream keeps trying with backoff.
+    func testForbiddenUpgradeIsRetriedNotRevoked() async throws {
+        let phone = try await pair()
+        self.relay.refuseUpgrades = 403
+        self.relay.dropStreams()
+        let retried = await eventually { self.relay.refusedUpgrades >= 2 }
+        XCTAssertTrue(retried)
+        XCTAssertTrue(self.engine.isPaired)
+        XCTAssertNil(self.engine.status().problem)
+        self.relay.refuseUpgrades = nil
+        let id = try await phone.send(code: "909090")
+        let delivered = await eventually { self.sink.delivered.contains { $0.id == id } }
+        XCTAssertTrue(delivered)
+    }
+
+    /// A message frame whose envelope doesn't decode is acked by id, so it doesn't come back.
+    func testUndecodableEnvelopeIsAcked() async throws {
+        let phone = try await pair()
+        let id = UUID().uuidString.lowercased()
+        self.relay.enqueue(["v": 1, "id": id, "nonce": 5], pairingID: phone.pairingID)
+        let acked = await eventually { self.relay.ackedIDs.contains(id) }
+        XCTAssertTrue(acked)
+        XCTAssertTrue(self.sink.delivered.isEmpty)
+    }
+
+    func testCancelWhileStartingAbandonsThePairing() async throws {
+        let starting = Task { try await self.engine.startPairing() }
+        await Task.yield()
+        await self.engine.cancelPairing()
+        do {
+            _ = try await starting.value
+            // The relay may have answered before the cancel ran; then cancel it now.
+            await self.engine.cancelPairing()
+        } catch let error as CodesEngine.Failure {
+            XCTAssertEqual(error, .cancelled)
+        }
+        let gone = await eventually { self.relay.allPairings.isEmpty }
+        XCTAssertTrue(gone, "the relay forgot the abandoned pairing")
+        XCTAssertEqual(self.engine.pairingState().state, .idle)
+    }
+
+    func testRevocationTellsTheSink() async throws {
+        let phone = try await pair()
+        self.relay.revoke(phone.pairingID)
+        let told = await eventually { self.sink.forgotten == 1 }
+        XCTAssertTrue(told)
     }
 
     func testStreamRefusesABadToken() async throws {

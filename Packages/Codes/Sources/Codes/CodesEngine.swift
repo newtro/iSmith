@@ -6,6 +6,8 @@ import Foundation
 @MainActor
 public protocol CodeSink: AnyObject {
     func deliver(_ message: CodeMessage, settings: CodesSettings) async
+    /// The pairing is gone (unpaired or revoked): drop anything still showing its codes.
+    func pairingForgotten()
 }
 
 /// The paired phone, as the agent remembers it (`pairing.json`, owner-only). Its public key isn't
@@ -56,12 +58,14 @@ public final class CodesEngine {
     public enum Failure: Error, CustomStringConvertible, Equatable {
         case alreadyPaired
         case nothingToConfirm
+        case cancelled
         case keychain(String)
 
         public var description: String {
             switch self {
             case .alreadyPaired: return "This Mac is already paired. Unpair first."
             case .nothingToConfirm: return "There's no pairing waiting to be confirmed."
+            case .cancelled: return "The pairing was cancelled."
             case let .keychain(why): return "The Keychain refused the Mac's key (\(why))."
             }
         }
@@ -88,6 +92,15 @@ public final class CodesEngine {
     private var verifiedPhone: (publicKey: Data, name: String)?
     private var pairingInfo = PairingInfo(state: .idle)
     private var pollTask: Task<Void, Never>?
+    /// Bumped by every start, cancel and confirm: an await that comes back to a different
+    /// generation was overtaken and must not change anything.
+    private var pairingGeneration = 0
+    private var confirming = false
+    /// Bumped whenever a stream is started or stopped: events from an older stream (a late 401
+    /// for a token since replaced) are ignored.
+    private var streamGeneration = 0
+    /// Set when the Keychain couldn't be read just now (locked, a refused prompt): retried.
+    private var keychainRetry: Task<Void, Never>?
 
     var pairingURL: URL { config.dataDir.appendingPathComponent("pairing.json") }
     var seenURL: URL { config.dataDir.appendingPathComponent("seen.json") }
@@ -104,16 +117,24 @@ public final class CodesEngine {
 
     /// Opens the stream when paired.
     public func start() {
+        if record != nil, receiver == nil { loadPairing() }
         guard isPaired else { return }
         startStream()
     }
 
     public func stop() {
+        stopStream()
+        pollTask?.cancel()
+        pollTask = nil
+        keychainRetry?.cancel()
+        keychainRetry = nil
+    }
+
+    private func stopStream() {
+        streamGeneration += 1
         stream?.stop()
         stream = nil
         connected = false
-        pollTask?.cancel()
-        pollTask = nil
     }
 
     // MARK: - Status and settings
@@ -139,13 +160,21 @@ public final class CodesEngine {
 
     /// `POST /v1/pair/start`, then polls `GET /v1/pair` until the phone answers. Returns the QR URI.
     public func startPairing() async throws -> (uri: String, pairingID: String) {
-        guard !isPaired else { throw Failure.alreadyPaired }
+        // Also while a pairing file exists whose keys can't be read: unpair first.
+        guard record == nil else { throw Failure.alreadyPaired }
         await cancelPairing()
+        pairingGeneration += 1
+        let generation = pairingGeneration
         let api = RelayAPI(baseURL: config.relayURL, session: config.session)
         let reply = try await api.pairStart(macName: config.macName)
         guard UUID(uuidString: reply.pairingId) != nil, Base64URL.decode(reply.macToken)?.count == 32,
               Base64URL.decode(reply.registrationToken)?.count == 32
         else { throw RelayError.badReply }
+        guard generation == pairingGeneration, record == nil else {
+            // Cancelled (or another start began) while the relay answered: it forgets this one.
+            try? await api.pairDelete(token: reply.macToken)
+            throw Failure.cancelled
+        }
         let session = PairingSession(relayURL: config.relayURL, reply: reply, macName: config.macName)
         pairing = session
         verifiedPhone = nil
@@ -214,9 +243,12 @@ public final class CodesEngine {
     /// "They match": `POST /v1/pair/confirm`, then keeps the keys, token and phone and opens the
     /// stream.
     public func confirmPairing() async throws {
-        guard let session = pairing, let phone = verifiedPhone, pairingInfo.state == .verify else {
+        guard !confirming, let session = pairing, let phone = verifiedPhone, pairingInfo.state == .verify else {
             throw Failure.nothingToConfirm
         }
+        confirming = true
+        defer { confirming = false }
+        let generation = pairingGeneration
         if config.now() >= session.expiresAt {
             fail(session, "The pairing expired. Start again.")
             throw Failure.nothingToConfirm
@@ -227,6 +259,10 @@ public final class CodesEngine {
         } catch {
             fail(session, "The relay didn't accept the pairing (\(error)). Start again.")
             throw error
+        }
+        guard generation == pairingGeneration, pairing?.pairingID == session.pairingID else {
+            // Cancelled while the relay confirmed; cancel already deleted it there.
+            throw Failure.cancelled
         }
         do {
             try config.secrets.save(session.keyPair.secretKey, as: Self.macKeyName)
@@ -254,6 +290,7 @@ public final class CodesEngine {
 
     /// Stops a pairing in progress; the relay forgets it.
     public func cancelPairing() async {
+        pairingGeneration += 1
         pollTask?.cancel()
         pollTask = nil
         guard let session = pairing else {
@@ -285,9 +322,9 @@ public final class CodesEngine {
     }
 
     private func forgetPairing() {
-        stream?.stop()
-        stream = nil
-        connected = false
+        stopStream()
+        keychainRetry?.cancel()
+        keychainRetry = nil
         try? config.secrets.delete(Self.macKeyName)
         try? config.secrets.delete(Self.macTokenName)
         try? FileManager.default.removeItem(at: pairingURL)
@@ -298,6 +335,7 @@ public final class CodesEngine {
         receiver = nil
         recent.removeAll()
         pairingInfo = PairingInfo(state: .idle)
+        sink?.pairingForgotten()
     }
 
     private func loadPairing() {
@@ -318,14 +356,28 @@ public final class CodesEngine {
                 return
             }
             self.record = record
+            problem = nil
             macKeyPair = pair
             macToken = token
             receiver = Receiver(phonePublicKey: phonePub, macSecretKey: pair.secretKey,
                                 seen: SeenStore(fileURL: seenURL, pairingID: record.pairingId))
         } catch {
-            // Locked or refused just now: keep the record, try again at the next start.
+            // Locked or refused just now: keep the record and try again every 30 seconds.
             self.record = record
-            problem = "The Keychain couldn't be read (\(error))."
+            problem = "The Keychain couldn't be read (\(error)). Trying again."
+            scheduleKeychainRetry()
+        }
+    }
+
+    private func scheduleKeychainRetry() {
+        guard keychainRetry == nil else { return }
+        keychainRetry = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 30_000_000_000)
+            guard let self, !Task.isCancelled else { return }
+            self.keychainRetry = nil
+            guard self.record != nil, self.receiver == nil else { return }
+            self.loadPairing()
+            if self.isPaired { self.startStream() }
         }
     }
 
@@ -333,6 +385,8 @@ public final class CodesEngine {
 
     private func startStream() {
         guard let record, let token = macToken, stream == nil else { return }
+        streamGeneration += 1
+        let generation = streamGeneration
         let api = RelayAPI(baseURL: record.relayURL, session: config.session)
         let stream = RelayStream(url: api.streamURL, token: token, session: config.session, timing: config.streamTiming,
                                  fallbackAck: { [weak self] ids in
@@ -340,15 +394,17 @@ public final class CodesEngine {
                                          try await api.ack(ids: ids, token: token)
                                      } catch RelayError.unauthorized {
                                          // A 401 on any call with the Mac token means the pairing is gone.
-                                         await self?.handle(.revoked)
+                                         await self?.handle(.revoked, generation: generation)
                                      } catch {}
                                  },
-                                 handler: { [weak self] event in await self?.handle(event) })
+                                 handler: { [weak self] event in await self?.handle(event, generation: generation) })
         self.stream = stream
         stream.start()
     }
 
-    func handle(_ event: StreamEvent) async {
+    /// An event from the stream of `generation`; anything from an older stream is ignored.
+    func handle(_ event: StreamEvent, generation: Int) async {
+        guard generation == streamGeneration else { return }
         switch event {
         case .connected:
             connected = true

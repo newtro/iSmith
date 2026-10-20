@@ -116,8 +116,9 @@ public struct Receiver {
         guard let plain = BoxCrypto.open(ciphertext: ct, nonce: nonce, senderPublicKey: phonePublicKey,
                                          recipientSecretKey: macSecretKey)
         else { return .dropped(.boxDidNotOpen) }
-        guard let message = try? JSONDecoder().decode(CodeMessage.self, from: plain), message.isWellFormed
+        guard let decoded = try? JSONDecoder().decode(CodeMessage.self, from: plain), decoded.isWellFormed
         else { return .dropped(.badPlaintext) }
+        let message = decoded.withCheckedDomain()
         guard message.id == envelope.id else { return .dropped(.idMismatch) }
         let nowMs = Int64(now.timeIntervalSince1970 * 1000)
         if message.ts < nowMs - Int64(Self.maxAge * 1000) { return .dropped(.stale) }

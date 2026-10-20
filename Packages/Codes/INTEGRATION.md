@@ -67,7 +67,9 @@ swapped the key) deletes the pairing: "Pairing failed: the phone's key didn't ch
 `pairingState` reports `verify` with the fingerprint ("123 456") and phone name; `confirmPairing`
 (the user's "They match") posts `/v1/pair/confirm`, saves the key and token in the Keychain, writes
 `pairing.json`, clears the seen set and opens the stream. Pairing expires after 10 minutes.
-Starting a pairing while paired is refused (unpair first).
+Starting a pairing while paired, or while a pairing file exists whose keys can't be read, is
+refused (unpair first). A Keychain that can't be read just now (locked) is retried every 30 s.
+Cancel overtakes a start or confirm still waiting on the relay, and confirm isn't re-entrant.
 
 Note: "2fasync" starts with a digit, which RFC 3986 doesn't allow in a URI scheme; Foundation's
 `URL`/`URLComponents` reject the whole string. The Mac only writes it; the test phone splits it by hand.
@@ -86,14 +88,20 @@ reset after 30 s of a stable connection. URLSession answers the relay's pings wi
 so the agent pings every 25 s itself and treats 60 s without a frame or a pong as a dead
 connection. Close 4409 (another stream for the pairing took over) waits at least 30 s.
 `{"type":"revoked"}`, close 4401, a 401 at the upgrade or a 401 on `POST /v1/ack` mean the
-pairing is gone: the agent forgets the keys, token, phone and codes, and Settings says so.
+pairing is gone: the agent forgets the keys, token, phone and codes, and Settings says so. Any
+other refusal (a 403, a 5xx) is retried with backoff. Events are tagged with the stream that
+produced them, so a late 401 from a replaced stream can't wipe a newer pairing. A message frame
+whose envelope doesn't decode is acked by its id. A WebOTP domain that isn't a plain lowercase
+multi-label ASCII host loses the binding (the code stays, offered like an unbound one).
 
 ## Notifications and the clipboard
 
 Title the code ("123456"), subtitle "from chase.com" (the WebOTP domain, else the SMS sender),
-body a one-line snippet of the text; category with a Copy action and
+and no SMS text, since Notification Center keeps what it shows; category with a Copy action and
 `hiddenPreviewsBodyPlaceholder` "Verification code", so with previews hidden or the Mac locked
-only that shows. `userInfo` holds only the message id; Copy looks the code up in memory. Copies
+only that shows. `userInfo` holds only the message id; Copy looks the code up in memory. Each
+notification is removed when its code expires (10 minutes), all of them at the agent's launch
+and when the pairing is unpaired or revoked. Copies
 work like the Passwords package's `SecretPasteboard` (this Mac only, concealed and transient
 types, cleared after 90 s or at quit unless something else was copied). The agent doesn't link
 the Passwords package (it would pull in GRDB and SignInSync), so `CodePasteboard` in

@@ -63,6 +63,12 @@ final class CodesWiringTests: XCTestCase {
         let identity = CodesClient.identity
         let service = SMAppService.agent(plistName: identity.launchAgentPlistName)
         let client = CodesClient.shared
+        // Leave things as they were found: a registration that was there stays, and a Debug agent
+        // that's already paired (someone's real dev pairing) isn't touched at all.
+        let wasRegistered = service.status == .enabled
+        if wasRegistered, let status = try? await client.status(), status.paired {
+            throw XCTSkip("the Debug agent is paired; unpair it in iSmith Dev first")
+        }
         do {
             try service.register()
         } catch {
@@ -74,17 +80,18 @@ final class CodesWiringTests: XCTestCase {
         do {
             try await runEndToEnd(relay: relay, phone: phone, client: client, service: service)
         } catch {
-            await cleanUp(client: client, service: service)
+            await cleanUp(client: client, service: service, unregister: !wasRegistered)
             throw error
         }
-        await cleanUp(client: client, service: service)
+        await cleanUp(client: client, service: service, unregister: !wasRegistered)
     }
 
-    private func cleanUp(client: CodesClient, service: SMAppService) async {
+    private func cleanUp(client: CodesClient, service: SMAppService, unregister: Bool) async {
         try? await client.cancelPairing()
         _ = try? await client.unpair()
         try? await client.setSettings(.defaults)
         client.reset()
+        guard unregister else { return }
         try? await service.unregister()
         XCTAssertNotEqual(service.status, .enabled, "the Debug agent is unregistered afterwards")
     }
@@ -96,7 +103,7 @@ final class CodesWiringTests: XCTestCase {
         XCTAssertTrue(up, "launchd started the agent and XPC reached it")
         var status = try await client.status()
         XCTAssertEqual(status.agentVersion, CodesClient.appVersion)
-        if status.paired { _ = try await client.unpair() }
+        XCTAssertFalse(status.paired)
 
         let (uri, pairingID) = try await client.startPairing()
         XCTAssertTrue(uri.contains("\(relay.host ?? "")%3A\(relay.port ?? 0)"), "the Debug agent was pointed at the fake relay")

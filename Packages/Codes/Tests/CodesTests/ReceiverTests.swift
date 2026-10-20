@@ -92,6 +92,18 @@ final class ReceiverTests: XCTestCase {
         XCTAssertEqual(r.receive(make(code: "12 34 56"), now: now), .dropped(.badPlaintext))
     }
 
+    /// A WebOTP domain that isn't a plain multi-label ASCII host loses the binding, not the code.
+    func testOddDomainsKeepTheCodeButLoseTheBinding() {
+        for (domain, kept) in [("chase.com", "chase.com"), ("localhost", nil), ("bücher.de", nil), ("a..com", nil),
+                               ("-x.com", nil), ("CHASE.COM", nil)] as [(String, String?)] {
+            let r = receiver()
+            let e = envelope(phone.envelope(code: "123456", domain: domain, ts: now, to: mac.publicKey))
+            guard case let .accepted(m) = r.receive(e, now: now) else { return XCTFail(domain) }
+            XCTAssertEqual(m.domain, kept, domain)
+            XCTAssertEqual(m.code, "123456")
+        }
+    }
+
     /// The seen set survives a restart (it's on disk, owner-only) and belongs to one pairing.
     func testSeenSetPersistsOwnerOnlyAndPerPairing() throws {
         let file = dir.appendingPathComponent("seen.json")

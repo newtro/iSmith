@@ -95,12 +95,22 @@ public struct CodeMessage: Codable, Equatable, Sendable {
         guard (4...10).contains(code.count),
               code.unicodeScalars.allSatisfy({ $0.isASCII && (CharacterSet.alphanumerics.contains($0) || $0 == "-") })
         else { return false }
-        if let domain {
-            guard !domain.isEmpty, domain.count <= 253, domain == domain.lowercased(),
-                  domain.unicodeScalars.allSatisfy({ $0.isASCII && (CharacterSet.alphanumerics.contains($0) || $0 == "-" || $0 == ".") })
-            else { return false }
-        }
         return true
+    }
+
+    /// The message with its WebOTP domain kept only when it's a plain lowercase ASCII host with
+    /// at least two labels. Anything else (non-ASCII, a single label, odd characters) loses the
+    /// binding but keeps the code, which is then offered like an unbound one.
+    func withCheckedDomain() -> CodeMessage {
+        guard let d = domain else { return self }
+        let labels = d.split(separator: ".", omittingEmptySubsequences: false)
+        let ok = d.count <= 253 && d == d.lowercased() && labels.count >= 2
+            && labels.allSatisfy { !$0.isEmpty && $0.count <= 63 && !$0.hasPrefix("-") && !$0.hasSuffix("-") }
+            && d.unicodeScalars.allSatisfy { $0.isASCII && (CharacterSet.alphanumerics.contains($0) || $0 == "-" || $0 == ".") }
+        if ok { return self }
+        var copy = self
+        copy.domain = nil
+        return copy
     }
 
     static func isLowercaseUUID(_ s: String) -> Bool {

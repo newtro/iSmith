@@ -5,7 +5,9 @@ import Foundation
 import UserNotifications
 
 /// One notification per accepted code: "123456", "from chase.com" (or the sender), with a Copy
-/// action. With previews hidden (or the Mac locked) macOS shows only "Verification code".
+/// action, and no SMS text. With previews hidden (or the Mac locked) macOS shows only
+/// "Verification code". Notification Center keeps what it shows, so each notification is removed
+/// when its code expires (10 minutes), at the agent's launch, and when the pairing goes.
 /// Copies and the automatic clipboard copy go through `CodePasteboard`.
 @MainActor
 final class CodeNotifier: NSObject, CodeSink, UNUserNotificationCenterDelegate {
@@ -23,6 +25,13 @@ final class CodeNotifier: NSObject, CodeSink, UNUserNotificationCenterDelegate {
         let category = UNNotificationCategory(identifier: Self.category, actions: [copy], intentIdentifiers: [],
                                               hiddenPreviewsBodyPlaceholder: "Verification code", options: [])
         center.setNotificationCategories([category])
+        // Anything left from an earlier run is older than the codes this run knows.
+        center.removeAllDeliveredNotifications()
+    }
+
+    func pairingForgotten() {
+        center.removeAllDeliveredNotifications()
+        center.removeAllPendingNotificationRequests()
     }
 
     func requestAuthorization() {
@@ -39,7 +48,6 @@ final class CodeNotifier: NSObject, CodeSink, UNUserNotificationCenterDelegate {
         let content = UNMutableNotificationContent()
         content.title = message.code
         content.subtitle = "from \(message.domain ?? message.sender)"
-        content.body = Self.snippet(message.body)
         content.sound = .default
         content.categoryIdentifier = Self.category
         content.threadIdentifier = "codes"
@@ -51,12 +59,10 @@ final class CodeNotifier: NSObject, CodeSink, UNUserNotificationCenterDelegate {
         } catch {
             agentLog.error("notification not posted: \(String(describing: error), privacy: .public)")
         }
-    }
-
-    /// The SMS text, on one line and clipped, for context under the code.
-    static func snippet(_ body: String) -> String {
-        let flat = body.split(whereSeparator: \.isNewline).joined(separator: " ")
-        return flat.count > 180 ? String(flat.prefix(179)) + "…" : flat
+        let id = message.id
+        DispatchQueue.main.asyncAfter(deadline: .now() + RecentCodes.lifetime) { [center] in
+            center.removeDeliveredNotifications(withIdentifiers: [id])
+        }
     }
 
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,

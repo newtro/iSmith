@@ -260,7 +260,8 @@ public final class RelayStream: @unchecked Sendable {
             do {
                 frame = try await ws.receive()
             } catch {
-                if let http = ws.response as? HTTPURLResponse, http.statusCode == 401 || http.statusCode == 403 {
+                // Only 401 means the token is gone; a 403 (or anything else) is retried with backoff.
+                if let http = ws.response as? HTTPURLResponse, http.statusCode == 401 {
                     codesLog.error("stream refused the token (\(http.statusCode, privacy: .public))")
                     return .revoked
                 }
@@ -277,7 +278,16 @@ public final class RelayStream: @unchecked Sendable {
             @unknown default: continue
             }
             guard let parsed = try? JSONDecoder().decode(StreamFrame.self, from: data) else {
-                codesLog.error("stream frame not understood; ignored")
+                // A message whose envelope doesn't decode would otherwise come back on every
+                // reconnect until it expires: ack it by id if one can be read.
+                if let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                   json["type"] as? String == "message",
+                   let id = (json["envelope"] as? [String: Any])?["id"] as? String, !id.isEmpty, id.count <= 64 {
+                    codesLog.error("stream message not understood; acked and dropped")
+                    await sendAck([id], on: ws)
+                } else {
+                    codesLog.error("stream frame not understood; ignored")
+                }
                 continue
             }
             switch parsed {
