@@ -587,6 +587,7 @@ final class BrowserState: NSObject, ObservableObject {
         let previous = tabs.selected
         tabs.update { $0.select(id) }
         guard let tab = tabs.selected else { return }
+        Diagnostics.log("select tab=\(Diagnostics.id(tab)) from=\(previous.map(Diagnostics.id) ?? "-") \(Diagnostics.page(tab.webView?.url ?? tab.url))")
         if let previous, previous !== tab {
             previous.lastShown = Date()
             applyKeepAliveIfNeeded(previous, space: tabs.spaceID)
@@ -658,6 +659,7 @@ final class BrowserState: NSObject, ObservableObject {
         let webView = makeWebView(configuration)
         applyAgentControl(tab, to: webView)
         tab.attach(webView, keepAlive: keepAlive)
+        Diagnostics.log("build tab=\(Diagnostics.id(tab)) wv=\(Diagnostics.id(webView)) \(Diagnostics.page(request?.url ?? tab.url)) keepAlive=\(keepAlive)")
         #if DEBUG
         NSLog("iSmith: web view for \(request?.url?.host ?? tab.url?.host ?? "empty tab") in \(spaceID), keep alive \(keepAlive)")
         #endif
@@ -761,6 +763,7 @@ final class BrowserState: NSObject, ObservableObject {
         tab.unload()
         tabs.take(id)
         keepAliveClosed(tab, space: tabs.spaceID)
+        Diagnostics.log("close tab=\(Diagnostics.id(tab)) returnTo=\(returnTo.map { String($0.uuidString.prefix(8)) } ?? "-")")
         if let returnTo {
             tabs.update { $0.select(returnTo) }
         }
@@ -1068,7 +1071,10 @@ final class BrowserState: NSObject, ObservableObject {
         // Passwords are global: every web view in every space, before it's created.
         passwords?.attach(to: config)
         let webView = BrowserWebView(frame: .zero, configuration: config)
-        webView.windowChanged = { [weak self] webView in self?.passwordUI.webViewChanged(webView) }
+        webView.windowChanged = { [weak self] webView in
+            Diagnostics.log("moved \(Diagnostics.page(webView.url)) \(Diagnostics.placement(webView))")
+            self?.passwordUI.webViewChanged(webView)
+        }
         webView.contextItems = { [weak self] webView, element in
             self?.contextItems(for: webView, element: element) ?? .init()
         }

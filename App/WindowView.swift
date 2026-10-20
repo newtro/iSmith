@@ -624,6 +624,7 @@ struct WebContainer: NSViewRepresentable {
 final class WebContainerView: NSView {
     func show(_ webView: WKWebView?) {
         guard subviews.first !== webView || (webView == nil && !subviews.isEmpty) else { return }
+        Diagnostics.log("show wv=\(Diagnostics.id(webView)) replacing=\(Diagnostics.id(subviews.first as? WKWebView)) \(Diagnostics.page(webView?.url)) from=\(webView?.superview.map { String(describing: type(of: $0)) } ?? "nil")")
         subviews.forEach { $0.removeFromSuperview() }
         guard let webView else { return }
         webView.frame = bounds

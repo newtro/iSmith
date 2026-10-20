@@ -53,6 +53,7 @@ extension BrowserState: WKUIDelegate {
         applyAgentControl(tab, to: popup)
         tab.attach(popup, keepAlive: keepAlive)
         tabs.add(tab) { $0.insert(tab.id, after: opener.id) }
+        Diagnostics.log("popup tab=\(Diagnostics.id(tab)) opener=\(Diagnostics.id(opener)) \(Diagnostics.page(navigationAction.request.url)) wv=\(Diagnostics.id(popup))")
         // A popup from an agent's background tab stays in the background with it.
         if window.activeSpaceID == tabs.spaceID, !opener.agentControlled || tabs.layout.selected == opener.id {
             selectTab(tab.id, in: tabs)
@@ -62,6 +63,7 @@ extension BrowserState: WKUIDelegate {
 
     func webViewDidClose(_ webView: WKWebView) {
         guard let (_, tabs, tab) = owner(of: webView) else { return }
+        Diagnostics.log("window.close tab=\(Diagnostics.id(tab)) \(Diagnostics.page(webView.url))")
         closeTab(tab.id, in: tabs)
     }
 
@@ -262,6 +264,7 @@ extension BrowserState: WKNavigationDelegate {
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
         passwordUI.webViewChanged(webView)
         guard let (_, tabs, tab) = owner(of: webView) else { return }
+        Diagnostics.log("commit tab=\(Diagnostics.id(tab)) selected=\(tabs.layout.selected == tab.id) \(Diagnostics.page(webView.url)) \(Diagnostics.placement(webView))")
         tab.committedHost = webView.url?.host
         tab.certificateProblem = nil
         tab.retryURL = nil
@@ -280,6 +283,15 @@ extension BrowserState: WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         if owner(of: webView) != nil { Favicons.shared.pageLoaded(webView) }
+        if let (_, tabs, tab) = owner(of: webView) {
+            Diagnostics.log("finish tab=\(Diagnostics.id(tab)) selected=\(tabs.layout.selected == tab.id) \(Diagnostics.page(webView.url)) \(Diagnostics.placement(webView))")
+            for delay in [1.5, 6.0] {
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self, weak webView] in
+                    guard let self, let webView, let (_, tabs, tab) = self.owner(of: webView), tabs.layout.selected == tab.id else { return }
+                    Diagnostics.check(webView, label: "+\(delay)s tab=\(Diagnostics.id(tab))")
+                }
+            }
+        }
         guard let (_, tabs, tab) = owner(of: webView), let url = webView.url,
               let title = webView.title, !title.isEmpty else { return }
         try? data?.history.updateTitle(space: tabs.spaceID, url: url, title: title)
@@ -292,6 +304,7 @@ extension BrowserState: WKNavigationDelegate {
         if !webView.isLoading, let (_, _, tab) = owner(of: webView) {
             shields.controller?.applyIfLoaded(to: webView.configuration.userContentController, host: tab.committedHost)
         }
+        Diagnostics.log("fail-provisional \(Diagnostics.page(webView.url)) \((error as NSError).domain) \((error as NSError).code)")
         showLoadError(error, in: webView)
     }
 
@@ -299,6 +312,7 @@ extension BrowserState: WKNavigationDelegate {
         // A page that has started showing keeps what it shows; only certificate problems on a
         // committed page (rare) get the warning.
         let nsError = error as NSError
+        Diagnostics.log("fail \(Diagnostics.page(webView.url)) \(nsError.domain) \(nsError.code)")
         if Self.certificateErrorCodes.contains(nsError.code), nsError.domain == NSURLErrorDomain {
             showLoadError(error, in: webView)
         }
@@ -333,6 +347,7 @@ extension BrowserState: WKNavigationDelegate {
         let now = Date()
         tab.crashTimes = tab.crashTimes.filter { now.timeIntervalSince($0) < 300 } + [now]
         tab.crashed = true
+        Diagnostics.log("crashed tab=\(Diagnostics.id(tab)) \(Diagnostics.page(webView.url))")
         NSLog("iSmith: web content process ended for \(webView.url?.host ?? "a tab")")
         let visible = window.activeSpaceID == tabs.spaceID && tabs.layout.selected == tab.id
         if tab.keepAlive, !visible, tab.crashTimes.count <= Self.maxAutomaticReloads {
