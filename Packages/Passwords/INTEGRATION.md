@@ -73,7 +73,25 @@ offers to start over.
   `backUp`, which writes one self-contained file). `secure_delete` and `trusted_schema = OFF`
   apply on every connection. The app opens a `DatabasePool`; `.existingOnly` opens a single
   `DatabaseQueue`, which (unlike a pool) doesn't write to the file when it opens.
-- `close()` closes the store's connections; tests use it before moving a file.
+- Every open store holds `passwords.sqlite.lock` (0600, made by the app, never moved or
+  deleted) with a shared `flock` for as long as it's open, in every process. Moving the file
+  aside (wrong key, damaged file, start over) needs that lock exclusively and doesn't wait: if
+  any other store has the file open, `init` throws `.databaseUnavailable("another process has
+  the passwords file open")` and changes nothing. Under the exclusive lock the file is judged
+  again before anything moves, so a launch never moves aside a file another launch just started.
+  `.existingOnly` needs the lock file to exist (else `.notSetUp`), keeps the very connection
+  whose key check it verified, and refuses a file whose inode changed while it opened. A move
+  aside that fails part way is put back; if that fails too, `init` throws
+  `.moveAsideIncomplete` naming where each file is.
+- `.existingOnly` judges the file through a read-only connection, which never checkpoints or
+  removes the `-wal`/`-shm` (it therefore needs both side files to exist: the app leaves them,
+  as SQLite on macOS does by default; without them it's `.notSetUp`). Only the `-shm` index's
+  read marks change. The app's inspection may checkpoint committed WAL pages into the file when
+  it closes, which loses nothing.
+- Not yet crash-atomic: a move aside renames the main file, then its `-wal`, `-journal` and
+  `-shm`, one at a time. A crash between renames leaves the main file at the new name and its
+  `-wal` at the old one; nothing is deleted, but nothing reconciles it at the next launch yet.
+- `close()` closes the store's connections and lets go of the lock (so does deallocating it).
 - The key is a 256-bit AES key in the file-based login Keychain, service
   `com.scottsmith.ismith.passwords-key`, account `passwords`, separate from the vault key. The
   app passes `AppIdentity.passwordsKeyService` rather than the package default, so the Debug

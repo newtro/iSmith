@@ -33,9 +33,13 @@ public enum PasswordStoreError: Error, Equatable, CustomStringConvertible {
     /// The call is for the iSmith app only (restoring copies set aside), and this store was
     /// opened `existingOnly`.
     case appOnly
+    /// Moving an unreadable file aside failed part way and couldn't be fully undone. Says where
+    /// each file is now (paths only). Nothing was deleted.
+    case moveAsideIncomplete(String)
 
     public var description: String {
         switch self {
+        case .moveAsideIncomplete(let where_): return "The saved passwords file couldn't be moved aside completely: \(where_)"
         case .keyMissing: return "The passwords key isn't in the Keychain, but there is a saved passwords file that holds (or may hold) logins sealed with it."
         case .fileMissing: return "There is no saved passwords file."
         case .wrongKey: return "The saved passwords file doesn't open with the key in the Keychain."
@@ -121,6 +125,12 @@ public final class PasswordStore: @unchecked Sendable {
     private let key: SymmetricKey
     private static let log = Logger(subsystem: "com.scottsmith.ismith", category: "passwords")
 
+    /// Tests only: called at named points of `init` and `recover` to stage races.
+    nonisolated(unsafe) static var testHook: ((String) -> Void)?
+
+    /// The store's hold on `<file>.lock` for as long as it's open (see `StoreLock`).
+    private let lock: StoreLock
+
     public init(fileURL: URL, keyStore: KeyStore, mode: OpenMode) throws {
         self.fileURL = fileURL
         self.openMode = mode
@@ -133,20 +143,35 @@ public final class PasswordStore: @unchecked Sendable {
             throw PasswordStoreError.keychainUnavailable(String(describing: error))
         }
 
-        let exists = FileManager.default.fileExists(atPath: fileURL.path)
         if mode == .existingOnly {
             // Judged without changing anything: no key, no file or a file that doesn't open
-            // with the key is an error. Nothing below creates, moves or converts a file.
+            // with the key is an error. Nothing below creates, moves, converts or checkpoints a
+            // file (the -shm index aside, which every reader updates).
             guard let key else { throw PasswordStoreError.keyMissing }
-            guard exists else { throw PasswordStoreError.fileMissing }
-            switch Self.inspect(fileURL, key: key) {
+            guard FileManager.default.fileExists(atPath: fileURL.path) else { throw PasswordStoreError.fileMissing }
+            switch Self.format(of: fileURL) {
+            case .notSQLite: throw PasswordStoreError.unrecognizedFile
+            // An older (rollback-journal) or empty file is set up by the app, not here.
+            case .empty, .rollbackJournal: throw PasswordStoreError.notSetUp
+            case .wal: break
+            }
+            // A read-only connection never checkpoints or deletes the WAL, but needs the side
+            // files to exist; the app leaves them in place (SQLite on macOS keeps them).
+            guard SecureFile.sideFiles(of: fileURL).dropFirst().allSatisfy({ FileManager.default.fileExists(atPath: $0.path) }) else {
+                throw PasswordStoreError.notSetUp
+            }
+            // Held while open, so the app can't move the file aside under us. The app makes the
+            // lock file; without one, the app hasn't opened this file yet.
+            let lock = try StoreLock(for: fileURL, create: false)
+            let inode = SecureFile.inode(of: fileURL)
+            guard inode != nil else { throw PasswordStoreError.fileMissing }
+            switch Self.inspect(fileURL, key: key, readOnly: true) {
             case .usable: break
             case .wrongKey: throw PasswordStoreError.wrongKey
             case .notOurs: throw PasswordStoreError.unrecognizedFile
             case .unavailable(let why): throw PasswordStoreError.databaseUnavailable(why)
             }
-            // An older (rollback-journal) file is converted to WAL by the app, not here.
-            guard Self.isWAL(fileURL) else { throw PasswordStoreError.notSetUp }
+            Self.testHook?("existingOnly.inspected")
             // A queue, not a pool: a pool's setup writes to the file when its WAL is empty.
             let queue: DatabaseQueue
             do {
@@ -154,18 +179,32 @@ public final class PasswordStore: @unchecked Sendable {
             } catch let error as DatabaseError {
                 throw PasswordStoreError.databaseUnavailable("SQLite error \(error.resultCode.rawValue)")
             }
-            let ready = try queue.read { db -> Bool in
-                guard try Self.migrator.hasCompletedMigrations(db) else { return false }
-                return try Data.fetchOne(db, sql: "SELECT value FROM meta WHERE key = 'keyCheck'") != nil
+            // The connection kept is the one checked: same file, set up, and sealed with this key.
+            do {
+                guard SecureFile.inode(of: fileURL) == inode else {
+                    throw PasswordStoreError.databaseUnavailable("the passwords file changed while it was being opened")
+                }
+                try queue.read { db in
+                    guard try Self.migrator.hasCompletedMigrations(db),
+                          let check = try Data.fetchOne(db, sql: "SELECT value FROM meta WHERE key = 'keyCheck'")
+                    else { throw PasswordStoreError.notSetUp }
+                    guard LoginCrypto.verifyKeyCheck(check, key: key) else { throw PasswordStoreError.wrongKey }
+                }
+            } catch {
+                try? queue.close()
+                throw (error as? DatabaseError).map { PasswordStoreError.databaseUnavailable("SQLite error \($0.resultCode.rawValue)") } ?? error
             }
-            guard ready else { throw PasswordStoreError.notSetUp }
             self.key = key
             self.movedAside = nil
             self.database = queue
+            self.lock = lock
             return
         }
 
         try SecureFile.prepareDirectory(fileURL.deletingLastPathComponent())
+        // Every open store holds the lock shared; moving the file aside needs it alone.
+        let lock = try StoreLock(for: fileURL, create: true)
+        let exists = FileManager.default.fileExists(atPath: fileURL.path)
 
         // What's on disk is judged before anything changes. A file that can't be read right now
         // (locked, a disk or permissions error) is left alone: only a file that is definitely not
@@ -202,19 +241,38 @@ public final class PasswordStore: @unchecked Sendable {
         guard let key else { throw PasswordStoreError.keychainUnavailable("no key") }
 
         var movedAside: URL?
+        var exclusive = false
         if exists {
-            switch Self.inspect(fileURL, key: key) {
+            var judged = Self.inspect(fileURL, key: key)
+            if judged == .wrongKey || judged == .notOurs {
+                // Only with the file to ourselves: no other store (another launch, the Agent)
+                // has it open. Then judged again, since another launch may have replaced it
+                // since our first look.
+                guard lock.lockExclusively(between: { Self.testHook?("app.beforeExclusive") }) else {
+                    Self.log.error("passwords database needs moving aside but another process has it open; nothing changed")
+                    throw PasswordStoreError.databaseUnavailable("another process has the passwords file open")
+                }
+                exclusive = true
+                judged = FileManager.default.fileExists(atPath: fileURL.path) ? Self.inspect(fileURL, key: key) : .usable
+            }
+            switch judged {
             case .usable:
                 break
             case .unavailable(let why):
                 throw PasswordStoreError.databaseUnavailable(why)
             case .wrongKey, .notOurs:
-                movedAside = try SecureFile.moveAside(fileURL, reason: "unreadable")
+                do {
+                    movedAside = try SecureFile.moveAside(fileURL, reason: "unreadable")
+                } catch let error as SecureFile.IncompleteMove {
+                    Self.log.error("moving the passwords database aside failed part way: \(error.description, privacy: .public)")
+                    throw PasswordStoreError.moveAsideIncomplete(error.description)
+                }
                 Self.log.error("passwords database could not be opened with the Keychain key; moved aside")
             }
         }
         self.key = key
         self.movedAside = movedAside
+        self.lock = lock
 
         try SecureFile.ensureOwnerOnlyFile(fileURL)
         // Converts an older (rollback-journal) file to WAL; needs a moment alone with the file.
@@ -222,22 +280,49 @@ public final class PasswordStore: @unchecked Sendable {
         database = pool
         do {
             try Self.migrator.migrate(pool)
+            // The connection kept is checked the way `inspect` judged the file: its key check
+            // opens with the key, or it holds nothing yet and gets one.
             try pool.write { db in
-                if try Data.fetchOne(db, sql: "SELECT value FROM meta WHERE key = 'keyCheck'") == nil {
+                if let check = try Data.fetchOne(db, sql: "SELECT value FROM meta WHERE key = 'keyCheck'") {
+                    guard LoginCrypto.verifyKeyCheck(check, key: key) else {
+                        throw PasswordStoreError.databaseUnavailable("the passwords file changed while it was being opened")
+                    }
+                } else {
+                    guard try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM login") == 0 else {
+                        throw PasswordStoreError.databaseUnavailable("the passwords file changed while it was being opened")
+                    }
                     try db.execute(sql: "INSERT INTO meta (key, value) VALUES ('keyCheck', ?)",
                                    arguments: [LoginCrypto.sealKeyCheck(key)])
                 }
             }
         } catch let error as DatabaseError {
+            try? pool.close()
             throw PasswordStoreError.databaseUnavailable("SQLite error \(error.resultCode.rawValue)")
+        } catch {
+            try? pool.close()
+            throw error
         }
+        // The new file is set up: other stores may open it again.
+        if exclusive { lock.lockShared() }
         // SQLite gives its side files the database's mode; make sure of it.
         try SecureFile.limitSideFilesToOwner(of: fileURL)
     }
 
-    /// Closes the database. The store can't be used afterwards.
+    /// Closes the database and lets go of the lock. The store can't be used afterwards.
     public func close() throws {
+        defer { lock.unlock() }
         try database.close()
+    }
+
+    enum Format { case empty, notSQLite, rollbackJournal, wal }
+
+    /// What the file's header says, without opening it in SQLite.
+    static func format(of url: URL) -> Format {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return .notSQLite }
+        defer { try? handle.close() }
+        guard let header = try? handle.read(upToCount: 20), !header.isEmpty else { return .empty }
+        guard header.count == 20, header.prefix(16) == Data("SQLite format 3\0".utf8) else { return .notSQLite }
+        return header[18] == 2 && header[19] == 2 ? .wal : .rollbackJournal
     }
 
     private static func openPool(_ url: URL) throws -> DatabasePool {
@@ -249,13 +334,8 @@ public final class PasswordStore: @unchecked Sendable {
         }
     }
 
-    /// Whether the file's header says WAL (format versions 2), without opening it in SQLite.
-    static func isWAL(_ url: URL) -> Bool {
-        guard let handle = try? FileHandle(forReadingFrom: url) else { return false }
-        defer { try? handle.close() }
-        guard let header = try? handle.read(upToCount: 20), header.count == 20 else { return false }
-        return header[18] == 2 && header[19] == 2
-    }
+    /// Whether the file's header says WAL (format versions 2).
+    static func isWAL(_ url: URL) -> Bool { format(of: url) == .wal }
 
     private static func configuration() -> Configuration {
         var config = Configuration()
@@ -306,22 +386,27 @@ public final class PasswordStore: @unchecked Sendable {
         case unavailable(String)
     }
 
-    /// A connection to an existing file that never writes to it.
-    static func openForReading(_ url: URL) throws -> DatabaseQueue {
+    /// A connection to an existing file that never writes rows to it. Read-write (with
+    /// `query_only`) by default: a read-only connection can't open a WAL file whose `-shm` is gone
+    /// (a copy set aside after its last connection closed), and a read-write one replays a `-wal`
+    /// left by a crash. Closing it may checkpoint committed WAL pages into the file, which loses
+    /// nothing. `readOnly` (for `existingOnly`, which requires the side files) never checkpoints
+    /// or removes anything.
+    static func openForReading(_ url: URL, readOnly: Bool = false) throws -> DatabaseQueue {
         var config = configuration()
-        config.prepareDatabase { db in try db.execute(sql: "PRAGMA query_only = ON") }
+        if readOnly {
+            config.readonly = true
+        } else {
+            config.prepareDatabase { db in try db.execute(sql: "PRAGMA query_only = ON") }
+        }
         return try DatabaseQueue(path: url.path, configuration: config)
     }
 
     /// What an existing database file is, judged by reading it. A missing key can open only an
-    /// empty database.
-    ///
-    /// The file is opened read-write but queried only (`query_only`): a read-only connection
-    /// can't open a WAL file whose `-shm` is gone (a copy set aside after its last connection
-    /// closed), and a read-write one replays a `-wal` left by a crash rather than missing it.
-    static func inspect(_ url: URL, key: SymmetricKey?) -> Inspection {
+    /// empty database. See `openForReading` for what `readOnly` changes.
+    static func inspect(_ url: URL, key: SymmetricKey?, readOnly: Bool = false) -> Inspection {
         do {
-            let queue = try openForReading(url)
+            let queue = try openForReading(url, readOnly: readOnly)
             defer { try? queue.close() }
             return try queue.read { db in
                 guard try db.tableExists("meta"), try db.tableExists("login") else {
@@ -452,10 +537,20 @@ public final class PasswordStore: @unchecked Sendable {
         }
         let marker = "recovered:" + copy.lastPathComponent
         if !toAdd.isEmpty { result.backup = try backUp(reason: "before-restore") }
-        try database.write { db in
+        Self.testHook?("recover.beforeWrite")
+        let added = try database.write { db -> Int in
             try db.execute(sql: "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
                            arguments: [marker, Data(String(Date().timeIntervalSince1970).utf8)])
-            for login in toAdd { try insert(db, login) }
+            var added = 0
+            for login in toAdd {
+                // Checked again in this transaction: a login saved meanwhile (by another
+                // process, say) is the current one and wins.
+                let sameID = (try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM login WHERE id = ?", arguments: [login.id.uuidString]) ?? 0) > 0
+                let sameLogin = try existing(db, origin: login.origin, username: login.username) != nil
+                if sameID || sameLogin { continue }
+                try insert(db, login)
+                added += 1
+            }
             for row in neverSave {
                 let origin: String? = row["origin"]
                 let created: Double? = row["created"]
@@ -463,8 +558,10 @@ public final class PasswordStore: @unchecked Sendable {
                 try db.execute(sql: "INSERT OR IGNORE INTO neverSave (origin, created) VALUES (?, ?)",
                                arguments: [origin, created ?? Date().timeIntervalSince1970])
             }
+            return added
         }
-        result.restored = toAdd.count
+        result.alreadyThere += toAdd.count - added
+        result.restored = added
         Self.log.notice("restored \(result.restored, privacy: .public) logins from a copy set aside; \(result.alreadyThere, privacy: .public) already there, \(result.unreadable, privacy: .public) unreadable")
         return result
     }
