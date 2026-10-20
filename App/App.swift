@@ -71,6 +71,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         browser.start(links: pendingLinks)
         pendingLinks = []
         browser.routing.offerDefaultBrowserIfNeeded()
+        // SMS codes from the phone (iSmith Agent): keep it registered and on this version.
+        CodesController.shared.launchCheck()
         NSApp.activate(ignoringOtherApps: true)
         offerBraveImportOnFirstRun(browser)
         #if DEBUG

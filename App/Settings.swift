@@ -17,6 +17,8 @@ struct SettingsView: View {
                 .tabItem { Label("Privacy", systemImage: "hand.raised") }
             PasswordSettings()
                 .tabItem { Label("Passwords", systemImage: "key") }
+            CodesSettingsView(codes: CodesController.shared)
+                .tabItem { Label("Codes", systemImage: "ellipsis.message") }
             WebsiteSettings()
                 .tabItem { Label("Websites", systemImage: "globe") }
             LinkSettings(routing: browser.routing, store: browser.routing.store)
