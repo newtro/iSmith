@@ -21,6 +21,14 @@ final class PasswordLaunchTests: XCTestCase {
         try? FileManager.default.removeItem(at: dir)
     }
 
+    /// Moves a closed database with its side files, as `moveAside` does.
+    private func moveDatabase(at from: URL, to: URL) throws {
+        try FileManager.default.moveItem(at: from, to: to)
+        for suffix in ["-journal", "-wal", "-shm"] where FileManager.default.fileExists(atPath: from.path + suffix) {
+            try FileManager.default.moveItem(atPath: from.path + suffix, toPath: to.path + suffix)
+        }
+    }
+
     private func site(_ i: Int) -> Origin { Origin(string: "https://site\(i).example")! }
 
     /// Runs SQL on the file through a connection of its own (another process, as far as the
@@ -97,6 +105,25 @@ final class PasswordLaunchTests: XCTestCase {
         XCTAssertEqual(try snapshot(), before)
     }
 
+    func testLeftoverFilesWithoutTheDatabaseAreReportedAndKept() throws {
+        let keys = InMemoryKeyStore()
+        let store = try PasswordStore(fileURL: url, keyStore: keys, mode: .app)
+        try store.add(origin: site(1), username: "a", password: "b")
+        try store.close()
+        // The database moved away on its own (an interrupted move): its -wal and -shm stay.
+        try FileManager.default.moveItem(at: url, to: dir.appendingPathComponent("elsewhere.sqlite"))
+        let wal = URL(fileURLWithPath: url.path + "-wal")
+        let walBytes = try Data(contentsOf: wal)
+        var asked: [(String, Bool)] = []
+        let opened = BrowserState.openPasswordStore(fileURL: url, keyStore: keys, ask: { asked.append(($0, $1)); return .continueWithout })
+        XCTAssertNil(opened.store)
+        XCTAssertEqual(asked.first?.1, false, "starting over isn't offered")
+        let why = try XCTUnwrap(asked.first?.0)
+        XCTAssertTrue(why.contains("They're kept where they are") && why.contains(wal.path), why)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path), "no new database")
+        XCTAssertEqual(try Data(contentsOf: wal), walBytes)
+    }
+
     func testStartingOverKeepsTheOldFileAndSaysWhere() throws {
         try PasswordStore(fileURL: url, keyStore: InMemoryKeyStore(), mode: .app).add(origin: site(1), username: "a", password: "b")
         let original = try Data(contentsOf: url)
@@ -129,7 +156,7 @@ final class PasswordLaunchTests: XCTestCase {
         try earlier.add(origin: site(1), username: "u1", password: "p1")
         try earlier.close()
         let copy = dir.appendingPathComponent("passwords.unreadable-100.sqlite")
-        try FileManager.default.moveItem(at: url, to: copy)
+        try moveDatabase(at: url, to: copy)
         let app = try PasswordStore(fileURL: url, keyStore: keys, mode: .app)
         let agent = try PasswordStore(fileURL: url, keyStore: keys, mode: .existingOnly)
         var reported = Set<String>()
@@ -147,9 +174,9 @@ final class PasswordLaunchTests: XCTestCase {
         let earlier = try PasswordStore(fileURL: url, keyStore: keys, mode: .app)
         for i in 0..<3 { try earlier.add(origin: site(i), username: "u\(i)", password: "p\(i)") }
         try earlier.close()
-        try FileManager.default.moveItem(at: url, to: dir.appendingPathComponent("passwords.unreadable-100.sqlite"))
+        try moveDatabase(at: url, to: dir.appendingPathComponent("passwords.unreadable-100.sqlite"))
         try PasswordStore(fileURL: url, keyStore: InMemoryKeyStore(), mode: .app).add(origin: site(9), username: "x", password: "y")
-        try FileManager.default.moveItem(at: url, to: dir.appendingPathComponent("passwords.unreadable-200.sqlite"))
+        try moveDatabase(at: url, to: dir.appendingPathComponent("passwords.unreadable-200.sqlite"))
 
         let store = try PasswordStore(fileURL: url, keyStore: keys, mode: .app)
         try store.add(origin: site(5), username: "u5", password: "p5")

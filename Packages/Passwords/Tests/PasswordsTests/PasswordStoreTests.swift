@@ -47,6 +47,14 @@ final class PasswordStoreTests: XCTestCase {
         try queue.close()
     }
 
+    /// Moves a closed database with its side files, as `moveAside` does.
+    private func moveDatabase(at from: URL, to: URL) throws {
+        try FileManager.default.moveItem(at: from, to: to)
+        for suffix in ["-journal", "-wal", "-shm"] where FileManager.default.fileExists(atPath: from.path + suffix) {
+            try FileManager.default.moveItem(atPath: from.path + suffix, toPath: to.path + suffix)
+        }
+    }
+
     private func permissions(_ url: URL) throws -> Int {
         try (FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? NSNumber)?.intValue ?? -1
     }
@@ -645,7 +653,7 @@ final class PasswordStoreTests: XCTestCase {
         try first.close()
         // The file was moved aside (as an unreadable file would be) and a new one started.
         let aside = dir.appendingPathComponent("passwords.unreadable-100.sqlite")
-        try FileManager.default.moveItem(at: dbURL, to: aside)
+        try moveDatabase(at: dbURL, to: aside)
         let asideBytes = try Data(contentsOf: aside)
         let store = try PasswordStore(fileURL: dbURL, keyStore: keys, mode: .app)
         XCTAssertEqual(PasswordStore.setAsideCopies(of: dbURL), [aside])
@@ -682,7 +690,7 @@ final class PasswordStoreTests: XCTestCase {
             let store = try PasswordStore(fileURL: dbURL, keyStore: keys, mode: .app)
             try store.add(origin: site, username: "me", password: password)
             try store.close()
-            try FileManager.default.moveItem(at: dbURL, to: copy)
+            try moveDatabase(at: dbURL, to: copy)
         }
         XCTAssertEqual(PasswordStore.setAsideCopies(of: dbURL), [sameSecond, newer, older], "newest first")
 
@@ -703,7 +711,7 @@ final class PasswordStoreTests: XCTestCase {
     func testRecoverIgnoresACopySealedWithAnotherKey() throws {
         try PasswordStore(fileURL: dbURL, keyStore: InMemoryKeyStore(), mode: .app).add(origin: example, username: "a", password: "b")
         let aside = dir.appendingPathComponent("passwords.unreadable-100.sqlite")
-        try FileManager.default.moveItem(at: dbURL, to: aside)
+        try moveDatabase(at: dbURL, to: aside)
         let store = try PasswordStore(fileURL: dbURL, keyStore: InMemoryKeyStore(), mode: .app)
         XCTAssertNil(try store.recover(from: aside))
         XCTAssertTrue(try store.allLogins().isEmpty)
@@ -830,7 +838,7 @@ final class PasswordStoreTests: XCTestCase {
         try first.add(origin: other, username: "me", password: "other")
         try first.close()
         let aside = dir.appendingPathComponent("passwords.unreadable-100.sqlite")
-        try FileManager.default.moveItem(at: dbURL, to: aside)
+        try moveDatabase(at: dbURL, to: aside)
         let store = try PasswordStore(fileURL: dbURL, keyStore: keys, mode: .app)
         let agent = try PasswordStore(fileURL: dbURL, keyStore: keys, mode: .existingOnly)
         PasswordStore.testHook = { stage in
@@ -936,6 +944,64 @@ final class PasswordStoreTests: XCTestCase {
         XCTAssertEqual(process.terminationStatus, 0, "the other process's writes all went through")
         XCTAssertEqual(try store.allLogins().count, 100)
         XCTAssertEqual(try store.neverSaveOrigins().count, 200)
+    }
+
+    // MARK: Durability and leftovers
+
+    private func synchronous(_ store: PasswordStore) throws -> Int? {
+        try store.database.writeWithoutTransaction { db in try Int.fetchOne(db, sql: "PRAGMA synchronous") }
+    }
+
+    func testEveryCommitIsSyncedFully() throws {
+        let keys = InMemoryKeyStore()
+        let store = try PasswordStore(fileURL: dbURL, keyStore: keys, mode: .app)
+        XCTAssertEqual(try synchronous(store), 2, "FULL on a fresh store's writer, not GRDB's WAL default NORMAL")
+        try store.add(origin: example, username: "a", password: "b")
+        XCTAssertEqual(try synchronous(PasswordStore(fileURL: dbURL, keyStore: keys, mode: .existingOnly)), 2, "and on another process's queue")
+        try store.close()
+
+        try makeRollbackJournal(dbURL)
+        let converted = try PasswordStore(fileURL: dbURL, keyStore: keys, mode: .app)
+        XCTAssertTrue(PasswordStore.isWAL(dbURL))
+        XCTAssertEqual(try synchronous(converted), 2, "FULL after converting an older file to WAL")
+    }
+
+    func testAWALLeftWithoutItsDatabaseIsNeverAFirstRun() throws {
+        let key = SymmetricKey(size: .bits256)
+        // A store with committed rows only in its -wal, as a crash leaves it...
+        let live = dir.appendingPathComponent("live", isDirectory: true).appendingPathComponent("passwords.sqlite")
+        let store = try PasswordStore(fileURL: live, keyStore: InMemoryKeyStore(key: key), mode: .app)
+        for i in 0..<5 { try store.add(origin: Origin(string: "https://s\(i).example")!, username: "u\(i)", password: "p\(i)") }
+        for (from, to) in zip([live, StoreLock.url(for: live)] + SecureFile.sideFiles(of: live),
+                              [dbURL, StoreLock.url(for: dbURL)] + SecureFile.sideFiles(of: dbURL))
+        where FileManager.default.fileExists(atPath: from.path) {
+            try FileManager.default.copyItem(at: from, to: to)
+        }
+        try store.close()
+        // ...then its main file moved away (an interrupted move aside), the -wal left behind.
+        try FileManager.default.moveItem(at: dbURL, to: dir.appendingPathComponent("passwords.unreadable-1.sqlite"))
+        let wal = URL(fileURLWithPath: dbURL.path + "-wal")
+        XCTAssertGreaterThan(try Data(contentsOf: wal).count, 0)
+        let before = try snapshot()
+        for (mode, keys) in [(PasswordStore.OpenMode.app, InMemoryKeyStore()), (.app, InMemoryKeyStore(key: key)),
+                             (.appStartOver, InMemoryKeyStore()), (.existingOnly, InMemoryKeyStore(key: key))] {
+            let hadKey = keys.key != nil
+            XCTAssertThrowsError(try PasswordStore(fileURL: dbURL, keyStore: keys, mode: mode), "\(mode)") { error in
+                guard case .orphanedSideFiles(let paths) = error as? PasswordStoreError else { return XCTFail("\(mode): \(error)") }
+                XCTAssertTrue(paths.contains(wal.path), "\(paths)")
+            }
+            XCTAssertEqual(keys.key != nil, hadKey, "\(mode): no key created")
+        }
+        XCTAssertEqual(try snapshot(), before, "no new database, and the -wal is byte for byte as it was")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: dbURL.path))
+    }
+
+    func testAFirstRunWithNoKeyCreatesNoKeyOverALeftoverWAL() throws {
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try Data([1, 2, 3]).write(to: URL(fileURLWithPath: dbURL.path + "-wal"))
+        let keys = InMemoryKeyStore()
+        XCTAssertThrowsError(try PasswordStore(fileURL: dbURL, keyStore: keys, mode: .app))
+        XCTAssertNil(keys.key)
     }
 
     func testKeychainKeyStoreForPasswordsIsSeparate() {
