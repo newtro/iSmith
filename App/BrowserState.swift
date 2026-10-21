@@ -847,8 +847,12 @@ final class BrowserState: NSObject, ObservableObject {
         }
     }
 
-    func reload(_ tab: Tab, in tabs: SpaceTabs) {
-        if let webView = tab.webView { webView.reload() } else { ensureLoaded(tab, space: tabs.spaceID) }
+    /// `ignoringCache` (⇧⌘R) fetches the page and everything it loads from the server again,
+    /// replacing what the space's cache holds: the way out when a site's cached scripts no
+    /// longer fit together (a stale module leaves the page blank).
+    func reload(_ tab: Tab, in tabs: SpaceTabs, ignoringCache: Bool = false) {
+        guard let webView = tab.webView else { return ensureLoaded(tab, space: tabs.spaceID) }
+        if ignoringCache { webView.reloadFromOrigin() } else { webView.reload() }
     }
 
     // MARK: - Moving tabs

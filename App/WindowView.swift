@@ -335,8 +335,10 @@ private struct Toolbar: View {
             Button { tab.webView?.goForward() } label: { Image(systemName: "chevron.right") }
                 .disabled(!tab.canGoForward)
                 .help("Forward  ⌘]")
-            Button { browser.reload(tab, in: tabs) } label: { Image(systemName: "arrow.clockwise") }
-                .help("Reload  ⌘R")
+            Button {
+                browser.reload(tab, in: tabs, ignoringCache: NSEvent.modifierFlags.contains(.shift))
+            } label: { Image(systemName: "arrow.clockwise") }
+                .help("Reload  ⌘R (with ⇧, ignoring the cache  ⇧⌘R)")
             HStack(spacing: 6) {
                 AddressField(text: $address, placeholder: "Search \(SearchEngine.current.name) or enter address",
                              edited: edited, focusChanged: focusChanged, commit: go, cancel: cancel, move: move,

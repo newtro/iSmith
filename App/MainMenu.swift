@@ -71,6 +71,7 @@ enum MainMenu {
 
         let view = submenu(main, "View")
         view.addItem(item("Reload Page", #selector(Commands.reload), "r", commands))
+        view.addItem(item("Reload Ignoring Cache", #selector(Commands.reloadIgnoringCache), "R", commands))
         view.addItem(.separator())
         view.addItem(item("Show Bookmarks Bar", #selector(Commands.toggleBookmarksBar), "B", commands))
         view.addItem(item("Show Downloads", #selector(Commands.showDownloads), "l", commands, [.command, .option]))
@@ -226,6 +227,11 @@ final class Commands: NSObject, NSMenuDelegate, NSMenuItemValidation {
         browser.reload(tab, in: tabs)
     }
 
+    @objc func reloadIgnoringCache() {
+        guard let tab, let tabs else { return }
+        browser.reload(tab, in: tabs, ignoringCache: true)
+    }
+
     @objc func goBack() { tab?.webView?.goBack() }
     @objc func goForward() { tab?.webView?.goForward() }
 
@@ -379,7 +385,7 @@ final class Commands: NSObject, NSMenuDelegate, NSMenuItemValidation {
         switch item.action {
         case #selector(goBack): return tab?.canGoBack == true
         case #selector(goForward): return tab?.canGoForward == true
-        case #selector(reload), #selector(moveTabToNewWindow), #selector(find): return tab != nil
+        case #selector(reload), #selector(reloadIgnoringCache), #selector(moveTabToNewWindow), #selector(find): return tab != nil
         case #selector(togglePinned):
             item.title = tabs?.layout.selected.map { tabs?.layout.isPinned($0) == true } == true ? "Unpin Tab" : "Pin Tab"
             return tab != nil
