@@ -95,3 +95,35 @@ enum Diagnostics {
         return "\(seen.count) colors (\(cg.width)x\(cg.height), e.g. #\(first))"
     }
 }
+
+/// Reports a page's uncaught errors, rejected promises, failed script and style loads and
+/// content-security-policy blocks to the diagnostics log, from iSmith's own script world. At most
+/// 20 a page; addresses without their query.
+final class PageErrorReporter: NSObject, WKScriptMessageHandler {
+    static let handlerName = "iSmithPageErrors"
+    static let source = """
+    (() => {
+      let left = 20;
+      const strip = u => String(u || '').split(/[?#]/)[0];
+      const send = (kind, text) => {
+        if (left-- <= 0) return;
+        try { webkit.messageHandlers.\(handlerName).postMessage(kind + ' ' + strip(location.href) + (window === top ? '' : ' (frame)') + ' :: ' + String(text).slice(0, 600)); } catch (e) {}
+      };
+      addEventListener('error', e => {
+        const t = e.target;
+        if (t && t !== window && (t.src || t.href)) { send('load-failed', (t.tagName || '') + ' ' + strip(t.src || t.href)); return; }
+        send('error', (e.message || '') + ' @' + strip(e.filename) + ':' + (e.lineno || 0) + ':' + (e.colno || 0) + ' ' + ((e.error && e.error.stack) || '').slice(0, 300));
+      }, true);
+      addEventListener('unhandledrejection', e => {
+        const r = e.reason;
+        send('rejection', (r && (r.stack || r.message)) || r);
+      });
+      document.addEventListener('securitypolicyviolation', e => send('csp', e.violatedDirective + ' ' + strip(e.blockedURI)));
+    })();
+    """
+
+    func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard let text = message.body as? String else { return }
+        MainActor.assumeIsolated { Diagnostics.log("page \(text)") }
+    }
+}

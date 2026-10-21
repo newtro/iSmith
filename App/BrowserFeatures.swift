@@ -16,6 +16,9 @@ extension BrowserState {
         controller.addUserScript(WKUserScript(source: BrowserWebView.contextScript, injectionTime: .atDocumentStart,
                                               forMainFrameOnly: false, in: notifications.world))
         controller.add(contextReporter, contentWorld: notifications.world, name: BrowserWebView.contextHandler)
+        controller.addUserScript(WKUserScript(source: PageErrorReporter.source, injectionTime: .atDocumentStart,
+                                              forMainFrameOnly: false, in: notifications.world))
+        controller.add(pageErrorReporter, contentWorld: notifications.world, name: PageErrorReporter.handlerName)
     }
 
     // MARK: - Link context menu

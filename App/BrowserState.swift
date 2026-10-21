@@ -64,6 +64,7 @@ final class BrowserState: NSObject, ObservableObject {
     /// Certificates the user chose to trust on a warning page, until the app quits.
     let certificateExceptions = CertificateExceptions()
     let contextReporter = ContextMenuReporter()
+    let pageErrorReporter = PageErrorReporter()
     /// Link routing (P6): rules, the Default space, last-used spaces and learned rules.
     let routing: LinkRouter
     /// Where this run keeps its files.
