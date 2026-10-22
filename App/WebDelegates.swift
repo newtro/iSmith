@@ -236,6 +236,7 @@ extension BrowserState: WKNavigationDelegate {
     /// inline.
     func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse,
                  decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
+        phpCheckResponse(navigationResponse, in: webView)
         if let http = navigationResponse.response as? HTTPURLResponse,
            let disposition = http.value(forHTTPHeaderField: "Content-Disposition"),
            disposition.trimmingCharacters(in: .whitespaces).lowercased().hasPrefix("attachment") {
@@ -250,6 +251,7 @@ extension BrowserState: WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, navigationResponse: WKNavigationResponse, didBecome download: WKDownload) {
         trackDownload(download, from: webView)
+        phpCheckDownloaded(navigationResponse, in: webView)
         // The navigation became a download and never commits: the page on screen keeps its own
         // blocking setting.
         if navigationResponse.isForMainFrame, let (_, _, tab) = owner(of: webView) {
@@ -268,6 +270,7 @@ extension BrowserState: WKNavigationDelegate {
         tab.committedHost = webView.url?.host
         tab.certificateProblem = nil
         tab.retryURL = nil
+        phpCheckCommitted(webView, tab: tab)
         (webView as? BrowserWebView)?.editedSinceLoad = false
         // Questions from the page that's gone no longer apply.
         let prompts = tab.prompts

@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import SignInSync
+import SiteCheck
 import SwiftUI
 import UniformTypeIdentifiers
 import WebKit
@@ -66,6 +67,12 @@ final class Tab: ObservableObject, Identifiable {
     var movedInPage: ((URL) -> Void)?
     /// A certificate problem stopped the last navigation; the tab shows a warning page.
     @Published var certificateProblem: CertificateProblem?
+    /// What the page's responses say about its server's PHP version (PHP2Shell); nil when the
+    /// check is off or the page isn't http(s).
+    @Published var phpCheck: PHPCheck?
+    var phpHistory = PHPCheckHistory()
+    /// The page already showed its PHP2Shell warning bar.
+    var phpWarned = false
     /// Find in page (⌘F).
     @Published var findShown = false
     @Published var findText = ""

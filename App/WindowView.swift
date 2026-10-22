@@ -359,6 +359,7 @@ private struct Toolbar: View {
                     .overlay(Capsule().stroke(space.color.opacity(0.45)))
                     .fixedSize()
                 }
+                PHPCheckButton(tab: tab)
                 ShieldButton(shields: browser.shields, tab: tab)
                 if browser.data != nil, tab.url != nil {
                     Button { editingBookmark = browser.bookmarkForCurrentPage(in: window) } label: {

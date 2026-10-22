@@ -20,6 +20,8 @@ packages:
     path: Packages/AgentKit
   Codes:
     path: Packages/Codes
+  SiteCheck:
+    path: Packages/SiteCheck
   Sparkle:
     url: https://github.com/sparkle-project/Sparkle
     exactVersion: 2.10.0
@@ -47,6 +49,7 @@ targets:
       - package: AgentKit
       - package: Codes
         product: CodesXPC
+      - package: SiteCheck
       - package: Sparkle
       # iSmith Agent (SMS codes from the phone), in Contents/Library/LoginItems; its launchd plist
       # is written by the script below.

@@ -218,6 +218,13 @@ seed or runs longer.
 - **Ads and trackers** are blocked with EasyList and EasyPrivacy (refreshed weekly). The shield
   in the address bar turns blocking off or on for the whole site and reloads it; Settings ▸
   Privacy has the global switch, the list versions, "Update Now" and the allowed sites.
+- **Unpatched PHP servers (PHP2Shell)**: when a page's own responses report a PHP version older
+  than the PHP2Shell fix (CVE-2026-109618, CVE-2026-109619; fixed in 8.2.35, 8.3.36, 8.4.27,
+  8.5.12), a red triangle shows in the address bar (orange when a Linux distribution may have
+  backported the fix); click it for what the server reported. The first time a password or card
+  field gets focus on such a site, a bar warns you. iSmith never contacts the site for this; it
+  reads headers the page already sent. Off in Settings ▸ Privacy. Ported from
+  [php2shell-site-check](https://github.com/newtro/php2shell-site-check).
 - **Passwords**: after you sign in, a bar offers to save (or update) the password; you can fix
   the username first, or say "Never for This Site". Click a username or password field to pick
   a saved login, or press ⌘\\ to fill the site's login; sign-up fields offer a strong password.

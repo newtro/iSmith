@@ -232,6 +232,7 @@ struct PrivacySettings: View {
     @ObservedObject var shields: Shields
     @State private var updating = false
     @State private var updateResult: String?
+    @AppStorage(PHPCheck.enabledKey) private var phpCheck = true
 
     var body: some View {
         Form {
@@ -248,6 +249,11 @@ struct PrivacySettings: View {
                         .disabled(updating || shields.controller == nil || !shields.enabled)
                     if let updateResult { Text(updateResult).font(.caption).foregroundStyle(.secondary) }
                 }
+            }
+            Section {
+                Toggle("Warn about unpatched PHP servers (PHP2Shell)", isOn: $phpCheck)
+                Text("Reads the PHP version a site's own responses report, and warns before you type a password or card number on a server older than the PHP2Shell fix (CVE-2026-109618, CVE-2026-109619). iSmith never contacts the site for this.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             Section("Sites where ads and trackers are allowed") {
                 let sites = shields.allowedSites

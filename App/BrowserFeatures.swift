@@ -19,6 +19,10 @@ extension BrowserState {
         controller.addUserScript(WKUserScript(source: PageErrorReporter.source, injectionTime: .atDocumentStart,
                                               forMainFrameOnly: false, in: notifications.world))
         controller.add(pageErrorReporter, contentWorld: notifications.world, name: PageErrorReporter.handlerName)
+        sensitiveFieldReporter.browser = self
+        controller.addUserScript(WKUserScript(source: SensitiveFieldReporter.source, injectionTime: .atDocumentStart,
+                                              forMainFrameOnly: true, in: notifications.world))
+        controller.add(sensitiveFieldReporter, contentWorld: notifications.world, name: SensitiveFieldReporter.handlerName)
     }
 
     // MARK: - Link context menu

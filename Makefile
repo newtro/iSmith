@@ -22,7 +22,7 @@ build: project
 # and passwords; Blocking: ad and tracker blocking; Passwords: store, matching, autofill;
 # BrowserData: history, bookmarks, site settings, downloads, agent threads; Routing: link rules and
 # learning; AgentKit: the Codex app-server backend against a fake server; Codes: 2FASync's crypto
-# vectors, receiver rules and relay client against a fake relay), then the app-hosted tests.
+# vectors, receiver rules and relay client against a fake relay; SiteCheck: the PHP2Shell version rules), then the app-hosted tests.
 test: test-package test-app
 
 test-package:
@@ -34,6 +34,7 @@ test-package:
 	cd Packages/Routing && swift test
 	cd Packages/AgentKit && swift test
 	cd Packages/Codes && swift test
+	cd Packages/SiteCheck && swift test
 
 test-app: project
 	$(XCODEBUILD) test
@@ -68,4 +69,4 @@ $(PROJECT): project.yml App AppTests Agent
 	@touch $(PROJECT)
 
 clean:
-	rm -rf $(DERIVED) $(PROJECT) Packages/SignInSync/.build Packages/BraveImport/.build Packages/Blocking/.build Packages/Passwords/.build Packages/BrowserData/.build Packages/Routing/.build Packages/AgentKit/.build Packages/Codes/.build
+	rm -rf $(DERIVED) $(PROJECT) Packages/SignInSync/.build Packages/BraveImport/.build Packages/Blocking/.build Packages/Passwords/.build Packages/BrowserData/.build Packages/Routing/.build Packages/AgentKit/.build Packages/Codes/.build Packages/SiteCheck/.build
