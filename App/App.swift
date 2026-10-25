@@ -253,6 +253,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
     let state: WindowState
     private let browser: BrowserState
     private let closed: (UUID) -> Void
+    private let home: WindowHome
 
     init(state: WindowState, browser: BrowserState, cascadeFrom previous: NSWindow?, closed: @escaping (UUID) -> Void) {
         self.state = state
@@ -293,6 +294,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
             window.center()
         }
         state.window = window
+        home = WindowHome(window: window, saved: state.savedFrame)
+        state.awayFrame = { [weak home] in home?.awayDescriptor }
         super.init(window: window)
         window.delegate = self
     }
@@ -309,16 +312,37 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
         browser.windowBecameMain(state)
     }
 
-    func windowDidMove(_ notification: Notification) { browser.scheduleRefresh() }
-    func windowDidEndLiveResize(_ notification: Notification) { browser.scheduleRefresh() }
+    func windowDidMove(_ notification: Notification) {
+        home.windowMoved()
+        browser.scheduleRefresh()
+    }
+
+    func windowDidResize(_ notification: Notification) {
+        guard window?.inLiveResize != true else { return }
+        home.windowMoved()
+    }
+
+    func windowDidEndLiveResize(_ notification: Notification) {
+        home.remember()
+        browser.scheduleRefresh()
+    }
+
+    func windowDidExitFullScreen(_ notification: Notification) { home.windowMoved() }
+    func windowDidDeminiaturize(_ notification: Notification) { home.returnHome() }
+
+    /// The user dragged the window (see `NSWindow.dragWindow(with:)`).
+    func userMovedWindow() { home.remember() }
 }
 
 extension NSWindow {
     /// Moves the window with the mouse, for chrome that acts as the title bar. iSmith windows aren't
     /// movable on their own (see `BrowserWindowController`), so this allows it just for this drag.
     func dragWindow(with event: NSEvent) {
+        let before = frame
         isMovable = true
         performDrag(with: event)
         isMovable = false
+        // A click without a move isn't a placement.
+        if frame != before { (delegate as? BrowserWindowController)?.userMovedWindow() }
     }
 }

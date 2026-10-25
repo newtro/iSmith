@@ -330,6 +330,8 @@ final class WindowState: ObservableObject, Identifiable {
     weak var window: NSWindow?
     /// The frame to open at, from the saved session.
     var savedFrame: String?
+    /// The frame to save while the window's display is away (see `WindowHome`).
+    var awayFrame: (() -> String?)?
     /// The frame to open at for a window made from a dragged tab.
     var initialFrame: NSRect?
 
@@ -353,7 +355,7 @@ final class WindowState: ObservableObject, Identifiable {
     func removeSpace(_ id: String) { spaces[id] = nil }
 
     func record(spaceOrder: [String]) -> WindowRecord {
-        WindowRecord(id: id, frame: window?.frameDescriptor ?? savedFrame, activeSpace: activeSpaceID,
+        WindowRecord(id: id, frame: awayFrame?() ?? window?.frameDescriptor ?? savedFrame, activeSpace: activeSpaceID,
                      spaces: spaceOrder.compactMap { spaces[$0] }.filter { !$0.layout.isEmpty }.map(\.record),
                      agentDock: agentDock, verticalTabs: verticalTabs)
     }
