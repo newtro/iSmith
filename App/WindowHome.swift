@@ -1,4 +1,5 @@
 import AppKit
+import os
 
 /// Where the user put a window: its frame and the display it was on. When that display goes away
 /// (a monitor turned off or unplugged), macOS moves the window to a remaining display; when the
@@ -18,11 +19,20 @@ final class WindowHome {
     /// When the display arrangement last changed. Moves macOS makes around that time are its own,
     /// not the user's.
     private var screensChangedAt = Date.distantPast
+    /// The displays as of the last change notice. macOS moves windows onto a display that came
+    /// back before it sends the notice, so a move while these differ is part of the change.
+    private var knownScreens = WindowHome.currentScreens()
     private var pendingMove: DispatchWorkItem?
     private var observer: NSObjectProtocol?
 
     /// How long after a display change a move that isn't the user's is treated as macOS's.
     private static let settleTime: TimeInterval = 2
+    private static let log = Logger(subsystem: "com.scottsmith.ismith", category: "windows")
+
+    private func trace(_ event: String) {
+        guard let window else { return }
+        Self.log.info("\(event, privacy: .public): frame \(NSStringFromRect(window.frame), privacy: .public) screen \(Self.id(of: window.screen) ?? "-", privacy: .public) visible \(window.isVisible) onActiveSpace \(window.isOnActiveSpace) home \(self.offset.map(NSStringFromRect) ?? "-", privacy: .public) on \(self.screenID ?? "-", privacy: .public) away \(self.isAway)")
+    }
 
     /// `saved` is the session's frame descriptor the window was opened with, if any.
     init(window: NSWindow, saved: String?) {
@@ -78,6 +88,7 @@ final class WindowHome {
 
     /// The user placed the window (dragged it, resized it, or it just opened): this is home.
     func remember() {
+        trace("remember")
         pendingMove?.cancel()
         guard let window, !window.styleMask.contains(.fullScreen), !window.isMiniaturized,
               let screen = window.screen else { return }
@@ -90,6 +101,7 @@ final class WindowHome {
     /// The window moved or resized without the user dragging it: tiling, the Window menu, or macOS
     /// rehoming it because its display went away.
     func windowMoved() {
+        trace("moved")
         guard let window, !window.styleMask.contains(.fullScreen) else { return }
         guard hasHome else { return remember() }
         // On the same display it's the user's (tiling, zoom), unless the displays are changing.
@@ -107,18 +119,29 @@ final class WindowHome {
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.settleTime, execute: check)
     }
 
-    private var settling: Bool { Date().timeIntervalSince(screensChangedAt) < Self.settleTime }
+    private var settling: Bool {
+        Date().timeIntervalSince(screensChangedAt) < Self.settleTime || Self.currentScreens() != knownScreens
+    }
+
+    private static func currentScreens() -> Set<String> { Set(NSScreen.screens.compactMap { id(of: $0) }) }
 
     private func screensChanged() {
+        trace("screens changed: \(NSScreen.screens.count) displays")
         screensChangedAt = Date()
+        knownScreens = Self.currentScreens()
         pendingMove?.cancel()
         // macOS finishes arranging windows after the notification; put the window back after it.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.returnHome() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard let self else { return }
+            self.knownScreens = Self.currentScreens()
+            self.returnHome()
+        }
     }
 
     /// Puts the window back on its home display, if that display is here and the window isn't.
     /// Also called when the window comes back from the Dock, in case the display returned meanwhile.
     func returnHome() {
+        trace("return home")
         guard let window, let offset, let screen = homeScreen, !window.styleMask.contains(.fullScreen),
               !window.isMiniaturized else { return }
         var target = offset.offsetBy(dx: screen.frame.minX, dy: screen.frame.minY)
@@ -129,7 +152,10 @@ final class WindowHome {
         target.size.height = min(target.height, visible.height)
         target.origin.x = min(max(target.minX, visible.minX), visible.maxX - target.width)
         target.origin.y = min(max(target.minY, visible.minY), visible.maxY - target.height)
-        if window.frame != target { window.setFrame(target, display: true) }
+        if window.frame != target {
+            window.setFrame(target, display: true)
+            trace("returned")
+        }
         if screenID == nil { remember() }
     }
 

@@ -167,13 +167,43 @@ final class AgentStage {
     private var windows: [ObjectIdentifier: NSWindow] = [:]
     /// The page size agent tabs get offscreen (the last browser window's web area, roughly).
     var size = NSSize(width: 1280, height: 800)
+    /// Where stage windows wait, off every screen.
+    private static let parking = NSPoint(x: -20_000, y: -20_000)
+    private var observer: NSObjectProtocol?
+    private var moveObservers: [ObjectIdentifier: NSObjectProtocol] = [:]
+
+    init() {
+        // When displays change (a monitor turned off or on), macOS moves windows it finds off
+        // every screen onto one, where a stage window shows as a black box. Park them again.
+        observer = NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
+                                                          object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.park() }
+        }
+    }
+
+    deinit {
+        if let observer { NotificationCenter.default.removeObserver(observer) }
+    }
+
+    private func park() {
+        for window in windows.values where window.frame.origin != Self.parking {
+            window.setFrameOrigin(Self.parking)
+        }
+        // macOS may finish rearranging after the notice.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            guard let self else { return }
+            for window in self.windows.values where window.frame.origin != Self.parking {
+                window.setFrameOrigin(Self.parking)
+            }
+        }
+    }
 
     /// Makes sure `webView` is in a window. Returns false if it can't be (no web view).
     func host(_ webView: WKWebView) {
         if webView.window != nil { return }
         let key = ObjectIdentifier(webView)
         let window = windows[key] ?? {
-            let w = NSWindow(contentRect: NSRect(x: -20_000, y: -20_000, width: size.width, height: size.height),
+            let w = NSWindow(contentRect: NSRect(origin: Self.parking, size: size),
                              styleMask: [.borderless], backing: .buffered, defer: false)
             w.isReleasedWhenClosed = false
             w.isExcludedFromWindowsMenu = true
@@ -181,6 +211,13 @@ final class AgentStage {
             w.ignoresMouseEvents = true
             w.hasShadow = false
             w.animationBehavior = .none
+            // Back off screen the moment macOS moves it on (see `init`).
+            moveObservers[key] = NotificationCenter.default.addObserver(forName: NSWindow.didMoveNotification, object: w,
+                                                                        queue: .main) { [weak w] _ in
+                MainActor.assumeIsolated {
+                    if let w, w.frame.origin != Self.parking { w.setFrameOrigin(Self.parking) }
+                }
+            }
             windows[key] = w
             return w
         }()
@@ -202,6 +239,7 @@ final class AgentStage {
                 window.contentView = nil
                 window.orderOut(nil)
                 windows[key] = nil
+                forget(key)
             }
         }
     }
@@ -210,9 +248,14 @@ final class AgentStage {
     func release(_ webView: WKWebView) {
         let key = ObjectIdentifier(webView)
         guard let window = windows.removeValue(forKey: key) else { return }
+        forget(key)
         if webView.window === window { webView.removeFromSuperview() }
         window.contentView = nil
         window.orderOut(nil)
+    }
+
+    private func forget(_ key: ObjectIdentifier) {
+        if let observer = moveObservers.removeValue(forKey: key) { NotificationCenter.default.removeObserver(observer) }
     }
 
     var count: Int { windows.count }
